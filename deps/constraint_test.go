@@ -110,6 +110,7 @@ func TestMatch_EqualityRequiresSameComponentCount(t *testing.T) {
 	// glr-9sx: "== 5.1" must NOT match candidate 5.1.0 (upstream __eq checks
 	// #v1 == #v2 first), while the ordering ops stay order-equivalent.
 	v, _ := deps.ParseVersion("5.1.0")
+
 	for _, tc := range []struct {
 		in   string
 		want bool
@@ -132,6 +133,7 @@ func TestMatch_RevisionlessConstraintIgnoresCandidateRevision(t *testing.T) {
 	// glr-0eo: "== 1.0" (no revision) matches candidate 1.0-1 because __eq
 	// ignores the revision unless BOTH sides carry one.
 	v, _ := deps.ParseVersion("1.0-1")
+
 	for _, tc := range []struct {
 		in   string
 		want bool

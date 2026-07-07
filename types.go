@@ -31,6 +31,27 @@ type Rockspec struct {
 	Source Source
 	// Build describes how the rock is built and installed.
 	Build Build
+	// Deploy mirrors the rockspec top-level `deploy = {...}` table.
+	Deploy Deploy
+	// HasBuild records whether a `build` table was present in the rockspec at
+	// all. Upstream distinguishes an absent build table ("build table not
+	// specified") from one present without a type ("build type not
+	// specified") for pre-3.0 formats; an empty Build.Type alone cannot tell
+	// the two apart.
+	HasBuild bool
+	// RawSource is the exact bytes of the `.rockspec` file this spec was
+	// evaluated from. Eval populates it so the installer can copy the rockspec
+	// verbatim into the per-rock install dir (as upstream does). Empty for
+	// hand-constructed specs.
+	RawSource []byte
+	// Per-list dependency platform overrides (dependencies.platforms etc.),
+	// keyed by platform name. MergePlatforms index-merges them into the
+	// corresponding flat lists and clears these. External overrides overwrite
+	// entries by symbolic name.
+	DependenciesPlatforms         map[string][]Dep
+	BuildDependenciesPlatforms    map[string][]Dep
+	TestDependenciesPlatforms     map[string][]Dep
+	ExternalDependenciesPlatforms map[string]map[string]ExternalDep
 }
 
 // Description mirrors the rockspec `description = {...}` table.
@@ -60,6 +81,9 @@ type Source struct {
 	Dir string
 	// Module is the legacy SCM module name (cvs/svn); rarely used.
 	Module string
+	// Platforms carries per-platform Source overrides from source.platforms.
+	// MergePlatforms folds them into the top-level Source fields and clears this.
+	Platforms map[string]Source
 }
 
 // Build mirrors the rockspec `build = {...}` table.
@@ -81,16 +105,31 @@ type Build struct {
 	Variables map[string]string
 
 	// make backend.
+	Makefile         string
 	BuildTarget      string
 	BuildVariables   map[string]string
 	InstallTarget    string
 	InstallVariables map[string]string
+	// BuildPass/InstallPass gate the make (always) and cmake (format >= 3.0)
+	// build/install phases. nil means the default (run the phase); an explicit
+	// false skips it. Tri-state models Lua's nil→default-true.
+	BuildPass   *bool
+	InstallPass *bool
 
 	// command backend.
 	BuildCommand   string
 	InstallCommand string
 
 	Platforms map[string]Build
+}
+
+// Deploy mirrors the rockspec top-level `deploy = {...}` table. Upstream
+// repos.should_wrap_bin_scripts consults deploy.wrap_bin_scripts to decide
+// whether command scripts get a launcher wrapper.
+type Deploy struct {
+	// WrapBinScripts is tri-state: nil = field absent (default: wrap),
+	// non-nil = the rockspec's explicit deploy.wrap_bin_scripts value.
+	WrapBinScripts *bool
 }
 
 // Module is a single entry in the rockspec `build.modules` table.
@@ -119,7 +158,11 @@ type BuildInstall struct {
 // list. Name is the dependency rock name; Constraints is the AND'd set of
 // version constraints from "foo >= 1, < 2".
 type Dep struct {
-	Name        string
+	Name string
+	// Namespace is the "user" half of a namespaced dependency written
+	// "user/rock" (upstream util.split_namespace). Empty for the common
+	// unqualified form.
+	Namespace   string
 	Constraints []VersionConstraint
 }
 
@@ -230,6 +273,12 @@ type ShowInfo struct {
 // `<tree>/share/tarantool/rocks/<name>/<ver>/rock_manifest`.
 // Each map is path → md5 hex.
 type RockManifest struct {
+	// RockspecFile is the versioned rockspec filename (`<name>-<version>.rockspec`)
+	// under which the rockspec's md5 is keyed, matching upstream make_rock_manifest
+	// (which walks fs.find(install_dir) where the rockspec was copied under that
+	// name). Empty when no rockspec was recorded.
+	RockspecFile string
+	// Rockspec is the md5 of the rockspec file (keyed by RockspecFile).
 	Rockspec string
 	Lua      map[string]string
 	Lib      map[string]string

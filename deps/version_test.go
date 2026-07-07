@@ -147,6 +147,7 @@ func TestCompare_UnknownWordByteFallback(t *testing.T) {
 	// than both collapsing to 0.
 	work, _ := deps.ParseVersion("work")
 	patch, _ := deps.ParseVersion("patch")
+
 	require.Equal(t, []float64{0.119}, work.Components)
 	require.Equal(t, []float64{0.112}, patch.Components)
 	assert.Equal(t, 1, deps.Compare(work, patch), "Compare(work, patch) want 1")

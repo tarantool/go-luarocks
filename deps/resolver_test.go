@@ -41,6 +41,8 @@ func mustDep(t *testing.T, name, expr string) rocks.Dep {
 // TestResolveWithoutFetcherStopsAtPreloadedSpecs shows the baseline: a bare
 // index that preloads nothing resolves only the root's direct dependencies.
 func TestResolveWithoutFetcherStopsAtPreloadedSpecs(t *testing.T) {
+	t.Parallel()
+
 	idx := bareIndex{
 		"a": {{Name: "a", Version: mustVer(t, "1.0.0-1"), URL: "a-1.0.0-1"}},
 		"b": {{Name: "b", Version: mustVer(t, "2.0.0-1"), URL: "b-2.0.0-1"}},
@@ -63,6 +65,8 @@ func TestResolveWithoutFetcherStopsAtPreloadedSpecs(t *testing.T) {
 // TestResolveWithInstalledSkipsSatisfied — glr-n88: a dependency already
 // satisfied by an installed rock is skipped (not queried or added to the plan).
 func TestResolveWithInstalledSkipsSatisfied(t *testing.T) {
+	t.Parallel()
+
 	idx := bareIndex{
 		"a": {{Name: "a", Version: mustVer(t, "1.0.0-1"), URL: "a-1.0.0-1"}},
 		"b": {{Name: "b", Version: mustVer(t, "2.0.0-1"), URL: "b-2.0.0-1"}},
@@ -96,6 +100,8 @@ func TestResolveWithInstalledSkipsSatisfied(t *testing.T) {
 // TestResolveWithInstalledStillInstallsUnsatisfied — an installed version that
 // does NOT satisfy the constraint does not cause a skip.
 func TestResolveWithInstalledStillInstallsUnsatisfied(t *testing.T) {
+	t.Parallel()
+
 	idx := bareIndex{
 		"b": {{Name: "b", Version: mustVer(t, "2.0.0-1"), URL: "b-2.0.0-1"}},
 	}
@@ -119,6 +125,8 @@ func TestResolveWithInstalledStillInstallsUnsatisfied(t *testing.T) {
 // TestResolveWithSpecFetcherWalksTransitively shows the fetcher completing the
 // closure, fetching only the chosen version of each name.
 func TestResolveWithSpecFetcherWalksTransitively(t *testing.T) {
+	t.Parallel()
+
 	idx := bareIndex{
 		"a": {
 			{Name: "a", Version: mustVer(t, "0.5.0-1"), URL: "a-0.5.0-1"},

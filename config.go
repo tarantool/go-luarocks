@@ -42,12 +42,7 @@ type TarantoolConfig struct {
 	Version    string
 }
 
-// RockspecConfig governs the sandboxed evaluator.
-//
-//   - Env == nil  → os.getenv pass-through to the host process env (matches
-//     upstream luarocks 1:1).
-//   - Env != nil  → os.getenv returns Env[name] if present, else nil.
-//   - Empty non-nil map → os.getenv always returns nil.
-type RockspecConfig struct {
-	Env map[string]string
-}
+// RockspecConfig governs the sandboxed evaluator. It carries no options today
+// (the evaluator runs the rockspec in an all-nil environment matching upstream,
+// with no host env access); it is retained as the Eval configuration seam.
+type RockspecConfig struct{}

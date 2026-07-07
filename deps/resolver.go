@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -125,9 +126,7 @@ func WithProvided(provided map[string]rocks.Version) Option {
 			r.provided = map[string]rocks.Version{}
 		}
 
-		for k, v := range provided {
-			r.provided[k] = v
-		}
+		maps.Copy(r.provided, provided)
 	}
 }
 
