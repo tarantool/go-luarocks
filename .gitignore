@@ -1,0 +1,22 @@
+# Vendored upstream sources kept locally for research, not part of this repo.
+/luarocks/
+/tt/
+/docs/gopher-lua/
+
+# Go build artifacts
+*.test
+/bin/
+/dist/
+/coverage.out
+/coverage.txt
+/coverage.html
+
+# Git worktrees
+/.worktrees/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

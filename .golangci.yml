@@ -1,0 +1,65 @@
+# golangci-lint v2 configuration.
+#
+# Policy: enable the full linter set (`default: all`) and fix findings in code.
+# The disabled set below is intentional: policy/whitelist tools that need
+# project config, one deprecated linter, gosec (handled in code via perm
+# hardening), and a group of subjective style/complexity checks the project has
+# opted out of. Everything not listed here is expected to pass with real fixes.
+# Run locally with: golangci-lint run ./...
+version: "2"
+
+run:
+  # Lint test files too (strict).
+  tests: true
+
+linters:
+  default: all
+  disable:
+    # --- Policy / whitelist tools: flag everything until configured ---
+    - depguard      # needs an explicit import allow/deny policy (none defined).
+    - exhaustruct   # needs per-struct include patterns; otherwise flags every
+                    # partial struct literal — noise, not signal.
+
+    # --- Deprecated ---
+    - wsl           # deprecated since v2.2.0; superseded by wsl_v5 (still on via
+                    # `default: all`). Keeping both doubles every whitespace
+                    # finding and prints a deprecation warning each run.
+
+    # --- Security scanner: high false-positive rate for this codebase ---
+    - gosec         # G304/G305/G110 fire on internally-controlled paths and
+                    # trusted local archives; genuine perm hardening (0o600
+                    # files / 0o750 dirs) is kept in code regardless.
+
+    # --- Subjective style: naming, formatting, line/func shape ---
+    - varnamelen    # short names (i, k, l, w) are idiomatic and readable here.
+    - wrapcheck     # not every boundary error needs fmt.Errorf wrapping.
+    - err113        # sentinel-only error policy; we use plain fmt.Errorf freely.
+    - noinlineerr   # `if err := f(); err != nil` is idiomatic Go.
+    - nonamedreturns # named returns are used deliberately in a few spots.
+    - lll           # long lines are mostly tables/URLs/struct tags.
+    - gochecknoglobals # package-level lookup tables / dispatch maps are by design.
+
+    # --- Subjective complexity thresholds ---
+    - cyclop        # cyclomatic-complexity ceiling; parsers/dispatchers exceed it.
+    - gocognit      # cognitive-complexity ceiling — same story.
+    - funlen        # function-length ceiling.
+    - funcorder     # decl-ordering preference, not correctness.
+
+    # --- Catch-all meta-linter, overlaps the above ---
+    - revive        # broad style ruleset duplicating disabled checks above.
+  exclusions:
+    # Don't fail on findings in machine-generated files.
+    generated: lax
+    paths:
+      # Local research clones (separate modules / vendored upstream), not ours.
+      - docs/gopher-lua
+      - internal/luarocks/src
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    paths:
+      - docs/gopher-lua
+      - internal/luarocks/src
