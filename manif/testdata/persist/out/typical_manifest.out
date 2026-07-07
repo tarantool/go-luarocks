@@ -1,0 +1,40 @@
+commands = {}
+dependencies = {
+   metrics = {
+      ["1.0.0-1"] = {
+         {
+            constraints = {
+               {
+                  op = ">=",
+                  version = {
+                     3, 1, 0, string = "3.1.0"
+                  }
+               }
+            },
+            name = "checks"
+         }
+      }
+   }
+}
+modules = {
+   metrics = {
+      "metrics/1.0.0-1"
+   },
+   ["metrics.collectors.counter"] = {
+      "metrics/1.0.0-1"
+   }
+}
+repository = {
+   metrics = {
+      ["1.0.0-1"] = {
+         {
+            arch = "installed",
+            commands = {},
+            modules = {
+               metrics = "lua/metrics/init.lua",
+               ["metrics.collectors.counter"] = "lua/metrics/collectors/counter.lua"
+            }
+         }
+      }
+   }
+}

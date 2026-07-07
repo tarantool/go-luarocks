@@ -1,0 +1,7 @@
+return {
+   empty_a = {},
+   empty_b = {},
+   nested_empty = {
+      inner = {},
+   },
+}

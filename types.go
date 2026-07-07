@@ -227,6 +227,11 @@ type RepoEntry struct {
 	Arch     string
 	Modules  map[string]string
 	Commands map[string]string
+	// Dependencies is the resolved name→version map of the rock's installed
+	// dependencies, mirroring upstream repo.dependencies (writer.lua
+	// update_dependencies → scan_deps). Always emitted for an installed entry
+	// (as {} when the rock has no deps).
+	Dependencies map[string]string
 }
 
 // VersionedRock is one row from a RemoteIndex.Query result: a (name,

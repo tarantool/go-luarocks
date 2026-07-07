@@ -1,0 +1,8 @@
+backslash = "a\\b"
+multiline = [[
+line1
+line2]]
+non_ascii = "café"
+null_byte = "a\0b"
+quoted = "he said \"hi\""
+tab_string = "a\9b"
