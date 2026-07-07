@@ -84,6 +84,10 @@ type Source struct {
 	// Platforms carries per-platform Source overrides from source.platforms.
 	// MergePlatforms folds them into the top-level Source fields and clears this.
 	Platforms map[string]Source
+	// Identifier pins a scm-/dev- version to a concrete git commit, formatted
+	// "YYYYMMDD.HHMMSS.<shorthash>" from the HEAD commit (upstream
+	// fetch/git.lua:60-77). Set by the git fetcher; empty otherwise.
+	Identifier string
 }
 
 // Build mirrors the rockspec `build = {...}` table.
