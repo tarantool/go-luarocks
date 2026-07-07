@@ -140,10 +140,14 @@ type ExternalDep struct {
 // rock_manifest filenames).
 type Version struct {
 	Raw        string
-	Components []int
+	Components []float64
 	Revision   int
-	IsSCM      bool
-	IsDev      bool
+	// HasRevision distinguishes an explicit "-N" suffix from a defaulted
+	// Revision of 0. Upstream's __eq/__lt compare revisions only when BOTH
+	// operands carry one; the Go API needs this flag to tell "absent" from 0.
+	HasRevision bool
+	IsSCM       bool
+	IsDev       bool
 }
 
 // VersionConstraint is one operator+version pair from a constraint

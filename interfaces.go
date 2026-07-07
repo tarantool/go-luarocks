@@ -31,7 +31,10 @@ type Builder interface {
 // The default implementation is remote.HTTPRemoteIndex, constructed by
 // client.New(cfg) from cfg.Servers. Tests inject fakes via this interface.
 type RemoteIndex interface {
-	Query(ctx context.Context, name string) ([]VersionedRock, error)
+	// Query returns candidate versions of `name`. A non-empty namespace selects
+	// the server's per-namespace manifest (/manifests/<namespace>/) and filters
+	// results to that namespace, mirroring upstream manifest_search.
+	Query(ctx context.Context, name, namespace string) ([]VersionedRock, error)
 }
 
 // ManifestStore reads and writes the on-disk manifest files in a tree.
