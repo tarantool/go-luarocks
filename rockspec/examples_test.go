@@ -3,7 +3,6 @@ package rockspec_test
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -35,19 +34,21 @@ build = {
 func ExampleEval() {
 	dir, err := os.MkdirTemp("", "rockspec-example")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer os.RemoveAll(dir)
+
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	path := filepath.Join(dir, "example-1.0-1.rockspec")
 	if err := os.WriteFile(path, []byte(exampleRockspec), 0o644); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	spec, err := rockspec.Eval(path, rocks.RockspecConfig{})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	fmt.Println(spec.Package, spec.Version, spec.Build.Type)
 	fmt.Println(spec.Description.Summary)
 	// Output:

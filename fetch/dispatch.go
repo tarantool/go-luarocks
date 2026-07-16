@@ -154,7 +154,6 @@ func schemeOf(rawURL string) (string, error) {
 // backendFor returns the registered Backend for the given scheme, or
 // ErrUnsupportedRockspecFeature wrapped with the scheme.
 //
-
 //nolint:ireturn // dispatch factory: returns the Backend interface selected for the scheme
 func backendFor(scheme string) (Backend, error) {
 	if b, ok := backends[scheme]; ok {

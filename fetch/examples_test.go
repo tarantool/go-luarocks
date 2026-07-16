@@ -3,7 +3,8 @@ package fetch_test
 import (
 	"context"
 	"fmt"
-	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 
@@ -15,43 +16,68 @@ import (
 func ExampleFetch() {
 	srcDir, err := os.MkdirTemp("", "src")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer os.RemoveAll(srcDir)
+
+	defer func() { _ = os.RemoveAll(srcDir) }()
 
 	dstDir, err := os.MkdirTemp("", "dst")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer os.RemoveAll(dstDir)
+
+	defer func() { _ = os.RemoveAll(dstDir) }()
 
 	if err := os.WriteFile(filepath.Join(srcDir, "hello.lua"), []byte("return 42\n"), 0o644); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	got, err := fetch.Fetch(context.Background(), "file://"+srcDir, dstDir)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	body, err := os.ReadFile(filepath.Join(got, "hello.lua"))
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	fmt.Print(string(body))
 	// Output: return 42
 }
 
 // ExampleFetchWith is the options-bearing form: source.tag / source.md5 /
-// insecure hosts / user-agent all ride on Options. (Uses the network for an
-// http(s) URL; shown for documentation.)
+// insecure hosts / user-agent all ride on Options. Here the http backend
+// downloads from an in-process server and verifies the payload's md5 before
+// accepting it.
 func ExampleFetchWith() {
-	_, err := fetch.FetchWith(
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("return { answer = 42 }\n"))
+	}))
+	defer srv.Close()
+
+	dstDir, err := os.MkdirTemp("", "dst")
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = os.RemoveAll(dstDir) }()
+
+	got, err := fetch.FetchWith(
 		context.Background(),
-		"https://example.com/rock-1.0.tar.gz",
-		"/tmp/dest",
-		fetch.Options{MD5: "d41d8cd98f00b204e9800998ecf8427e", UserAgent: "go-luarocks"},
+		srv.URL+"/answer.lua",
+		dstDir,
+		fetch.Options{MD5: "9a411841b564fa0fc78745f8de8f6340", UserAgent: "go-luarocks"},
 	)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
+	body, err := os.ReadFile(filepath.Join(got, "answer.lua"))
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(string(body))
+	// Output: return { answer = 42 }
 }

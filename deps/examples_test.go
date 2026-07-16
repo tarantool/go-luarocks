@@ -3,7 +3,6 @@ package deps_test
 import (
 	"context"
 	"fmt"
-	"log"
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
@@ -14,8 +13,9 @@ import (
 func ExampleParseVersion() {
 	v, err := deps.ParseVersion("1.2.3-4")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	fmt.Println(v.Components, "rev", v.Revision)
 	// Output: [1 2 3] rev 4
 }
@@ -60,6 +60,7 @@ func ExampleEqual() {
 func ExampleParseConstraint() {
 	c, _ := deps.ParseConstraint(">= 1.2.3")
 	fmt.Printf("%s %s\n", c.Op, c.Version.Raw)
+
 	d, _ := deps.ParseConstraint("1.0") // no operator ⇒ implicit "=="
 	fmt.Printf("%s %s\n", d.Op, d.Version.Raw)
 	// Output:
@@ -122,27 +123,34 @@ func ExampleResolve() {
 
 	steps, err := deps.Resolve(context.Background(), root, idx)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	fmt.Println(len(steps), steps[0].Name, steps[0].Version.Raw)
 	// Output: 1 foo 1.0.0-1
 }
 
 // ExampleResolve_withProvided shows the option surface: WithProvided declares
 // a VM-provided version, so a matching dependency is satisfied without an
-// install step. Compile-only (no Output) — it documents the call shape.
+// install step — the plan comes back empty even though the index knows
+// nothing about "tarantool".
 func ExampleResolve_withProvided() {
 	ttVer, _ := deps.ParseVersion("2.11.0-1")
+	cs, _ := deps.ParseConstraints(">= 2.0")
 	root := &rocks.Rockspec{
 		Package: "app", Version: "0.1-1",
+		Dependencies: []rocks.Dep{{Name: "tarantool", Constraints: cs}},
 	}
 	idx := exampleIndex{byName: map[string][]rocks.VersionedRock{}}
 
-	_, err := deps.Resolve(
+	steps, err := deps.Resolve(
 		context.Background(), root, idx,
 		deps.WithProvided(map[string]rocks.Version{"tarantool": ttVer}),
 	)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
+	fmt.Println("install steps:", len(steps))
+	// Output: install steps: 0
 }

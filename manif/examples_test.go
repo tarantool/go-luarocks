@@ -3,7 +3,6 @@ package manif_test
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -45,9 +44,14 @@ func ExampleWrite_nested() {
 func ExampleParse() {
 	v, err := manif.Parse([]byte("name = \"metrics\"\ncount = 3\n"))
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	m := v.(map[string]any)
+
+	m, ok := v.(map[string]any)
+	if !ok {
+		panic("assignments mode always decodes to a map")
+	}
+
 	fmt.Printf("%v %v\n", m["name"], m["count"])
 	// Output: metrics 3
 }
@@ -66,11 +70,13 @@ func ExampleParse_error() {
 func ExampleFileStore() {
 	dir, err := os.MkdirTemp("", "rocks")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer os.RemoveAll(dir)
+
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	store := manif.FileStore{}
+
 	in := &rocks.Manifest{
 		Repository: map[string]map[string]rocks.RepoEntry{
 			"metrics": {"1.0.0-1": {Arch: "installed"}},
@@ -80,13 +86,14 @@ func ExampleFileStore() {
 		Dependencies: map[string]map[string][]rocks.Dep{},
 	}
 	if err := store.WriteTree(dir, in); err != nil { // file lands at <dir>/manifest
-		log.Fatal(err)
+		panic(err)
 	}
 
 	out, err := store.ReadTree(dir)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
 	fmt.Println(out.Repository["metrics"]["1.0.0-1"].Arch, out.Modules["metrics"][0])
 	// Output: installed metrics/1.0.0-1
 }

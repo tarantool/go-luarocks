@@ -2,7 +2,6 @@ package tree_test
 
 import (
 	"fmt"
-	"log"
 	"os"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -48,13 +47,14 @@ func ExampleMungedPath() {
 func ExampleTree_Which() {
 	dir, err := os.MkdirTemp("", "rocks")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer os.RemoveAll(dir)
+
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	tr, err := tree.Open(rocks.Config{Tree: dir})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	path, ok := tr.Which("no.such.module")
