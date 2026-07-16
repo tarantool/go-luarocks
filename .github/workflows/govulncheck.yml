@@ -1,0 +1,49 @@
+name: govulncheck
+
+on:
+  schedule:
+    - cron: "0 0 * * 6" # Weekly on Saturday at 00:00 UTC.
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "Send notification regardless of scan outcome (for testing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Latest stable toolchain: stdlib vulnerabilities (e.g. GO-2026-5856)
+          # are fixed in point releases after the module's minimum go 1.25.
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        id: govulncheck
+        run: govulncheck ./...
+
+      - name: Send notification on scheduled run failure
+        if: |
+          always() &&
+          ((github.event_name == 'schedule' && steps.govulncheck.outcome == 'failure') ||
+           (github.event_name == 'workflow_dispatch' && inputs.test_notification))
+        uses: tarantool/actions/report-job-status@master
+        with:
+          bot-token: ${{ secrets.ECO_VK_WORKSPACE_BOT_TOKEN }}
+          chat-id: ${{ secrets.ECO_VK_WORKSPACE_GOVULNCHECK_CHAT_ID }}
+          job-name: ${{ github.job }}
+          job-steps: ${{ toJson(steps) }}
