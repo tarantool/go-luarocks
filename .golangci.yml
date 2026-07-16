@@ -16,7 +16,6 @@ linters:
   default: all
   disable:
     # --- Policy / whitelist tools: flag everything until configured ---
-    - depguard      # needs an explicit import allow/deny policy (none defined).
     - exhaustruct   # needs per-struct include patterns; otherwise flags every
                     # partial struct literal — noise, not signal.
 
@@ -47,6 +46,19 @@ linters:
 
     # --- Catch-all meta-linter, overlaps the above ---
     - revive        # broad style ruleset duplicating disabled checks above.
+  settings:
+    # Only public modules may be imported; anything new must be added here
+    # deliberately so an internal/corporate dependency can't sneak back in.
+    depguard:
+      rules:
+        main:
+          files: ["$all", "!$test"]
+          allow:
+            - $gostd
+            - "github.com/tarantool/go-luarocks"
+            - "github.com/yuin/gopher-lua"
+            - "github.com/go-git/go-git/v5"
+
   exclusions:
     # Don't fail on findings in machine-generated files.
     generated: lax
