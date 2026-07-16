@@ -1,15 +1,3 @@
-// Package deps implements version parsing, constraint matching and the
-// transitive dependency resolver used by the Rocks facade.
-//
-// Upstream references:
-//
-//   - luarocks/src/luarocks/core/vers.lua — Version parsing + comparator.
-//   - luarocks/src/luarocks/queries.lua   — Constraint grammar.
-//   - luarocks/src/luarocks/search.lua    — Remote search / pick-latest.
-//
-// The on-the-wire shapes (rocks.Version, rocks.VersionConstraint) live in
-// the root rocks package so callers can talk about versions without
-// depending on deps.
 package deps
 
 import (

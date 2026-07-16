@@ -1,16 +1,3 @@
-// Package tree implements the on-disk Tarantool-rocks layout: the path
-// scheme under <tree>/share/tarantool, <tree>/lib/tarantool, <tree>/bin,
-// and the Deploy operation that copies a built rock's artifacts into it.
-//
-// The layout is fixed for Tarantool:
-//
-//	<tree>/share/tarantool/rocks/<name>/<ver>/   — per-rock install dir
-//	<tree>/share/tarantool/                       — deploy_lua_dir
-//	<tree>/lib/tarantool/                         — deploy_lib_dir
-//	<tree>/bin/                                   — bin scripts
-//
-// This package uses forward-slash Unix paths exclusively via
-// path/filepath; no Windows-specific handling.
 package tree
 
 import "path/filepath"

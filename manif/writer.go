@@ -1,13 +1,3 @@
-// Package manif reads and writes LuaRocks tree- and rock-manifest files.
-//
-// The writer is a byte-for-byte reimplementation of upstream
-// `luarocks/src/luarocks/persist.lua`'s `save_from_table_to_string`
-// pipeline. Goldens under testdata/persist/out are generated from upstream
-// (see gen_goldens.sh) and are the canonical regression evidence.
-//
-// The parser is a small hand-rolled recursive-descent reader for the
-// restricted Lua-table-literal subset that persist.lua emits. It deliberately
-// does NOT depend on a Lua VM and fails loud on unsupported syntax.
 package manif
 
 import (

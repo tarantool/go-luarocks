@@ -1,11 +1,3 @@
-// Package remote implements the default rocks.RemoteIndex against an
-// HTTP(S) rock server. It is consumed by the Rocks facade's New
-// constructor and by deps.Resolve via the rocks.RemoteIndex interface.
-//
-// The package lives outside the root rocks package because it consumes
-// manif (Lua-source manifest parser) which itself imports rocks for the
-// shared data types — placing HTTPRemoteIndex at the root would create
-// an import cycle.
 package remote
 
 import (
