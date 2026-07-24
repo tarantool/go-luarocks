@@ -1,0 +1,7 @@
+embedded_bracket = [=[
+x ]] y
+zz]=]
+text = [[
+line A
+line B
+line C]]

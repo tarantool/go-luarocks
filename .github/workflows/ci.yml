@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The module's own packages, excluding internal/luarocks (vendored upstream
+  # LuaRocks sources embedded via go:embed; no tests of its own).
+  PKGS: ./build/... ./client/... ./deps/... ./fetch/... ./manif/... ./remote/... ./rockspec/... ./tree/... .
+
+jobs:
+  static:
+    name: static (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      # --- checks that must not change the repo ---
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::these files are not gofmt-clean:"; echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go generate (no changes)
+        run: |
+          go generate ./...
+          git diff --exit-code
+
+      - name: go fix (no changes)
+        run: |
+          go fix ./...
+          git diff --exit-code
+
+      - name: go mod tidy (no changes)
+        run: go mod tidy -diff
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11.4
+          args: ${{ env.PKGS }}
+
+      - name: codespell
+        if: runner.os == 'Linux'
+        run: |
+          pip3 install codespell==2.4.2
+          codespell
+
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # Lowest Go version the module requires (go.mod: go 1.25.0), plus the
+        # latest stable release.
+        go: ['1.25', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ${{ env.PKGS }}
+
+      - name: Test (race)
+        run: go test -race ${{ env.PKGS }}
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Test with coverage
+        run: go test -coverprofile=coverage.out -covermode=atomic ${{ env.PKGS }}
+
+      - name: Upload to Coveralls
+        env:
+          COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go install github.com/mattn/goveralls@latest
+          goveralls -coverprofile=coverage.out -service=github

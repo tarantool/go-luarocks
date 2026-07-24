@@ -1,0 +1,6 @@
+[codespell]
+
+skip = ./.git,./internal/luarocks/src,./docs,./go.sum,./fetch/testdata,./manif/testdata,./rockspec/testdata
+# unparseable: valid variant spelling; norml: `normL` (normalized-Lua) local var
+ignore-words-list = unparseable,norml
+check-filenames = true

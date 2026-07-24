@@ -1,0 +1,7 @@
+nested = {
+   ["123abc"] = "starts-with-digit",
+   ["end"] = "reserved-word",
+   ["function"] = "another",
+   normal = "bare",
+   ["not-an-id"] = "needs-brackets"
+}

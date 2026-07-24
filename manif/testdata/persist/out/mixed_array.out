@@ -1,0 +1,7 @@
+mixed = {
+   "first",
+   "second",
+   "third",
+   label = "named",
+   name = "Alice"
+}
