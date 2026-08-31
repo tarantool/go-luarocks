@@ -53,10 +53,34 @@ type Options struct {
 	IdentifierOut *string
 }
 
+// Result is what a backend produced: where the sources landed on disk, and
+// whether that path is already the rock's source root.
+//
+// The distinction is load-bearing, and it is a property of the backend rather
+// than of the URL. An archive backend expands a tarball into destDir, so the
+// sources normally sit one level down in a versioned directory that the caller
+// still has to find (upstream fetch.find_base_dir, fetch.lua:233). The git
+// backend instead clones into destDir/<repo> and returns that clone; upstream's
+// git backend likewise returns the module directory beside the store directory
+// (fetch/git.lua:164) and build.lua enters store_dir and then that module
+// (build.lua:158-168), so nothing descends any further there. Running the
+// archive heuristic over a path that is already the source root goes one level
+// too deep whenever the tree happens to contain a subdirectory named like the
+// repository — tarantool/checks ships checks/ next to its CMakeLists.txt.
+type Result struct {
+	// Path is the directory the fetched sources live in.
+	Path string
+
+	// SourceRoot reports whether Path is already the directory the rockspec's
+	// build paths resolve against. When false, Path is an unpack directory and
+	// the real root still has to be located inside it.
+	SourceRoot bool
+}
+
 // Backend is the per-scheme fetch implementation. The dispatch table
 // registers one Backend per scheme group (http*, git*, file).
 type Backend interface {
-	Fetch(ctx context.Context, rawURL, destDir string, opts Options) (string, error)
+	Fetch(ctx context.Context, rawURL, destDir string, opts Options) (Result, error)
 }
 
 // Fetch retrieves rawURL into destDir using the default options and
@@ -67,10 +91,22 @@ func Fetch(ctx context.Context, rawURL, destDir string) (string, error) {
 	return FetchWith(ctx, rawURL, destDir, Options{})
 }
 
-// FetchWith is the options-bearing form of Fetch.
+// FetchWith is the options-bearing, path-only form of Fetch. It drops
+// Result.SourceRoot, so a caller that then applies an archive base-directory
+// heuristic to the returned path must call Sources instead — otherwise it
+// descends into a git clone or a copied local tree that is already the root.
 func FetchWith(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+	res, err := Sources(ctx, rawURL, destDir, opts)
+
+	return res.Path, err
+}
+
+// Sources is the full form of FetchWith: alongside the on-disk path it reports
+// whether the backend already handed back the source root. Named after
+// upstream's fetch.fetch_sources (fetch.lua:500), whose role it plays.
+func Sources(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	if rawURL == "" {
-		return "", errors.New("fetch: empty URL")
+		return Result{}, errors.New("fetch: empty URL")
 	}
 
 	rawURL = rewriteGitHubGitURL(rawURL)
@@ -85,12 +121,12 @@ func FetchWith(ctx context.Context, rawURL, destDir string, opts Options) (strin
 
 	scheme, err := schemeOf(rawURL)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	b, err := backendFor(scheme)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	return b.Fetch(ctx, rawURL, destDir, opts)

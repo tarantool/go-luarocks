@@ -4,9 +4,12 @@ package fetch_test
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,4 +300,58 @@ func TestGitBackend_NoIdentifierForReleaseVersion(t *testing.T) {
 	})
 	require.NoError(t, err, "Fetch")
 	assert.Empty(t, id, "release version must not get a git identifier")
+}
+
+// networkErr reports whether err is a transport failure rather than a fetch
+// defect, so the one network-dependent test below can skip on an offline
+// machine without also skipping a real regression (a moved tag, a changed
+// layout) — those surface as non-transport errors and still fail.
+func networkErr(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	for _, s := range []string{"dial tcp", "no such host", "connection refused",
+		"i/o timeout", "TLS handshake", "network is unreachable"} {
+		if strings.Contains(err.Error(), s) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestGitBackend_ChecksIsSourceRoot is the live case the source-root flag was
+// introduced for: tarantool/checks has no source.dir in its rockspec and ships
+// a checks/ directory next to CMakeLists.txt, so an archive-style descent from
+// the clone lands in checks/checks — a directory CMake rejects for having no
+// CMakeLists.txt. Unlike its neighbours here this test needs the network; it
+// skips when GitHub is unreachable and fails on anything else.
+func TestGitBackend_ChecksIsSourceRoot(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	dst := t.TempDir()
+
+	res, err := fetch.Sources(ctx, "git+https://github.com/tarantool/checks.git", dst,
+		fetch.Options{Tag: "3.3.0"})
+	if err != nil && networkErr(err) {
+		t.Skipf("network unavailable: %v", err)
+	}
+
+	require.NoError(t, err, "clone tarantool/checks")
+
+	assert.True(t, res.SourceRoot, "a clone is the source root")
+	assert.Equal(t, filepath.Join(dst, "checks"), res.Path, "clone directory")
+	assert.FileExists(t, filepath.Join(res.Path, "CMakeLists.txt"),
+		"the build root must be the directory holding CMakeLists.txt")
+
+	// The trap itself: the repository really does contain a subdirectory named
+	// like itself, which is what the archive heuristic used to descend into.
+	fi, statErr := os.Stat(filepath.Join(res.Path, "checks"))
+	require.NoError(t, statErr, "checks/checks must exist for this regression to be meaningful")
+	assert.True(t, fi.IsDir(), "checks/checks is the module directory")
 }

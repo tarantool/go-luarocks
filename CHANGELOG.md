@@ -30,6 +30,10 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ### Changed
 
+- fetch: `Backend.Fetch` returns a `Result` (the path plus a `SourceRoot`
+  flag) instead of a bare path, and `fetch.Sources` exposes it. `Fetch` and
+  `FetchWith` keep their path-only signatures.
+
 ### Fixed
 
 - tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
@@ -44,3 +48,11 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   written to the manifest with `modules = {}`, so neither this library nor
   `luarocks` could tell what it provided. A `build.install.lua` entry is now
   indexed as a module too, matching upstream.
+- client: Building a rock whose source is a git repository no longer descends
+  into a subdirectory of the checkout. The archive base-directory heuristic
+  (upstream `fetch.find_base_dir`) was applied to every fetch result, so a
+  clone holding a directory named like the repository — `tarantool/checks`
+  ships `checks/` next to its `CMakeLists.txt` — was entered one level too
+  deep and the build failed. Backends now report whether the path they return
+  is already the source root, which also covers a `file://` source that copies
+  a local tree.

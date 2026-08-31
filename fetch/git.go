@@ -58,16 +58,23 @@ func gitIdentifier(repo *git.Repository) (string, error) {
 // The `git+` prefix is stripped before the URL is handed to go-git; bare
 // `git` keeps the git:// protocol. Options.Tag / Options.Branch selects the
 // reference to check out (a tag ref or a branch ref respectively).
+//
+// The clone directory it returns is already the rock's source root
+// (Result.SourceRoot is true): there is no archive to expand and nothing to
+// descend into. Upstream is the same shape — git.get_sources returns the
+// module directory next to the store directory (fetch/git.lua:164) and
+// build.lua enters store_dir then that module (build.lua:158-168), so the
+// archive-oriented fetch.find_base_dir never runs over a checkout.
 type gitBackend struct{}
 
-func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	scheme, err := schemeOf(rawURL)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
-		return "", fmt.Errorf("fetch.git: mkdir %q: %w", destDir, err)
+		return Result{}, fmt.Errorf("fetch.git: mkdir %q: %w", destDir, err)
 	}
 
 	cloneURL := stripGitPlus(rawURL)
@@ -114,7 +121,7 @@ func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Option
 	// and creates repoDir itself; it mutates no process state.
 	repo, err := git.PlainCloneContext(ctx, repoDir, false, co)
 	if err != nil {
-		return "", fmt.Errorf("fetch.git: clone %q: %w", cloneURL, err)
+		return Result{}, fmt.Errorf("fetch.git: clone %q: %w", cloneURL, err)
 	}
 
 	// For an scm-/dev- version with no explicit tag, pin the source to the HEAD
@@ -129,14 +136,14 @@ func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Option
 	// metadata after checkout (fetch/git.lua:158-159) so .git/ and .gitignore
 	// never leak into the deployed rock or its rock_manifest.
 	if err := os.RemoveAll(filepath.Join(repoDir, ".git")); err != nil {
-		return "", fmt.Errorf("fetch.git: strip .git: %w", err)
+		return Result{}, fmt.Errorf("fetch.git: strip .git: %w", err)
 	}
 
 	if err := os.Remove(filepath.Join(repoDir, ".gitignore")); err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("fetch.git: strip .gitignore: %w", err)
+		return Result{}, fmt.Errorf("fetch.git: strip .gitignore: %w", err)
 	}
 
-	return repoDir, nil
+	return Result{Path: repoDir, SourceRoot: true}, nil
 }
 
 // stripSCPScheme converts an scp-style ssh URL ("ssh://git@host:path") to the

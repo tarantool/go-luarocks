@@ -57,3 +57,12 @@ func NativeInstalledLookup(e *NativeEngine) (deps.InstalledLookup, error) {
 func NativeInstallStep(e *NativeEngine, ctx context.Context, step rocks.InstallStep) error {
 	return e.installStep(ctx, step)
 }
+
+// NativeFetchSource exposes nativeEngine.fetchSource so the source-root
+// decision — backend-reported root vs. archive descent — can be unit-tested
+// against real fetches without driving a whole build.
+func NativeFetchSource(
+	e *NativeEngine, ctx context.Context, spec *rocks.Rockspec, tmp string,
+) (string, error) {
+	return e.fetchSource(ctx, spec, tmp)
+}
