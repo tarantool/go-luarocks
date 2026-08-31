@@ -24,9 +24,12 @@ import (
 // Manifest arch values for non-binary rock entries: archSrc is a packaged
 // source rock, archRockspec is a bare .rockspec (source spec with no packaged
 // rock). Both rank below a host-built binary arch during selection.
+// archInstalled is the pseudo-arch of an already-installed rock, whose
+// rockspec lives under a per-version subdirectory.
 const (
-	archSrc      = "src"
-	archRockspec = "rockspec"
+	archSrc       = "src"
+	archRockspec  = "rockspec"
+	archInstalled = "installed"
 )
 
 // HTTPRemoteIndex is the default rocks.RemoteIndex backed by one or more
@@ -521,7 +524,7 @@ func acceptedArches(arches []archEntry, want string) []archEntry {
 
 	for _, a := range arches {
 		switch a.arch {
-		case archSrc, "all", archRockspec, "installed", host:
+		case archSrc, "all", archRockspec, archInstalled, host:
 			out = append(out, a)
 		}
 	}
@@ -571,7 +574,7 @@ func makeRockURL(server, name, version, arch string) string {
 	switch arch {
 	case archRockspec:
 		return base + name + "-" + version + ".rockspec"
-	case "installed":
+	case archInstalled:
 		return base + name + "/" + version + "/" + name + "-" + version + ".rockspec"
 	default:
 		return base + name + "-" + version + "." + arch + ".rock"

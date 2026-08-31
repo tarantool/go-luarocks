@@ -32,5 +32,9 @@
 //   - tree.Open / tree.Tree.Deploy / tree.Tree.Which
 //   - manif.FileStore (default ManifestStore)
 //   - deps.Resolve
-//   - remote.HTTPRemoteIndex (default RemoteIndex)
+//   - remote.NewIndex / remote.NewOrderedIndex (default RemoteIndex): each
+//     entry of Config.Servers is dispatched by its own form, so a rock server
+//     may be a local directory (`/srv/rocks`, `file:///srv/rocks`) as well as
+//     an HTTP(S) URL, and the list is queried in configuration order,
+//     first-found-wins.
 package client

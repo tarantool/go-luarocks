@@ -26,6 +26,15 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   upstream LuaRocks 3.9.2 engine (driven through `gopher-lua`), selectable
   per client, exposing `Install`, `Build`, `Make`, `Pack`, `Unpack`, `List`,
   `Show`, and `Which`.
+- remote: A file-backed registry index, so a rock server may be a local
+  directory (`/srv/rocks` or `file:///srv/rocks`) as well as an HTTP(S)
+  endpoint — the offline case upstream serves with
+  `luarocks --only-server=/path/to/repo`. `NewIndex` picks the index a
+  server's form implies, `NewIndexes` does it for a whole configured server
+  list, and `OrderedIndex` queries any mix of the two in order.
+- client: `Config.Servers` and `InstallOpts.Servers` accept a local directory
+  wherever they accept an HTTP(S) URL, so `Install` can resolve and install
+  entirely offline from a mirror on disk.
 - Runnable, godoc-rendered examples across all public packages.
 
 ### Changed
@@ -33,6 +42,11 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 - fetch: `Backend.Fetch` returns a `Result` (the path plus a `SourceRoot`
   flag) instead of a bare path, and `fetch.Sources` exposes it. `Fetch` and
   `FetchWith` keep their path-only signatures.
+- client: A multi-server `Config.Servers` / `InstallOpts.Servers` list is now
+  queried in configuration order, first-found-wins, instead of merging every
+  server's offering of a version before picking an arch. A merge cannot span
+  transports, and first-found-wins is the rule tt's resolver already applies
+  over the same list. Behaviour for a single configured server is unchanged.
 
 ### Fixed
 
