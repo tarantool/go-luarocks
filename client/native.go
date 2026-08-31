@@ -16,7 +16,6 @@ import (
 	"github.com/tarantool/go-luarocks/build"
 	"github.com/tarantool/go-luarocks/deps"
 	"github.com/tarantool/go-luarocks/fetch"
-	"github.com/tarantool/go-luarocks/remote"
 	"github.com/tarantool/go-luarocks/rockspec"
 	"github.com/tarantool/go-luarocks/tree"
 )
@@ -81,10 +80,9 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 
 	idx := e.index
 	if len(opts.Servers) > 0 {
-		idx = &remote.HTTPRemoteIndex{
-			Servers:         opts.Servers,
-			InsecureServers: e.cfg.InsecureServers,
-		}
+		// Same dispatch as the facade's own server list (serverIndex): an
+		// override entry may be a local directory as readily as an HTTP URL.
+		idx = serverIndex(opts.Servers, e.cfg.InsecureServers)
 	}
 
 	cs, err := deps.ParseConstraints(opts.Version)

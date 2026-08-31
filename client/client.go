@@ -112,12 +112,9 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 	}
 
 	r := &Rocks{
-		cfg:   cfg,
-		store: manif.FileStore{},
-		index: &remote.HTTPRemoteIndex{
-			Servers:         cfg.Servers,
-			InsecureServers: cfg.InsecureServers,
-		},
+		cfg:    cfg,
+		store:  manif.FileStore{},
+		index:  serverIndex(cfg.Servers, cfg.InsecureServers),
 		logger: cfg.Logger,
 	}
 	if r.logger == nil {
@@ -152,6 +149,28 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 	}
 
 	return r, nil
+}
+
+// serverIndex builds the RemoteIndex for a configured server list. Each entry
+// is dispatched by its own form — a local directory becomes a file index, an
+// HTTP(S) URL an HTTP one (see remote.NewIndex) — so a rock server may be a
+// directory anywhere one may be a URL, which is what `luarocks
+// --only-server=/path/to/repo` allows and what an offline install needs.
+//
+// The list is then consulted in configuration order, first-found-wins. That is
+// a change from the previous unconditional multi-server HTTPRemoteIndex, which
+// merged every server's offering of a version before picking an arch (upstream
+// search_repos, search.lua:26-30): a merge cannot span transports, and
+// first-found-wins is already the rule tt's resolver applies over this same
+// list, so the facade now agrees with its main consumer instead of differing
+// from it. For a single configured server — the common case, and every case in
+// this repository's fixtures — the two rules coincide exactly.
+//
+//nolint:ireturn // returns the RemoteIndex interface the facade stores
+func serverIndex(servers, insecure []string) rocks.RemoteIndex {
+	return remote.NewOrderedIndex(remote.NewIndexes(servers, remote.IndexOptions{
+		InsecureServers: insecure,
+	})...)
 }
 
 // Exec runs an arbitrary LuaRocks command line — argv is everything after
