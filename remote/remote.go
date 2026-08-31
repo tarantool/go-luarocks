@@ -133,41 +133,15 @@ func (h *HTTPRemoteIndex) Query(ctx context.Context, name, namespace string) ([]
 			// results:satisfies (query.arch[self.arch] or "any"). The default
 			// query arch set is {src,all,rockspec,installed} plus the host arch
 			// (queries.lua:17-23,72).
-			for _, a := range h.acceptedArches(arches) {
+			for _, a := range acceptedArches(arches, h.Arch) {
 				merged[verStr] = append(merged[verStr], mergedItem{server: srv, arch: a.arch})
 			}
 		}
 	}
 
-	// Emit one VersionedRock per version, in sorted version-string order for
-	// deterministic output (the resolver re-sorts by parsed version regardless).
-	vers := make([]string, 0, len(merged))
-	for verStr := range merged {
-		vers = append(vers, verStr)
-	}
-
-	sort.Strings(vers)
-
-	out := []rocks.VersionedRock{}
-
-	for _, verStr := range vers {
-		items := merged[verStr]
-
-		v, err := deps.ParseVersion(verStr)
-		if err != nil {
-			if loadErr == nil {
-				loadErr = fmt.Errorf("remote.HTTPRemoteIndex: parse version %q for %q: %w", verStr, name, err)
-			}
-
-			continue
-		}
-
-		win := items[pickMergedItem(items)]
-		out = append(out, rocks.VersionedRock{
-			Name:    name,
-			Version: v,
-			URL:     makeRockURL(win.server, name, verStr, win.arch),
-		})
+	out, parseErr := mergedRocks("remote.HTTPRemoteIndex", name, merged, makeRockURL)
+	if loadErr == nil {
+		loadErr = parseErr
 	}
 
 	// Only surface a failure when nothing was found AND at least one server
@@ -231,76 +205,21 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 		base += "manifests/" + namespace + "/"
 	}
 
-	type probe struct {
-		path   string
-		isJSON bool
-		isZip  bool
-		// inner is the entry name inside a .zip probe (the un-suffixed manifest
-		// name, per manif.lua:132 nozip = pathname:match("(.*)%.zip$")).
-		inner string
-	}
-
-	// Upstream manif.load_manifest probes [manifest-<lv>.zip, manifest-<lv>,
-	// manifest] with the versioned (Lua-filtered) forms first (manif.lua:90-133).
-	// The manifest-<lv>.json variant is a Go-specific extra kept LAST so it never
-	// preempts the upstream versioned manifests.
-	probes := []probe{
-		{path: base + "manifest-" + lv + ".zip", isZip: true, inner: "manifest-" + lv},
-		{path: base + "manifest-" + lv, isJSON: false},
-		{path: base + "manifest", isJSON: false},
-		{path: base + "manifest-" + lv + ".json", isJSON: true},
-	}
-
 	var lastErr error
 
-	for _, p := range probes {
-		body, err := h.get(ctx, p.path)
+	for _, p := range manifestProbes(lv) {
+		path := base + p.name
+
+		body, err := h.get(ctx, path)
 		if err != nil {
 			lastErr = err
 
 			continue
 		}
 
-		if p.isZip {
-			unzipped, uerr := unzipManifest(body, p.inner)
-			if uerr != nil {
-				lastErr = fmt.Errorf("unzip manifest at %s: %w", p.path, uerr)
-
-				continue
-			}
-
-			body = unzipped
-		}
-
-		var raw map[string]any
-		if p.isJSON {
-			err := json.Unmarshal(body, &raw)
-			if err != nil {
-				lastErr = fmt.Errorf("decode JSON manifest at %s: %w", p.path, err)
-
-				continue
-			}
-		} else {
-			v, err := manif.Parse(body)
-			if err != nil {
-				lastErr = fmt.Errorf("parse manifest at %s: %w", p.path, err)
-
-				continue
-			}
-
-			rawMap, ok := v.(map[string]any)
-			if !ok {
-				lastErr = fmt.Errorf("manifest at %s: top-level is %T, want map", p.path, v)
-
-				continue
-			}
-
-			raw = rawMap
-		}
-
-		m, err := projectManifest(server, raw)
+		m, err := decodeManifest(server, path, p, body)
 		if err != nil {
-			lastErr = fmt.Errorf("project manifest from %s: %w", p.path, err)
+			lastErr = err
 
 			continue
 		}
@@ -315,6 +234,128 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 	}
 
 	return nil, lastErr
+}
+
+// manifestProbe is one candidate manifest filename plus how to decode it.
+// The name is relative to the server base, so an HTTP index joins it with "/"
+// and a file index with the OS separator.
+type manifestProbe struct {
+	name   string
+	isJSON bool
+	isZip  bool
+	// inner is the entry name inside a .zip probe (the un-suffixed manifest
+	// name, per manif.lua:132 nozip = pathname:match("(.*)%.zip$")).
+	inner string
+}
+
+// manifestProbes returns the manifest filenames to try, in order, for the
+// given Lua version.
+//
+// Upstream manif.load_manifest probes [manifest-<lv>.zip, manifest-<lv>,
+// manifest] with the versioned (Lua-filtered) forms first (manif.lua:90-133).
+// The manifest-<lv>.json variant is a Go-specific extra kept LAST so it never
+// preempts the upstream versioned manifests.
+func manifestProbes(luaVersion string) []manifestProbe {
+	return []manifestProbe{
+		{name: "manifest-" + luaVersion + ".zip", isZip: true, inner: "manifest-" + luaVersion},
+		{name: "manifest-" + luaVersion, isJSON: false},
+		{name: "manifest", isJSON: false},
+		{name: "manifest-" + luaVersion + ".json", isJSON: true},
+	}
+}
+
+// decodeManifest turns the raw bytes of one manifest probe into the projected
+// (name → version → arches) shape. path is used only for error messages, and
+// server is recorded on the result so URL construction can reach it.
+//
+// Shared by HTTPRemoteIndex and FileRemoteIndex: the two differ in where the
+// bytes come from, never in how a manifest is decoded.
+func decodeManifest(
+	server, path string, p manifestProbe, body []byte,
+) (*remoteManifest, error) {
+	if p.isZip {
+		unzipped, err := unzipManifest(body, p.inner)
+		if err != nil {
+			return nil, fmt.Errorf("unzip manifest at %s: %w", path, err)
+		}
+
+		body = unzipped
+	}
+
+	var raw map[string]any
+
+	if p.isJSON {
+		err := json.Unmarshal(body, &raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode JSON manifest at %s: %w", path, err)
+		}
+	} else {
+		v, err := manif.Parse(body)
+		if err != nil {
+			return nil, fmt.Errorf("parse manifest at %s: %w", path, err)
+		}
+
+		rawMap, ok := v.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("manifest at %s: top-level is %T, want map", path, v)
+		}
+
+		raw = rawMap
+	}
+
+	m, err := projectManifest(server, raw)
+	if err != nil {
+		return nil, fmt.Errorf("project manifest from %s: %w", path, err)
+	}
+
+	return m, nil
+}
+
+// mergedRocks turns the accumulated (version → items) map into one
+// rocks.VersionedRock per version, in sorted version-string order for
+// deterministic output (the resolver re-sorts by parsed version regardless).
+// makeURL builds the artifact URL for the winning item of each version.
+//
+// A version key that fails deps.ParseVersion is skipped and reported as the
+// returned error, which callers surface only when nothing resolved at all —
+// one unparsable key must not hide the versions that did parse.
+func mergedRocks(
+	errPrefix, name string,
+	merged map[string][]mergedItem,
+	makeURL func(server, name, version, arch string) string,
+) ([]rocks.VersionedRock, error) {
+	vers := make([]string, 0, len(merged))
+	for verStr := range merged {
+		vers = append(vers, verStr)
+	}
+
+	sort.Strings(vers)
+
+	out := []rocks.VersionedRock{}
+
+	var parseErr error
+
+	for _, verStr := range vers {
+		items := merged[verStr]
+
+		v, err := deps.ParseVersion(verStr)
+		if err != nil {
+			if parseErr == nil {
+				parseErr = fmt.Errorf("%s: parse version %q for %q: %w", errPrefix, verStr, name, err)
+			}
+
+			continue
+		}
+
+		win := items[pickMergedItem(items)]
+		out = append(out, rocks.VersionedRock{
+			Name:    name,
+			Version: v,
+			URL:     makeURL(win.server, name, verStr, win.arch),
+		})
+	}
+
+	return out, parseErr
 }
 
 // unzipManifest extracts the manifest bytes from a zipped versioned manifest.
@@ -468,9 +509,10 @@ func toArchArr(v any) ([]archEntry, error) {
 
 // acceptedArches keeps only entries whose arch is in the default query arch
 // set: the pseudo-arches src/all/rockspec/installed plus the host arch. This
-// is the Go analogue of results:satisfies' query.arch membership test.
-func (h *HTTPRemoteIndex) acceptedArches(arches []archEntry) []archEntry {
-	host := h.Arch
+// is the Go analogue of results:satisfies' query.arch membership test. An
+// empty want falls back to the detected host arch.
+func acceptedArches(arches []archEntry, want string) []archEntry {
+	host := want
 	if host == "" {
 		host = hostArch()
 	}
