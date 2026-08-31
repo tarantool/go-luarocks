@@ -297,6 +297,119 @@ func TestDeploy_MakeInstalledSubtree(t *testing.T) {
 
 	assert.Contains(t, rm.Lua, "foo/bar.lua", "rock_manifest.lua missing make-installed module")
 	assert.Contains(t, rm.Lib, "foo/baz.so", "rock_manifest.lib missing make-installed lib")
+
+	// buildDir is a staging area kept on purpose: its files are copied, not
+	// moved, so the originals must survive the deploy.
+	assert.FileExists(t, filepath.Join(buildDir, "lua", "foo", "bar.lua"),
+		"buildDir source must be copied, not moved")
+	assert.FileExists(t, filepath.Join(buildDir, "lib", "foo", "baz.so"),
+		"buildDir source must be copied, not moved")
+}
+
+// TestDeploy_CMakeInstallDirSubtree — TNTP-9962: a cmake rock installs into
+// $(LUADIR)/$(LIBDIR), which build/vars.go points at <installDir>/lua|lib. The
+// relocation stage must run for that build type too, move the files to the
+// shared deploy dirs and leave nothing behind under the per-rock install dir.
+func TestDeploy_CMakeInstallDirSubtree(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	src := t.TempDir()
+	buildDir := t.TempDir()
+
+	tr, err := tree.Open(rocks.Config{Tree: dir})
+	require.NoError(t, err)
+
+	installDir := tr.InstallDir(demoPkg, "1.0.0-1")
+	staleLua := filepath.Join(installDir, "lua", demoPkg, "init.lua")
+	staleSo := filepath.Join(installDir, "lib", demoPkg, "native.so")
+
+	writeFile(t, staleLua, "return {}")
+	writeFile(t, staleSo, "ELF-ish")
+
+	spec := &rocks.Rockspec{
+		Package: demoPkg,
+		Version: "1.0.0-1",
+		Build:   rocks.Build{Type: "cmake"},
+	}
+	rm, err := tr.Deploy(spec, src, buildDir)
+	require.NoError(t, err)
+
+	wantLua := filepath.Join(tr.DeployLuaDir(), demoPkg, "init.lua")
+	require.FileExists(t, wantLua, "cmake-installed module must reach the deploy dir")
+	assert.Contains(t, rm.Lua, demoPkg+"/init.lua", "rock_manifest.lua missing the module")
+
+	wantSo := filepath.Join(tr.DeployLibDir(), demoPkg, "native.so")
+	require.FileExists(t, wantSo, "cmake-installed lib must reach the deploy dir")
+	assert.Contains(t, rm.Lib, demoPkg+"/native.so", "rock_manifest.lib missing the lib")
+
+	st, err := os.Stat(wantSo)
+	require.NoError(t, err, "stat %q", wantSo)
+	assert.NotZero(t, st.Mode().Perm()&0o100, "deployed .so should be executable")
+
+	// installDir files are moved, not copied: a .lua left under
+	// share/tarantool/rocks/<name>/<ver>/lua/ is on no loader path.
+	assert.NoFileExists(t, staleLua, "installDir source must be moved away")
+	assert.NoFileExists(t, staleSo, "installDir source must be moved away")
+	assert.NoDirExists(t, filepath.Join(installDir, "lua"), "emptied lua dir must be pruned")
+	assert.NoDirExists(t, filepath.Join(installDir, "lib"), "emptied lib dir must be pruned")
+}
+
+// TestDeploy_BuiltinWithoutSubtreesUnaffected — the relocation stage now runs
+// for every build type, so the common case with no lua/lib subtree at all must
+// stay a silent no-op rather than an error or a spurious deployment.
+func TestDeploy_BuiltinWithoutSubtreesUnaffected(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	src := t.TempDir()
+
+	writeFile(t, filepath.Join(src, "init.lua"), "return {}")
+
+	tr, err := tree.Open(rocks.Config{Tree: dir})
+	require.NoError(t, err)
+
+	spec := &rocks.Rockspec{
+		Package: demoPkg,
+		Version: "1.0.0-1",
+		Build: rocks.Build{
+			Type:    "builtin",
+			Modules: map[string]rocks.Module{demoPkg: {Path: "init.lua"}},
+		},
+	}
+	rm, err := tr.Deploy(spec, src, src)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{demoPkg + ".lua"}, deployedFiles(t, tr.DeployLuaDir()),
+		"only the declared module should be deployed")
+	assert.Empty(t, deployedFiles(t, tr.DeployLibDir()), "nothing should reach the lib deploy dir")
+	assert.Len(t, rm.Lua, 1, "rock_manifest.lua should hold only the declared module")
+	assert.Empty(t, rm.Lib, "rock_manifest.lib should stay empty")
+}
+
+// deployedFiles returns the slash-separated paths of every regular file under
+// root, relative to it.
+func deployedFiles(t *testing.T, root string) []string {
+	t.Helper()
+
+	var got []string
+
+	require.NoError(t, filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || fi.IsDir() {
+			return err
+		}
+
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+
+		got = append(got, filepath.ToSlash(rel))
+
+		return nil
+	}), "walk %q", root)
+
+	return got
 }
 
 // TestDeploy_PromotesHigherVersion — glr-5e9: installing a HIGHER version over
@@ -412,6 +525,87 @@ func TestWhich(t *testing.T) {
 		assert.Equal(t, c.want, got, c.name)
 		assert.Equal(t, c.ok, ok, c.name)
 	}
+}
+
+// TestModuleIndex — TNTP-9962: the tree manifest's module index is derived from
+// what was deployed (the RockManifest), not from the rockspec's build.modules,
+// which only the builtin backend fills in.
+func TestModuleIndex(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		rm   *rocks.RockManifest
+		want map[string]string
+	}{
+		{"nil manifest", nil, map[string]string{}},
+		{"empty manifest", &rocks.RockManifest{}, map[string]string{}},
+		{
+			// The vshard shape: a cmake rock with no build.modules at all.
+			name: "deployed lua tree",
+			rm: &rocks.RockManifest{Lua: map[string]string{
+				"vshard/init.lua":   "d1",
+				"vshard/cfg.lua":    "d2",
+				"vshard/router.lua": "d3",
+			}},
+			want: map[string]string{
+				"vshard.init":   "vshard/init.lua",
+				"vshard.cfg":    "vshard/cfg.lua",
+				"vshard.router": "vshard/router.lua",
+			},
+		},
+		{
+			name: "lib entries and a top-level module",
+			rm: &rocks.RockManifest{
+				Lua: map[string]string{"demo.lua": "d1"},
+				Lib: map[string]string{"demo/native.so": "d2"},
+			},
+			want: map[string]string{"demo": "demo.lua", "demo.native": "demo/native.so"},
+		},
+		{
+			// A .so and a .lua providing the same module name: the .so wins,
+			// the preference the rockspec-driven index has always encoded.
+			name: "so beats lua for the same module",
+			rm: &rocks.RockManifest{
+				Lua: map[string]string{"demo.lua": "d1"},
+				Lib: map[string]string{"demo.so": "d2"},
+			},
+			want: map[string]string{"demo": "demo.so"},
+		},
+		{
+			// A munged key belongs to an install that lost the plain spot; it
+			// must not be reported as a module (its name would be mangled and
+			// it is not the active provider).
+			name: "munged key skipped",
+			rm: &rocks.RockManifest{Lua: map[string]string{
+				"demo/init.lua":              "d1",
+				"demo_1_0_0_1-other/one.lua": "d2",
+			}},
+			want: map[string]string{"demo.init": "demo/init.lua"},
+		},
+	}
+
+	for _, c := range cases {
+		assert.Equal(t, c.want, tree.ModuleIndex(c.rm, demoPkg, "1.0.0-1"), c.name)
+	}
+}
+
+// TestModuleIndex_InvertsMungedPath pins the munged-key skip to the formation
+// MungedPath actually produces, rather than to a hand-written prefix.
+func TestModuleIndex_InvertsMungedPath(t *testing.T) {
+	t.Parallel()
+
+	p := tree.Paths{Tree: "/tmp/r"}
+
+	plain := filepath.Join(p.DeployLuaDir(), "demo", "init.lua")
+	munged := tree.MungedPath(p.DeployLuaDir(), plain, demoPkg, "1.0.0-1")
+
+	rel, err := filepath.Rel(p.DeployLuaDir(), munged)
+	require.NoError(t, err)
+
+	rm := &rocks.RockManifest{Lua: map[string]string{filepath.ToSlash(rel): "d1"}}
+	assert.Empty(t, tree.ModuleIndex(rm, demoPkg, "1.0.0-1"),
+		"a MungedPath-formed key must not be indexed as a module")
 }
 
 func writeFile(t *testing.T, p, body string) {

@@ -31,3 +31,16 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 ### Changed
 
 ### Fixed
+
+- tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
+  `build.type`, not only `make`. A `cmake` or `command` rock installing into
+  `$(LUADIR)`/`$(LIBDIR)` left its modules under
+  `share/tarantool/rocks/<name>/<version>/lua/`, where no loader looks, and
+  recorded nothing in the `rock_manifest`.
+- client: The tree manifest's `modules` index is derived from the deployed
+  `rock_manifest` (`tree.ModuleIndex`, mirroring upstream
+  `repos.package_modules`) instead of the rockspec's `build.modules`, which only
+  the `builtin` backend populates. A `cmake`, `make` or `command` rock was
+  written to the manifest with `modules = {}`, so neither this library nor
+  `luarocks` could tell what it provided. A `build.install.lua` entry is now
+  indexed as a module too, matching upstream.

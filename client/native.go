@@ -704,34 +704,20 @@ func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspe
 		m.Repository[spec.Package] = map[string]rocks.RepoEntry{}
 	}
 	// Build the per-arch entry's modules/commands index from what tree.Deploy
-	// actually wrote (rm.Lua, rm.Lib, rm.Bin). Module names in the rockspec
-	// are dotted; on-disk paths are slashed — invert by reading rm directly.
+	// actually wrote (rm.Lua, rm.Lib, rm.Bin) — NOT from spec.Build.Modules,
+	// which only the builtin backend populates: a cmake, make or command rock
+	// declares no modules, so a rockspec-keyed loop indexed nothing for it and
+	// left `modules = {}` in the tree manifest. tree.ModuleIndex is the same
+	// inversion upstream's repos.package_modules performs over the rock_manifest,
+	// and it subsumes the rockspec loop on builtin rocks (Deploy writes each
+	// declared module at exactly the slashed path the module name maps to).
 	entry := rocks.RepoEntry{Arch: "installed"}
 	pkgVer := spec.Package + "/" + spec.Version
 
-	if len(rm.Lua) > 0 || len(rm.Lib) > 0 {
-		entry.Modules = map[string]string{}
-
-		for modName := range spec.Build.Modules {
-			// Derive on-disk path from the deployed RockManifest: prefer
-			// rm.Lib (compiled .so) over rm.Lua (the .lua source). A plain-path
-			// key means this install won the active (plain) spot, so it becomes
-			// the current provider (index 0); a munged key means it deployed
-			// inactive and is appended after the active provider.
-			slashed := strings.ReplaceAll(modName, ".", "/")
-			if p, ok := matchModulePath(rm.Lib, slashed+".so"); ok {
-				entry.Modules[modName] = p
-				m.Modules[modName] = upsertProvider(m.Modules[modName], pkgVer, true)
-
-				continue
-			}
-
-			if p, ok := matchModulePath(rm.Lua, slashed+".lua"); ok {
-				entry.Modules[modName] = p
-				m.Modules[modName] = upsertProvider(m.Modules[modName], pkgVer, true)
-
-				continue
-			}
+	if mods := tree.ModuleIndex(rm, spec.Package, spec.Version); len(mods) > 0 {
+		entry.Modules = mods
+		for modName := range mods {
+			m.Modules[modName] = upsertProvider(m.Modules[modName], pkgVer, true)
 		}
 	}
 

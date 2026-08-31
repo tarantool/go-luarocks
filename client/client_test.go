@@ -218,6 +218,79 @@ build = {
 	if assert.NotEmpty(t, m.Commands["foo-cli"], "top-level m.Commands[\"foo-cli\"] = %v", m.Commands["foo-cli"]) {
 		assert.Equal(t, "foo/1.0-1", m.Commands["foo-cli"][0], "top-level m.Commands[\"foo-cli\"]")
 	}
+
+	// The rockspec's own modules must still be indexed under their dotted
+	// names, with the deployed path as the value — deriving the index from the
+	// deployed rock_manifest reproduces the rockspec-keyed loop exactly here.
+	assert.Equal(t, "foo.lua", entry.Modules["foo"], "RepoEntry.Modules[foo]")
+	assert.Equal(t, "foo/bar.lua", entry.Modules["foo.bar"], "RepoEntry.Modules[foo.bar]")
+	// ...and covers more than it did: a build.install.lua entry is a deployed
+	// module too, which upstream's repos.package_modules also reports and the
+	// rockspec-keyed loop missed.
+	assert.Equal(t, "foo/extras.lua", entry.Modules["foo.extras"], "RepoEntry.Modules[foo.extras]")
+}
+
+// TestMake_NonBuiltinBackendIndexesModules — TNTP-9962: a rock built by any
+// backend other than builtin declares no build.modules, so an index keyed on
+// that field left the tree manifest with `modules = {}` even though the rock
+// deployed a full Lua tree. This is the vshard shape (cmake) reduced to the
+// `command` backend so the test needs only /bin/sh.
+func TestMake_NonBuiltinBackendIndexesModules(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	treeDir := t.TempDir()
+
+	must := func(p, body string) {
+		t.Helper()
+
+		full := filepath.Join(src, p)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o750))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o600))
+	}
+	must("shard/init.lua", "return {}\n")
+	must("shard/router.lua", "return {}\n")
+
+	// install_command installs into $(LUADIR), which for every non-make backend
+	// is <installDir>/lua — exactly what vshard's cmake rockspec does via
+	// TARANTOOL_INSTALL_LUADIR. No build.modules anywhere in the rockspec.
+	rockspec := `
+package = "shard"
+version = "2.0-1"
+source = { url = "file://localhost/shard.tar.gz" }
+build = {
+   type = "command",
+   install_command = "mkdir -p $(LUADIR)/shard && cp shard/init.lua shard/router.lua $(LUADIR)/shard/",
+}
+`
+	specPath := filepath.Join(src, "shard-2.0-1.rockspec")
+	require.NoError(t, os.WriteFile(specPath, []byte(rockspec), 0o600))
+
+	r, err := client.New(rocks.Config{
+		Tree:       treeDir,
+		WorkingDir: src,
+		Tarantool: rocks.TarantoolConfig{
+			Prefix:     "/opt/test",
+			IncludeDir: "/opt/test/include",
+		},
+	})
+	require.NoError(t, err, "New")
+	require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make")
+
+	m, err := manif.ReadTreeManifest(filepath.Join(treeDir, "share/tarantool/rocks"))
+	require.NoError(t, err, "ReadTreeManifest")
+
+	entry := m.Repository["shard"]["2.0-1"]
+	assert.Equal(t, map[string]string{
+		"shard.init":   "shard/init.lua",
+		"shard.router": "shard/router.lua",
+	}, entry.Modules, "RepoEntry.Modules must index what the backend deployed")
+
+	for _, mod := range []string{"shard.init", "shard.router"} {
+		if assert.NotEmpty(t, m.Modules[mod], "top-level m.Modules[%q] is empty", mod) {
+			assert.Equal(t, "shard/2.0-1", m.Modules[mod][0], "top-level m.Modules[%q]", mod)
+		}
+	}
 }
 
 func TestPack_SrcOnly(t *testing.T) {

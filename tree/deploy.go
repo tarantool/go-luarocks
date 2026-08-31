@@ -78,8 +78,9 @@ const (
 //
 // Deploy is a linear pipeline: each numbered stage below handles one rock
 // artifact section (rockspec, build.modules, build.install.*, copy_directories,
-// make subtree) in the same order upstream build.lua does. The per-section logic
-// lives in the deploy* helpers so this orchestrator stays a readable sequence.
+// installed lua/lib subtrees) in the same order upstream build.lua does. The
+// per-section logic lives in the deploy* helpers so this orchestrator stays a
+// readable sequence.
 func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.RockManifest, error) {
 	if spec == nil {
 		return nil, errors.New("tree.Deploy: nil spec")
@@ -125,7 +126,7 @@ func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.Roc
 		return nil, err
 	}
 
-	if err := t.deployMakeSubtrees(spec, buildDir, rm); err != nil {
+	if err := t.deployInstalledSubtrees(spec, buildDir, rm); err != nil {
 		return nil, err
 	}
 
@@ -385,23 +386,74 @@ func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string, rm *ro
 	return nil
 }
 
-// deployMakeSubtrees (stage 4) handles the make backend, which has no
-// build.modules list — the Makefile installs straight into the per-rock lua/lib
-// subtree (INST_LUADIR=$(LUADIR), INST_LIBDIR=$(LIBDIR), which the make backend
-// points at buildDir/lua|lib). Scan those subtrees and relocate every installed
-// file to the shared deploy dirs, mirroring repos.deploy_files. lib files are
-// executable (0755).
-func (t *Tree) deployMakeSubtrees(spec *rocks.Rockspec, buildDir string, rm *rocks.RockManifest) error {
-	if spec.Build.Type != "make" {
-		return nil
+// deployInstalledSubtrees (stage 4) relocates files a build backend installed
+// straight into a lua/lib subtree instead of declaring them in build.modules.
+//
+// This runs for EVERY build.type, matching upstream: build.build_rock invokes
+// the backend and then hands the whole per-rock install dir to
+// make_rock_manifest, whose lua/lib sections repos.deploy_files relocates. There
+// is no make-specific gate upstream, and gating here left cmake/command rocks
+// with their modules stranded off every loader path.
+//
+// Two roots are scanned because two conventions are in play:
+//
+//   - <buildDir>/lua and <buildDir>/lib — the make backend remaps
+//     $(LUADIR)/$(LIBDIR) onto destDir (build/make.go), so the canonical
+//     install_variables = { INST_LUADIR = '$(LUADIR)' } pattern installs there.
+//   - <installDir>/lua and <installDir>/lib — where $(LUADIR)/$(LIBDIR) point
+//     for every other backend (build/vars.go, mirroring upstream
+//     configure_paths). A cmake rock passing TARANTOOL_INSTALL_LUADIR="$(LUADIR)"
+//     — vshard does exactly this — installs there.
+//
+// The two roots deliberately differ in what happens to the source file:
+//
+//   - installDir files are MOVED, and an emptied lua/lib dir is pruned. A .lua
+//     left under share/tarantool/rocks/<name>/<ver>/lua/ sits on no loader path
+//     and is precisely the layout this stage exists to undo; upstream's
+//     repos.deploy_files moves too (fs.move).
+//   - buildDir files are COPIED. <installDir>/build is a staging area the design
+//     keeps on purpose, so its contents survive the deploy.
+//
+// A missing subtree is a no-op — the backend installed nothing there. lib files
+// are deployed executable (0755).
+func (t *Tree) deployInstalledSubtrees(
+	spec *rocks.Rockspec,
+	buildDir string,
+	rm *rocks.RockManifest,
+) error {
+	roots := []struct {
+		dir  string
+		disp srcDisposition
+	}{
+		{buildDir, keepSource},
+		{t.InstallDir(spec.Package, spec.Version), moveSource},
 	}
 
-	if err := t.deployInstalledSubtree(filepath.Join(buildDir, "lua"), t.DeployLuaDir(), filePerm, rm.Lua, spec); err != nil {
-		return fmt.Errorf("tree.Deploy: scan make lua subtree: %w", err)
-	}
+	seen := map[string]bool{}
 
-	if err := t.deployInstalledSubtree(filepath.Join(buildDir, "lib"), t.DeployLibDir(), execPerm, rm.Lib, spec); err != nil {
-		return fmt.Errorf("tree.Deploy: scan make lib subtree: %w", err)
+	for _, root := range roots {
+		if root.dir == "" || seen[filepath.Clean(root.dir)] {
+			continue
+		}
+
+		seen[filepath.Clean(root.dir)] = true
+
+		for _, sub := range []struct {
+			kind      string
+			deployDir string
+			mode      os.FileMode
+			rmMap     map[string]string
+		}{
+			{kindLua, t.DeployLuaDir(), filePerm, rm.Lua},
+			{kindLib, t.DeployLibDir(), execPerm, rm.Lib},
+		} {
+			src := filepath.Join(root.dir, sub.kind)
+
+			err := t.deployInstalledSubtree(src, sub.deployDir, sub.mode, sub.rmMap, spec, root.disp)
+			if err != nil {
+				return fmt.Errorf("tree.Deploy: scan installed %s subtree: %w", sub.kind, err)
+			}
+		}
 	}
 
 	return nil
@@ -449,17 +501,36 @@ func (t *Tree) DeleteVersion(name, version string) error {
 	return nil
 }
 
-// deployInstalledSubtree walks a make-installed subtree (buildDir/lua or /lib)
-// and copies every file into deployDir under its subtree-relative path,
-// resolving collisions and recording each md5 in rmMap. A missing subtree is a
-// no-op (the Makefile installed nothing there).
-func (t *Tree) deployInstalledSubtree(srcDir, deployDir string, mode os.FileMode, rmMap map[string]string, spec *rocks.Rockspec) error {
+// srcDisposition says what deployInstalledSubtree does with a source file once
+// it has been deployed: keepSource leaves it where the backend put it,
+// moveSource removes it (and prunes the directories it emptied). See
+// deployInstalledSubtrees for why the two roots differ.
+type srcDisposition bool
+
+const (
+	keepSource srcDisposition = false
+	moveSource srcDisposition = true
+)
+
+// deployInstalledSubtree walks a backend-installed subtree (<root>/lua or
+// <root>/lib) and deploys every file into deployDir under its subtree-relative
+// path, resolving collisions and recording each md5 in rmMap. With
+// disp == moveSource the source file is removed afterwards and the emptied
+// directories are pruned. A missing subtree is a no-op (the backend installed
+// nothing there).
+func (t *Tree) deployInstalledSubtree(
+	srcDir, deployDir string,
+	mode os.FileMode,
+	rmMap map[string]string,
+	spec *rocks.Rockspec,
+	disp srcDisposition,
+) error {
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
 		return nil //nolint:nilerr // a missing subtree simply means nothing was installed there
 	}
 
-	return filepath.Walk(srcDir, func(p string, fi os.FileInfo, werr error) error {
+	err = filepath.Walk(srcDir, func(p string, fi os.FileInfo, werr error) error {
 		if werr != nil {
 			return werr
 		}
@@ -492,8 +563,44 @@ func (t *Tree) deployInstalledSubtree(srcDir, deployDir string, mode os.FileMode
 
 		rmMap[filepath.ToSlash(r)] = sum
 
+		if disp == moveSource {
+			if err := os.Remove(p); err != nil {
+				return fmt.Errorf("remove relocated %q: %w", p, err)
+			}
+		}
+
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	if disp == moveSource {
+		pruneEmptyDirs(srcDir)
+	}
+
+	return nil
+}
+
+// pruneEmptyDirs removes dir and every subdirectory left empty by a moveSource
+// deploy, bottom-up. Best-effort: a directory still holding files the deploy did
+// not claim is left alone, and a failed removal is not an error — the files are
+// already in place, and a stray empty directory harms nothing.
+func pruneEmptyDirs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			pruneEmptyDirs(filepath.Join(dir, e.Name()))
+		}
+	}
+
+	if rest, err := os.ReadDir(dir); err == nil && len(rest) == 0 {
+		_ = os.Remove(dir)
+	}
 }
 
 // resolveModule maps a single build.modules entry to (srcPath, dstPath, kind).
