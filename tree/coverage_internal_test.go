@@ -746,10 +746,10 @@ func TestDeploy_CopyDirectoriesError(t *testing.T) {
 	assert.Contains(t, err.Error(), "copy_directories")
 }
 
-// TestDeploy_MakeSubtreeError propagates deployInstalledSubtree's error
-// (via a resolveSpot backup-rename failure) through deployMakeSubtrees and
+// TestDeploy_InstalledSubtreeError propagates deployInstalledSubtree's error
+// (via a resolveSpot backup-rename failure) through deployInstalledSubtrees and
 // Deploy.
-func TestDeploy_MakeSubtreeError(t *testing.T) {
+func TestDeploy_InstalledSubtreeError(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -774,13 +774,13 @@ func TestDeploy_MakeSubtreeError(t *testing.T) {
 	}
 	_, err = tr.Deploy(spec, src, buildDir)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "scan make lua subtree")
+	assert.Contains(t, err.Error(), "scan installed lua subtree")
 }
 
-// TestDeploy_MakeSubtreeMissingIsNoop covers deployInstalledSubtree's
+// TestDeploy_InstalledSubtreeMissingIsNoop covers deployInstalledSubtree's
 // no-subtree short-circuit: a make build that only populates buildDir/lua
 // leaves buildDir/lib entirely absent, which must not be an error.
-func TestDeploy_MakeSubtreeMissingIsNoop(t *testing.T) {
+func TestDeploy_InstalledSubtreeMissingIsNoop(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

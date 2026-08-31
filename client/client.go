@@ -436,18 +436,6 @@ func (r *Rocks) Admin(ctx context.Context, subCmd string, args []string, opts Ad
 
 // --- internal helpers ---
 
-// matchModulePath reports whether the on-disk slashed path (with extension)
-// appears verbatim in the deployed file map, returning the matched key. It is
-// an exact lookup; conflict-munged siblings (`<slashed>_<munge>` suffixes) are
-// not matched here.
-func matchModulePath(deployed map[string]string, want string) (string, bool) {
-	if _, ok := deployed[want]; ok {
-		return want, true
-	}
-
-	return "", false
-}
-
 // upsertProvider records provider (a "name/version" token) in the module or
 // command provider list. When active, it is moved to the front (index 0) — the
 // active provider slot upstream get_current_provider reads; otherwise it is

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
 )
 
@@ -129,4 +130,54 @@ func MungedPath(deployDir, target, pkg, ver string) string {
 	rest := strings.TrimLeft(strings.TrimPrefix(target, deployDir), "/")
 
 	return filepath.Join(deployDir, mungedVersion(pkg, ver)+"-"+rest)
+}
+
+// ModuleIndex inverts a deployed RockManifest into the module index the tree
+// manifest carries per installed rock: module name → deployed path, relative to
+// the lua/lib deploy dir.
+//
+// It mirrors upstream repos.package_modules, which derives the same index from
+// the rock_manifest's lua/lib sections rather than from the rockspec's declared
+// build.modules — and for the same reason. build.modules is populated by the
+// builtin backend only, so a cmake, make or command rock declares no modules at
+// all and an index keyed on that field silently stays empty, however much the
+// rock actually deployed.
+//
+// Two deliberate departures from upstream, both documented rather than fixed
+// here because each would change behaviour beyond the derivation:
+//
+//   - Upstream scans lib then lua, so a rock shipping both `foo.so` and
+//     `foo.lua` records the .lua path. This scans lua then lib, keeping the
+//     .so preference the caller's rockspec-driven index has always encoded.
+//   - A conflict-munged key (an inactive install that lost the plain spot to a
+//     higher version, see MungedPath) is SKIPPED. Its module name would have to
+//     be un-munged first, and the rock recorded as a non-active provider — a
+//     distinction the tree manifest writer does not make today, so indexing it
+//     would misreport it as the active provider.
+//
+// Exported for the same reason MungedPath is: the caller that writes the tree
+// manifest must invert exactly the path formation Deploy used.
+func ModuleIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
+	out := map[string]string{}
+	if rm == nil {
+		return out
+	}
+
+	mungedPrefix := mungedVersion(pkg, ver) + "-"
+
+	// lua first, then lib: a later assignment wins, so a .so beats a .lua of
+	// the same module name.
+	for _, files := range []map[string]string{rm.Lua, rm.Lib} {
+		for rel := range files {
+			if strings.HasPrefix(rel, mungedPrefix) {
+				continue
+			}
+
+			if mod := pathToModule(rel); mod != "" {
+				out[mod] = rel
+			}
+		}
+	}
+
+	return out
 }
