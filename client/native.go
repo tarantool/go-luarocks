@@ -444,12 +444,19 @@ func (e *nativeEngine) installFromSource(ctx context.Context, step rocks.Install
 }
 
 // fetchSource downloads spec.Source.URL into tmp and returns the source
-// root to build against. After unpacking an archive the real source usually
-// lives in a single top-level subdirectory (e.g. inspect.lua-3.1.3/), and
-// build.modules paths are relative to that root — so descend into it,
-// mirroring upstream luarocks' fetch.find_base_dir.
+// root to build against.
+//
+// Whether that root is the fetched path itself is the backend's answer, not a
+// guess made from the URL: a git clone and a copied local tree ARE the source
+// root, while an unpacked archive usually keeps the real source one level down
+// in a single top-level subdirectory (e.g. inspect.lua-3.1.3/) that
+// findSourceBaseDir has to find, mirroring upstream fetch.find_base_dir.
+// Descending into a path that is already the root picks the wrong directory
+// whenever the tree contains a subdirectory named like the archive would be —
+// tarantool/checks clones to checks/ and holds a checks/ of its own, so the
+// build used to look for CMakeLists.txt in checks/checks and fail.
 func (e *nativeEngine) fetchSource(ctx context.Context, spec *rocks.Rockspec, tmp string) (string, error) {
-	unpacked, err := fetch.FetchWith(ctx, spec.Source.URL, tmp, fetch.Options{
+	res, err := fetch.Sources(ctx, spec.Source.URL, tmp, fetch.Options{
 		InsecureServers: e.cfg.InsecureServers,
 		Tag:             spec.Source.Tag,
 		Branch:          spec.Source.Branch,
@@ -462,7 +469,11 @@ func (e *nativeEngine) fetchSource(ctx context.Context, spec *rocks.Rockspec, tm
 		return "", fmt.Errorf("fetch %s: %w", spec.Source.URL, err)
 	}
 
-	return findSourceBaseDir(unpacked, spec)
+	if res.SourceRoot {
+		return res.Path, nil
+	}
+
+	return findSourceBaseDir(res.Path, spec)
 }
 
 // findSourceBaseDir mirrors upstream luarocks fetch.find_base_dir: pick the
@@ -521,6 +532,17 @@ func findSourceBaseDir(dir string, spec *rocks.Rockspec) (string, error) {
 // deduceBaseDir infers the directory an archive unpacks into from its name,
 // mirroring upstream dir.deduce_base_dir (dir.lua:38-46): strip a trailing
 // known archive extension ({zip,git,tgz,tar,gz,bz2}) then any ".tar".
+//
+// "git" is in that extension set because upstream's own list has it, and it is
+// kept deliberately. Turning "checks.git" into "checks" is what made this
+// function descend into a git checkout's own checks/ subdirectory, but the
+// defect was the call: an archive heuristic was being run over a clone. With
+// fetch.Result.SourceRoot answering that question no git URL reaches here any
+// more, and upstream needs the entry for the same reason it needs the rest —
+// its rockspecs.lua:135 deduces source.dir from any URL, git ones included,
+// where it names the clone directory beside the store dir rather than a
+// directory inside it. Dropping the entry would make the Go helper disagree
+// with the upstream function it mirrors while fixing nothing.
 func deduceBaseDir(url string) string {
 	base := filepath.Base(url)
 

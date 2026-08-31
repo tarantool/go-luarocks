@@ -33,7 +33,8 @@ func TestFileBackend_CopiesTree(t *testing.T) {
 
 	got, err := fetch.FetchFile(context.Background(), "file://"+src, dst, fetch.Options{})
 	require.NoError(t, err, "Fetch")
-	assert.Equal(t, dst, got)
+	assert.Equal(t, dst, got.Path)
+	assert.True(t, got.SourceRoot, "a copied tree is the source root, nothing to descend into")
 
 	b, err := os.ReadFile(filepath.Join(dst, "a.lua")) //nolint:gosec // test reads from a t.TempDir() path
 	if assert.NoError(t, err, "a.lua") {

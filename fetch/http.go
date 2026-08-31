@@ -37,6 +37,13 @@ const (
 // archive formats (.zip, .tar.gz, .tgz, .tar, .rock, .src.rock) into destDir. Other content
 // types are written to destDir/<basename-from-url> and destDir is
 // returned as-is.
+//
+// What it returns is an unpack directory, never a source root
+// (Result.SourceRoot is false): an archive was expanded into destDir, so the
+// sources typically sit in a versioned subdirectory the caller still has to
+// resolve — upstream's fetch.find_base_dir job (fetch.lua:233). A plain
+// (non-archive) download lands beside nothing else, and the same resolution
+// then correctly keeps destDir itself.
 type httpBackend struct{}
 
 // Fetch performs the GET, writes the body to a temp file under destDir,
@@ -46,21 +53,21 @@ type httpBackend struct{}
 // opts.InsecureServers, a Transport with InsecureSkipVerify=true is used
 // instead — opt-in for tarantool's rocks server which historically
 // served over HTTP without TLS.
-func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("fetch.http: parse %q: %w", rawURL, err)
+		return Result{}, fmt.Errorf("fetch.http: parse %q: %w", rawURL, err)
 	}
 
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
-		return "", fmt.Errorf("fetch.http: mkdir %q: %w", destDir, err)
+		return Result{}, fmt.Errorf("fetch.http: mkdir %q: %w", destDir, err)
 	}
 
 	client := buildHTTPClient(u.Host, opts)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("fetch.http: new request: %w", err)
+		return Result{}, fmt.Errorf("fetch.http: new request: %w", err)
 	}
 
 	ua := opts.UserAgent
@@ -72,13 +79,13 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch.http: GET %s: %w", rawURL, err)
+		return Result{}, fmt.Errorf("fetch.http: GET %s: %w", rawURL, err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= httpStatusErrThreshold {
-		return "", fmt.Errorf("fetch.http: GET %s: status %d", rawURL, resp.StatusCode)
+		return Result{}, fmt.Errorf("fetch.http: GET %s: status %d", rawURL, resp.StatusCode)
 	}
 
 	// Upstream names the downloaded file rockspec.source.file when set, else
@@ -99,39 +106,39 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 	// tmp is built from destDir (caller-provided) plus a sanitized basename.
 	f, err := os.Create(tmp)
 	if err != nil {
-		return "", fmt.Errorf("fetch.http: create %q: %w", tmp, err)
+		return Result{}, fmt.Errorf("fetch.http: create %q: %w", tmp, err)
 	}
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 
-		return "", fmt.Errorf("fetch.http: copy body: %w", err)
+		return Result{}, fmt.Errorf("fetch.http: copy body: %w", err)
 	}
 
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 
-		return "", fmt.Errorf("fetch.http: close: %w", err)
+		return Result{}, fmt.Errorf("fetch.http: close: %w", err)
 	}
 
 	dst := filepath.Join(destDir, base)
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 
-		return "", fmt.Errorf("fetch.http: rename: %w", err)
+		return Result{}, fmt.Errorf("fetch.http: rename: %w", err)
 	}
 
 	// Verify source.md5 before unpacking, matching upstream get_sources.
 	if err := checkMD5(dst, opts.MD5); err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	if err := unpackArchive(dst, destDir); err != nil {
-		return "", fmt.Errorf("fetch.http: unpack: %w", err)
+		return Result{}, fmt.Errorf("fetch.http: unpack: %w", err)
 	}
 
-	return destDir, nil
+	return Result{Path: destDir, SourceRoot: false}, nil
 }
 
 // unpackArchive extracts a recognized archive at path into destDir and

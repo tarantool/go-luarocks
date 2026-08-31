@@ -26,24 +26,37 @@ const (
 // directly) so that build steps which scribble into the working tree
 // don't corrupt the user's local source — matches upstream luarocks's
 // `fetch.fetch_local`.
+//
+// Its two paths answer Result.SourceRoot differently, and only the backend can
+// tell them apart — the URL cannot:
+//
+//   - a directory URL copies the tree verbatim into destDir, so destDir IS the
+//     source root. Descending would repeat the git bug on any local checkout
+//     that holds a subdirectory named like the URL's last segment.
+//   - a file URL copies one file in and expands it when it is a recognized
+//     archive, leaving destDir an unpack directory like the http backend's.
+//
+// Upstream only ever has the second case: its file protocol runs through
+// fetch.get_sources → fs.unpack_archive (fetch.lua:430-489), and copying a
+// whole directory is our extension, so no upstream behavior covers the first.
 type fileBackend struct{}
 
 // Fetch strips the `file://` prefix, validates the source path, copies
 // the tree into destDir, and returns the destination path.
-func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return Result{}, err
 	}
 
 	src := strings.TrimPrefix(rawURL, "file://")
 
 	st, err := os.Stat(src)
 	if err != nil {
-		return "", fmt.Errorf("fetch.file: stat %q: %w", src, err)
+		return Result{}, fmt.Errorf("fetch.file: stat %q: %w", src, err)
 	}
 
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
-		return "", fmt.Errorf("fetch.file: mkdir %q: %w", destDir, err)
+		return Result{}, fmt.Errorf("fetch.file: mkdir %q: %w", destDir, err)
 	}
 
 	if !st.IsDir() {
@@ -60,25 +73,25 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 
 		err := copyOneFile(src, dst, st.Mode().Perm())
 		if err != nil {
-			return "", err
+			return Result{}, err
 		}
 
 		if err := checkMD5(dst, opts.MD5); err != nil {
-			return "", err
+			return Result{}, err
 		}
 
 		if err := unpackArchive(dst, destDir); err != nil {
-			return "", fmt.Errorf("fetch.file: unpack: %w", err)
+			return Result{}, fmt.Errorf("fetch.file: unpack: %w", err)
 		}
 
-		return destDir, nil
+		return Result{Path: destDir, SourceRoot: false}, nil
 	}
 	// Copy tree rooted at src into destDir.
 	if err := copyDir(ctx, src, destDir); err != nil {
-		return "", fmt.Errorf("fetch.file: %w", err)
+		return Result{}, fmt.Errorf("fetch.file: %w", err)
 	}
 
-	return destDir, nil
+	return Result{Path: destDir, SourceRoot: true}, nil
 }
 
 func copyDir(ctx context.Context, src, dst string) error {

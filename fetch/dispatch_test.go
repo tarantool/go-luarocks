@@ -14,14 +14,19 @@ type recordingBackend struct {
 	calls int
 	url   string
 	opts  fetch.Options
+	// sourceRoot is echoed back as Result.SourceRoot, so a test can pin what
+	// the dispatcher passes through from a backend.
+	sourceRoot bool
 }
 
-func (r *recordingBackend) Fetch(_ context.Context, u, dst string, opts fetch.Options) (string, error) {
+func (r *recordingBackend) Fetch(
+	_ context.Context, u, dst string, opts fetch.Options,
+) (fetch.Result, error) {
 	r.calls++
 	r.url = u
 	r.opts = opts
 
-	return dst, nil
+	return fetch.Result{Path: dst, SourceRoot: r.sourceRoot}, nil
 }
 
 //nolint:paralleltest // mutates the package-global backends dispatch table

@@ -35,12 +35,12 @@ func RewriteGitHubGitURL(rawURL string) string { return rewriteGitHubGitURL(rawU
 func StripSCPScheme(cloneURL string) string { return stripSCPScheme(cloneURL) }
 
 // FetchFile runs the file:// backend directly for external tests.
-func FetchFile(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+func FetchFile(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	return fileBackend{}.Fetch(ctx, rawURL, destDir, opts)
 }
 
 // FetchHTTP runs the http(s) backend directly for external tests.
-func FetchHTTP(ctx context.Context, rawURL, destDir string, opts Options) (string, error) {
+func FetchHTTP(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	return httpBackend{}.Fetch(ctx, rawURL, destDir, opts)
 }
 
