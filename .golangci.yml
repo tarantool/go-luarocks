@@ -18,11 +18,16 @@ linters:
     # --- Policy / whitelist tools: flag everything until configured ---
     - exhaustruct   # needs per-struct include patterns; otherwise flags every
                     # partial struct literal — noise, not signal.
+    - exhaustruct_v5 # the successor of the above, auto-enabled by `default: all`
+                    # since v2.12.0 under a name the old entry does not cover.
+                    # Same rationale: 480 findings, all partial struct literals.
 
     # --- Deprecated ---
     - wsl           # deprecated since v2.2.0; superseded by wsl_v5 (still on via
                     # `default: all`). Keeping both doubles every whitespace
                     # finding and prints a deprecation warning each run.
+    - gomodguard    # deprecated since v2.12.0; superseded by gomodguard_v2,
+                    # same story as wsl above.
 
     # --- Security scanner: high false-positive rate for this codebase ---
     - gosec         # G304/G305/G110 fire on internally-controlled paths and
@@ -47,6 +52,14 @@ linters:
     # --- Catch-all meta-linter, overlaps the above ---
     - revive        # broad style ruleset duplicating disabled checks above.
   settings:
+    # v2.12.0 gave goconst an `exclude-types` knob whose default ([Call]) is
+    # narrower than the contexts it used to skip: composite literals are now
+    # reported, which is almost entirely table-driven test data (116 of 121
+    # findings). Restore the previous scope rather than hoist test fixtures
+    # into constants.
+    goconst:
+      exclude-types: [Call, CompositeLit]
+
     # Only public modules may be imported; anything new must be added here
     # deliberately so an internal/corporate dependency can't sneak back in.
     depguard:
