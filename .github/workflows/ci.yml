@@ -62,7 +62,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.11.4
+          # Must be built with a Go no older than the one `stable` installs
+          # above: golangci-lint type-checks the standard library from source,
+          # so an older binary panics on a newer GOROOT ("file requires newer
+          # Go version go1.27"). Bump this together with the toolchain.
+          version: v2.13.2
           args: ${{ env.PKGS }}
 
       - name: codespell
