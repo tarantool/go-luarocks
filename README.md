@@ -48,7 +48,7 @@ LuaJIT-as-distinct, no Windows. Linux + macOS, amd64 + arm64.
 
 ### Requirements
 
-- Go >= 1.25
+- Go >= 1.26
 - No CGO — the module and its dependencies (`go-git`, `gopher-lua`) are pure
   Go
 - Linux or macOS

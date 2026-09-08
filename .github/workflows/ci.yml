@@ -82,9 +82,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # Lowest Go version the module requires (go.mod: go 1.25.0), plus the
+        # Lowest Go version the module requires (go.mod: go 1.26.0), plus the
         # latest stable release.
-        go: ['1.25', 'stable']
+        go: ['1.26', 'stable']
     steps:
       - uses: actions/checkout@v4
 
