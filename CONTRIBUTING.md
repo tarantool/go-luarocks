@@ -9,7 +9,7 @@ implementation.
 
 ## First steps
 
-The project requires Go 1.25 or later. Clone the repository and build it.
+The project requires Go 1.26 or later. Clone the repository and build it.
 
 ```sh
 $ git clone https://github.com/tarantool/go-luarocks
