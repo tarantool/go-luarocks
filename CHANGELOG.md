@@ -39,6 +39,11 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ### Changed
 
+- Minimum Go version is 1.26. `golang.org/x/crypto` v0.56.0, which fixes
+  GO-2026-6354 and GO-2026-6355 (ssh channel deadlock DoS, reachable through
+  go-git's ssh transport), declares `go 1.26.0`. `go-git` is bumped to
+  v5.19.2 for GO-2026-6213 and GO-2026-6214 (worktree symlink following and
+  reference-name path traversal).
 - fetch: `Backend.Fetch` returns a `Result` (the path plus a `SourceRoot`
   flag) instead of a bare path, and `fetch.Sources` exposes it. `Fetch` and
   `FetchWith` keep their path-only signatures.

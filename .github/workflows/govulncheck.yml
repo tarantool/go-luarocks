@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           # Latest stable toolchain: stdlib vulnerabilities (e.g. GO-2026-5856)
-          # are fixed in point releases after the module's minimum go 1.25.
+          # are fixed in point releases after the module's minimum go 1.26.
           go-version: 'stable'
           check-latest: true
 
