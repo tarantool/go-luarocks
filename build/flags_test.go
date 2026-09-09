@@ -34,6 +34,86 @@ func TestDeriveFlags_Linux(t *testing.T) {
 	assert.Equal(t, "/opt/tt/bin", f.LuaBinDir)
 }
 
+func TestLuaBinDir(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		tarantol rocks.TarantoolConfig
+		want     string
+	}{
+		{
+			name: "executable beside its prefix (flat SDK layout)",
+			tarantol: rocks.TarantoolConfig{
+				Executable: "/home/u/sdk/te350/tarantool",
+				Prefix:     "/home/u/sdk/te350",
+			},
+			want: "/home/u/sdk/te350",
+		},
+		{
+			name: "executable under prefix/bin",
+			tarantol: rocks.TarantoolConfig{
+				Executable: "/opt/tt/bin/tarantool",
+				Prefix:     "/opt/tt",
+			},
+			want: "/opt/tt/bin",
+		},
+		{
+			name:     "executable only",
+			tarantol: rocks.TarantoolConfig{Executable: "/usr/local/bin/tarantool"},
+			want:     "/usr/local/bin",
+		},
+		{
+			name:     "prefix only",
+			tarantol: rocks.TarantoolConfig{Prefix: "/opt/tt"},
+			want:     "/opt/tt/bin",
+		},
+		{
+			name: "bare command name falls back to prefix",
+			tarantol: rocks.TarantoolConfig{
+				Executable: "tarantool",
+				Prefix:     "/opt/tt",
+			},
+			want: "/opt/tt/bin",
+		},
+		{
+			name:     "bare command name and no prefix",
+			tarantol: rocks.TarantoolConfig{Executable: "tarantool"},
+			want:     "",
+		},
+		{
+			name: "empty",
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := rocks.Config{Tarantool: tc.tarantol}
+			assert.Equal(t, tc.want, build.LuaBinDir(cfg))
+			assert.Equal(t, tc.want, build.DeriveFlagsFor(cfg, "linux").LuaBinDir)
+		})
+	}
+}
+
+func TestDeriveFlags_LuaBinDirFromExecutable(t *testing.T) {
+	t.Setenv("CC", "")
+	t.Setenv("CFLAGS", "")
+
+	cfg := rocks.Config{
+		Tarantool: rocks.TarantoolConfig{
+			Executable: "/home/u/sdk/te350/tarantool",
+			Prefix:     "/home/u/sdk/te350",
+			IncludeDir: "/home/u/sdk/te350/include/tarantool",
+		},
+	}
+	f := build.DeriveFlagsFor(cfg, "linux")
+	assert.Equal(t, "/home/u/sdk/te350/lib", f.LuaLibDir, "lib dir still follows the prefix")
+	assert.Equal(t, "/home/u/sdk/te350", f.LuaBinDir, "bin dir follows the executable")
+}
+
 func TestDeriveFlags_CFLAGSFromEnv(t *testing.T) {
 	t.Setenv("CC", "")
 	t.Setenv("CFLAGS", "-DENABLE_FOO -O0")

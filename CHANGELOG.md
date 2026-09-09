@@ -50,6 +50,12 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ### Fixed
 
+- build: `LUA_BINDIR` is derived from `Tarantool.Executable` when that carries
+  a directory component, instead of always being `<Prefix>/bin`. A Tarantool
+  SDK is flat — the binary sits at the SDK root and there is no `bin/` under
+  the prefix — so upstream Lua that runs `<LUA_BINDIR>/tarantool` failed and
+  carried on: `bin` scripts were deployed unwrapped and the LuaJIT version
+  read as nil, letting a pack report success with a changed result.
 - tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
   `build.type`, not only `make`. A `cmake` or `command` rock installing into
   `$(LUADIR)`/`$(LIBDIR)` left its modules under

@@ -121,8 +121,34 @@ func deriveFlagsFor(cfg rocks.Config, goos string) Flags {
 
 	if cfg.Tarantool.Prefix != "" {
 		f.LuaLibDir = filepath.Join(cfg.Tarantool.Prefix, "lib")
-		f.LuaBinDir = filepath.Join(cfg.Tarantool.Prefix, "bin")
 	}
 
+	f.LuaBinDir = LuaBinDir(cfg)
+
 	return f
+}
+
+// LuaBinDir returns the directory luarocks searches for the Lua interpreter
+// (LUA_BINDIR): the directory holding cfg.Tarantool.Executable when the
+// executable is configured with a directory component, otherwise
+// <Prefix>/bin, otherwise "".
+//
+// The executable wins over the prefix because the two disagree in a
+// Tarantool SDK: the binary sits at the SDK root, next to env.sh, and there
+// is no bin/ under the prefix at all — so <Prefix>/bin/tarantool is a path
+// that does not exist, and luarocks' fs.is_lua / util.get_luajit_version
+// fail against it. A bare command name ("tarantool", resolved through PATH)
+// carries no directory and falls through to the prefix.
+func LuaBinDir(cfg rocks.Config) string {
+	if exe := cfg.Tarantool.Executable; exe != "" {
+		if dir := filepath.Dir(exe); dir != "." {
+			return dir
+		}
+	}
+
+	if cfg.Tarantool.Prefix != "" {
+		return filepath.Join(cfg.Tarantool.Prefix, "bin")
+	}
+
+	return ""
 }

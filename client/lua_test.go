@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
@@ -48,6 +49,42 @@ func TestLuaEngine_OsGetenvOverride(t *testing.T) {
 	e.LState().Pop(1)
 	require.True(t, got.Type() == lua.LTString && got.String() == "/test-prefix",
 		"hardcoded.PREFIX = %v (%s); want \"/test-prefix\"", got, got.Type())
+}
+
+// probeHardcoded returns hardcoded.lua's value for key as seen by the booted VM.
+func probeHardcoded(t *testing.T, e *client.LuaEngine, key string) string {
+	t.Helper()
+
+	require.NoError(t, e.LState().DoString("return require('luarocks.core.hardcoded')."+key),
+		"probe DoString")
+	got := e.LState().Get(-1)
+	e.LState().Pop(1)
+	require.Equal(t, lua.LTString, got.Type(), "hardcoded.%s = %v", key, got)
+
+	return got.String()
+}
+
+func TestLuaEngine_LuaBinDirFromExecutable(t *testing.T) {
+	t.Parallel()
+
+	// A flat SDK: the binary sits at the prefix root, there is no <prefix>/bin.
+	cfg := luaTestCfg(t)
+	cfg.Tarantool.Prefix = "/sdk/te350"
+	cfg.Tarantool.Executable = "/sdk/te350/tarantool"
+	e := client.NewLuaEngine(cfg, manif.FileStore{}, nil)
+	require.NoError(t, e.Boot(), "boot")
+	assert.Equal(t, "/sdk/te350", probeHardcoded(t, e, "PREFIX"))
+	assert.Equal(t, "/sdk/te350", probeHardcoded(t, e, "LUA_BINDIR"))
+}
+
+func TestLuaEngine_LuaBinDirFromPrefix(t *testing.T) {
+	t.Parallel()
+
+	cfg := luaTestCfg(t)
+	cfg.Tarantool.Prefix = "/opt/tt"
+	e := client.NewLuaEngine(cfg, manif.FileStore{}, nil)
+	require.NoError(t, e.Boot(), "boot")
+	assert.Equal(t, "/opt/tt/bin", probeHardcoded(t, e, "LUA_BINDIR"))
 }
 
 func TestLuaEngine_WrapperExec_Help(t *testing.T) {
