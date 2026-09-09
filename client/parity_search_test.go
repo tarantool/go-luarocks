@@ -66,18 +66,20 @@ func newParitySearchServer(t *testing.T) string {
 //
 // Two things about the setup are load-bearing and neither is incidental:
 //
-//   - The proxy variables point at a closed port. The lua backend's
-//     cfg.rocks_servers is not empty to begin with — hardcoded.lua puts
-//     http://rocks.tarantool.org/ in it and --server PREPENDS rather than
-//     replaces — so without this the lua side would additionally list
-//     whatever that live server holds, and the test would measure the
-//     internet. The downloader is curl or wget, both of which honor these.
-//   - Each search gets a FRESH lua client. `--server` is applied by mutating
-//     cfg.rocks_servers inside the embedded VM, and that VM outlives a single
-//     dispatch, so the N-th search through one lua client searches the
-//     override N times over and reports every match N times. Measured while
-//     writing this test; it is a property of the lua backend, not of the
-//     fixture.
+//   - The server is handed over through Config.Servers, not SearchOpts.Servers.
+//     Config.Servers REPLACES the server list on both backends (on the lua side
+//     via hardcoded.ROCKS_SERVERS, which cfg.lua reads as cfg.rocks_servers), so
+//     the test never reaches the live default. SearchOpts.Servers would instead
+//     PREPEND to it (cmd.lua process_server_args), leaving the lua side to also
+//     list whatever http://rocks.tarantool.org/ holds — the test would measure
+//     the internet. This is what the proxy-to-a-closed-port trick used to work
+//     around.
+//   - Each search gets a FRESH lua client. A per-call --server is applied by
+//     mutating cfg.rocks_servers inside the embedded VM, and that VM outlives a
+//     single dispatch, so the N-th search through one lua client searches the
+//     override N times over and reports every match N times (glr-x6t.10). The
+//     Config route above does not accumulate, but the fresh client stays as the
+//     cheap guard against the wider class of state that survives a dispatch.
 func TestBackendParity_Search(t *testing.T) {
 	// The lua backend runs real LuaRocks, which shells out to the configured
 	// interpreter — including to learn the LuaJIT version behind the
@@ -91,25 +93,18 @@ func TestBackendParity_Search(t *testing.T) {
 
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>
 
-	for _, v := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"} {
-		t.Setenv(v, "http://127.0.0.1:1")
-	}
-
-	t.Setenv("no_proxy", "")
-	t.Setenv("NO_PROXY", "")
-
 	repo := newParitySearchServer(t)
 
-	// Both clients are handed the server the same way — through
-	// SearchOpts.Servers — so the effective server list is identical: the
-	// native backend prepends it to an empty Config.Servers, the lua backend
-	// prepends it to the hardcoded default that the proxy above renders inert.
+	// Both clients are handed the server the same way — through Config.Servers
+	// — so the effective server list is identical and, on both backends, holds
+	// exactly this repository.
 	newClient := func(backend client.Backend) *client.Rocks {
 		t.Helper()
 
 		r, err := client.New(rocks.Config{
 			Tree:       t.TempDir(),
 			WorkingDir: t.TempDir(),
+			Servers:    []string{repo},
 			Tarantool: rocks.TarantoolConfig{
 				Prefix:     prefix,
 				IncludeDir: filepath.Join(prefix, "include", "tarantool"),
@@ -140,7 +135,6 @@ func TestBackendParity_Search(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			opts := c.opts
-			opts.Servers = []string{repo}
 
 			native, err := newClient(client.BackendNative).Search(context.Background(), c.pattern, opts)
 			require.NoError(t, err, "native Search")
@@ -172,13 +166,6 @@ func TestBackendParity_Search_ProvidedRocks(t *testing.T) {
 
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 
-	for _, v := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"} {
-		t.Setenv(v, "http://127.0.0.1:1")
-	}
-
-	t.Setenv("no_proxy", "")
-	t.Setenv("NO_PROXY", "")
-
 	repo := newParitySearchServer(t)
 
 	search := func(backend client.Backend, pattern string) []client.SearchResult {
@@ -187,6 +174,7 @@ func TestBackendParity_Search_ProvidedRocks(t *testing.T) {
 		r, err := client.New(rocks.Config{
 			Tree:       t.TempDir(),
 			WorkingDir: t.TempDir(),
+			Servers:    []string{repo},
 			Tarantool: rocks.TarantoolConfig{
 				Prefix:     prefix,
 				IncludeDir: filepath.Join(prefix, "include", "tarantool"),
@@ -196,7 +184,7 @@ func TestBackendParity_Search_ProvidedRocks(t *testing.T) {
 		require.NoError(t, err, "New(backend=%v)", backend)
 
 		found, err := r.Search(context.Background(), pattern,
-			client.SearchOpts{Servers: []string{repo}})
+			client.SearchOpts{})
 		require.NoError(t, err, "Search(backend=%v)", backend)
 
 		return found
