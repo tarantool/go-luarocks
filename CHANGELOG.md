@@ -44,6 +44,15 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   backend's. `SearchResult` gains `Arch` and `Namespace`, both filled by
   either backend, so a caller can tell a rockspec from an installable
   binary rock.
+- fetch: `File`, a raw single-file retrieval (upstream `download.lua`'s
+  `get_file`) that copies or downloads one file into a directory under its
+  own basename and never unpacks it. `Fetch` and `Sources` expand every
+  recognized archive, so they cannot deliver a `.rock` — a zip under another
+  extension — as a file.
+- client: `Download` on the native backend (upstream `luarocks download`),
+  with `--source` / `--rockspec` / `--arch` / `--all` and the same files,
+  bytes and returned paths as the lua backend. The three arch flags are
+  mutually exclusive, as upstream's parser makes them.
 - Runnable, godoc-rendered examples across all public packages.
 
 ### Changed

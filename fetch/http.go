@@ -63,31 +63,6 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 		return Result{}, fmt.Errorf("fetch.http: mkdir %q: %w", destDir, err)
 	}
 
-	client := buildHTTPClient(u.Host, opts)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return Result{}, fmt.Errorf("fetch.http: new request: %w", err)
-	}
-
-	ua := opts.UserAgent
-	if ua == "" {
-		ua = defaultUserAgent
-	}
-
-	req.Header.Set("User-Agent", ua)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return Result{}, fmt.Errorf("fetch.http: GET %s: %w", rawURL, err)
-	}
-
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= httpStatusErrThreshold {
-		return Result{}, fmt.Errorf("fetch.http: GET %s: status %d", rawURL, resp.StatusCode)
-	}
-
 	// Upstream names the downloaded file rockspec.source.file when set, else
 	// dir.base_name(url) (rockspecs.lua:125). Honoring source.file matters
 	// when the URL path has no usable extension (e.g. .../download?ref=v1):
@@ -101,32 +76,9 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 		base = "download"
 	}
 
-	tmp := filepath.Join(destDir, "."+base+".part")
-
-	// tmp is built from destDir (caller-provided) plus a sanitized basename.
-	f, err := os.Create(tmp)
-	if err != nil {
-		return Result{}, fmt.Errorf("fetch.http: create %q: %w", tmp, err)
-	}
-
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-
-		return Result{}, fmt.Errorf("fetch.http: copy body: %w", err)
-	}
-
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-
-		return Result{}, fmt.Errorf("fetch.http: close: %w", err)
-	}
-
 	dst := filepath.Join(destDir, base)
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
-
-		return Result{}, fmt.Errorf("fetch.http: rename: %w", err)
+	if err := httpDownload(ctx, rawURL, dst, opts); err != nil {
+		return Result{}, err
 	}
 
 	// Verify source.md5 before unpacking, matching upstream get_sources.
@@ -139,6 +91,76 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 	}
 
 	return Result{Path: destDir, SourceRoot: false}, nil
+}
+
+// httpDownload GETs rawURL and writes the response body to dst. It is the
+// transport half shared by httpBackend.Fetch and File: everything up to
+// having the bytes on disk under their final name, and nothing about md5
+// verification or unpacking, which are the callers' to decide.
+//
+// The body lands in a dotted `.part` file beside dst and is renamed into
+// place only once it is complete, so an interrupted transfer never leaves a
+// truncated artifact under a name a later run would trust.
+func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("fetch.http: parse %q: %w", rawURL, err)
+	}
+
+	client := buildHTTPClient(u.Host, opts)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("fetch.http: new request: %w", err)
+	}
+
+	ua := opts.UserAgent
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+
+	req.Header.Set("User-Agent", ua)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch.http: GET %s: %w", rawURL, err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= httpStatusErrThreshold {
+		return fmt.Errorf("fetch.http: GET %s: status %d", rawURL, resp.StatusCode)
+	}
+
+	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
+
+	// tmp is built from the caller-provided destination plus a sanitized
+	// basename.
+	f, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("fetch.http: create %q: %w", tmp, err)
+	}
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+
+		return fmt.Errorf("fetch.http: copy body: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+
+		return fmt.Errorf("fetch.http: close: %w", err)
+	}
+
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+
+		return fmt.Errorf("fetch.http: rename: %w", err)
+	}
+
+	return nil
 }
 
 // unpackArchive extracts a recognized archive at path into destDir and

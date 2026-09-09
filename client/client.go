@@ -377,6 +377,17 @@ func (r *Rocks) Search(ctx context.Context, pattern string, opts SearchOpts) ([]
 	return r.engine.Search(ctx, pattern, opts)
 }
 
+// Download fetches a rock file into r.cfg.WorkingDir and returns its path
+// (upstream `luarocks download`). Both backends implement it: BackendNative
+// resolves the artifact through remote.Search and retrieves it with
+// fetch.File, BackendLua runs upstream and reports the file that appeared.
+// The two agree on which file is downloaded and on the returned path; see
+// nativeEngine.Download for the one documented difference (what a
+// single-file download returns when it overwrote an existing file).
+func (r *Rocks) Download(ctx context.Context, name string, opts DownloadOpts) (string, error) {
+	return r.engine.Download(ctx, name, opts)
+}
+
 // --- engine-delegated operations not served by the native backend ---
 //
 // Each method below is a pure one-line delegation to r.engine — no
@@ -388,13 +399,6 @@ func (r *Rocks) Search(ctx context.Context, pattern string, opts SearchOpts) ([]
 // BackendNative returns rocks.ErrNotImplemented; BackendLua runs upstream.
 func (r *Rocks) Purge(ctx context.Context, opts PurgeOpts) error {
 	return r.engine.Purge(ctx, opts)
-}
-
-// Download fetches a rock file into r.cfg.WorkingDir and returns its path
-// (upstream `luarocks download`). BackendNative returns
-// rocks.ErrNotImplemented; BackendLua runs upstream.
-func (r *Rocks) Download(ctx context.Context, name string, opts DownloadOpts) (string, error) {
-	return r.engine.Download(ctx, name, opts)
 }
 
 // Lint checks the syntax of a rockspec (upstream `luarocks lint`).

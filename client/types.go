@@ -1,7 +1,8 @@
 package client
 
-// This file holds the option/result types for the thirteen Engine write
-// operations the native backend does not implement. Fields are modeled from
+// This file holds the option/result types for the Engine write operations
+// that were first served by the lua backend (Remove, Search and Download have
+// native implementations since; the other ten do not). Fields are modeled from
 // the upstream luarocks/cmd/<name>.lua argparse blocks (cmd:flag → Go bool,
 // cmd:option → Go string, cmd:argument that varies → method parameter).
 //
@@ -89,17 +90,26 @@ type SearchResult struct {
 
 // DownloadOpts tunes Download (luarocks download). See cmd/download.lua.
 type DownloadOpts struct {
-	// Version, if set, is the `version` positional.
+	// Version, if set, is the `version` positional: an exact version, or any
+	// constraint expression deps.ParseConstraints accepts.
 	Version string
-	// All maps to --all: download all files when multiple match.
+	// All downloads every match instead of the single best one (--all). It is
+	// also what makes an empty name legal, and that combination downloads
+	// every rock the servers offer.
 	All bool
-	// Source maps to --source: download the .src.rock if available.
+	// Source restricts the download to the `.src.rock` (--source). Mutually
+	// exclusive with Rockspec and Arch, which upstream enforces as a parser
+	// mutex; setting two is an error, not a silent pick.
 	Source bool
-	// Rockspec maps to --rockspec: download the .rockspec if available.
+	// Rockspec restricts the download to the bare `.rockspec` (--rockspec).
+	// Mutually exclusive with Source and Arch.
 	Rockspec bool
-	// Arch maps to --arch <arch>: download for a specific architecture.
+	// Arch restricts the download to one manifest arch (--arch <arch>), e.g.
+	// "all" or "linux-x86_64". Mutually exclusive with Source and Rockspec.
 	Arch string
-	// Servers, when non-empty, appends a --server <s> global option per entry.
+	// Servers are searched BEFORE the configured Config.Servers rather than
+	// instead of them, which is what upstream's --server does — see
+	// SearchOpts.Servers for why this differs from InstallOpts.Servers.
 	Servers []string
 }
 
