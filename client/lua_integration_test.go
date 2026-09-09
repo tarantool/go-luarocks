@@ -30,7 +30,8 @@ import (
 func TestLuaEngine_Make_PureLuaFixture_EndToEnd(t *testing.T) {
 	// The lua backend runs real LuaRocks, which shells out to the configured
 	// Lua interpreter (tarantool). hardcoded.lua resolves the interpreter under
-	// LUA_BINDIR, which the engine derives from cfg.Tarantool.Prefix/bin. Locate
+	// LUA_BINDIR, which the engine derives from the directory holding
+	// cfg.Tarantool.Executable (cfg.Tarantool.Prefix/bin when unset). Locate
 	// a real tarantool and derive its prefix; skip when none is installed.
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {

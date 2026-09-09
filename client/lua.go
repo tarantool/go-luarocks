@@ -40,6 +40,7 @@ import (
 	"sync"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/build"
 	luarocksembed "github.com/tarantool/go-luarocks/internal/luarocks"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -111,7 +112,13 @@ func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 	// fallback can still apply for keys we have no opinion on.
 	if cfg.Tarantool.Prefix != "" {
 		envOverride["LUAROCKS_PREFIX"] = cfg.Tarantool.Prefix
-		envOverride["LUA_BINDIR"] = filepath.Join(cfg.Tarantool.Prefix, "bin")
+	}
+
+	// LUA_BINDIR follows the executable, not the prefix: upstream Lua code
+	// (fs.is_lua, util.get_luajit_version) runs <LUA_BINDIR>/tarantool via
+	// os.execute, and in a flat SDK the binary lives at the prefix root.
+	if binDir := build.LuaBinDir(cfg); binDir != "" {
+		envOverride["LUA_BINDIR"] = binDir
 	}
 
 	if cfg.Tarantool.IncludeDir != "" {
