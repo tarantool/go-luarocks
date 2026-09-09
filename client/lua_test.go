@@ -9,7 +9,6 @@ import (
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
 	"github.com/tarantool/go-luarocks/manif"
-	lua "github.com/yuin/gopher-lua"
 )
 
 // luaEngine must satisfy the Engine contract (mirrors the nativeEngine
@@ -34,7 +33,6 @@ func TestLuaEngine_BootSucceeds_NoOp(t *testing.T) {
 
 	e := client.NewLuaEngine(luaTestCfg(t), manif.FileStore{}, nil)
 	require.NoError(t, e.Boot(), "boot")
-	require.NotNil(t, e.LState(), "boot did not cache an LState")
 }
 
 func TestLuaEngine_OsGetenvOverride(t *testing.T) {
@@ -43,25 +41,20 @@ func TestLuaEngine_OsGetenvOverride(t *testing.T) {
 	cfg := luaTestCfg(t)
 	cfg.Tarantool.Prefix = "/test-prefix"
 	e := client.NewLuaEngine(cfg, manif.FileStore{}, nil)
-	require.NoError(t, e.Boot(), "boot")
-	require.NoError(t, e.LState().DoString("return require('luarocks.core.hardcoded').PREFIX"), "probe DoString")
-	got := e.LState().Get(-1)
-	e.LState().Pop(1)
-	require.True(t, got.Type() == lua.LTString && got.String() == "/test-prefix",
-		"hardcoded.PREFIX = %v (%s); want \"/test-prefix\"", got, got.Type())
+
+	got, err := e.Probe("require('luarocks.core.hardcoded').PREFIX")
+	require.NoError(t, err, "probe")
+	require.Equal(t, "/test-prefix", got, "hardcoded.PREFIX")
 }
 
-// probeHardcoded returns hardcoded.lua's value for key as seen by the booted VM.
+// probeHardcoded returns hardcoded.lua's value for key as seen by a pooled VM.
 func probeHardcoded(t *testing.T, e *client.LuaEngine, key string) string {
 	t.Helper()
 
-	require.NoError(t, e.LState().DoString("return require('luarocks.core.hardcoded')."+key),
-		"probe DoString")
-	got := e.LState().Get(-1)
-	e.LState().Pop(1)
-	require.Equal(t, lua.LTString, got.Type(), "hardcoded.%s = %v", key, got)
+	got, err := e.Probe("require('luarocks.core.hardcoded')." + key)
+	require.NoError(t, err, "probe hardcoded.%s", key)
 
-	return got.String()
+	return got
 }
 
 func TestLuaEngine_LuaBinDirFromExecutable(t *testing.T) {

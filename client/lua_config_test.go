@@ -1,7 +1,6 @@
 package client_test
 
 import (
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,33 +16,27 @@ import (
 // slog.Default, which floods the test output with the multi-KB help text these
 // probes dispatch to force cfg.init.
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
-// luaProbe evaluates a Lua expression in the engine's VM and returns it as a
+// luaProbe evaluates a Lua expression on a pooled VM and returns it as a
 // string. Every assertion below reads in-VM cfg state, since that — not the Go
-// side — is what the embedded LuaRocks actually acts on.
+// side — is what the embedded LuaRocks actually acts on. The VM is warm, so
+// cfg.init has already run.
 func luaProbe(t *testing.T, e *client.LuaEngine, expr string) string {
 	t.Helper()
 
-	require.NoError(t, e.LState().DoString("return "+expr), "probe %s", expr)
+	got, err := e.Probe(expr)
+	require.NoError(t, err, "probe %s", expr)
 
-	v := e.LState().Get(-1)
-	e.LState().Pop(1)
-
-	return v.String()
+	return got
 }
 
-// bootedEngine returns an engine whose cfg.init has run. cfg.init is lazy —
-// it fires inside the first dispatch, not in boot — so probing cfg without a
-// dispatch first reads an uninitialized table.
+// bootedEngine returns an engine ready to probe.
 func bootedEngine(t *testing.T, cfg rocks.Config) *client.LuaEngine {
 	t.Helper()
 
-	e := client.NewLuaEngine(cfg, manif.FileStore{}, discardLogger())
-	require.NoError(t, e.Call([]string{"help"}), "dispatch to force cfg.init")
-
-	return e
+	return client.NewLuaEngine(cfg, manif.FileStore{}, discardLogger())
 }
 
 // TestLuaEngine_TreeLayoutComesFromHardcoded pins the tree layout the native
