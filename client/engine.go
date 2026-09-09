@@ -20,19 +20,19 @@ import (
 //
 //nolint:interfacebloat // Engine deliberately mirrors the full LuaRocks command surface; splitting it would fragment the single backend contract.
 type Engine interface {
-	// The five operations the native backend already implements.
+	// The eight operations the native backend already implements.
 	Install(ctx context.Context, name string, opts InstallOpts) error
 	Build(ctx context.Context, specPath string, opts BuildOpts) error
 	Make(ctx context.Context, opts MakeOpts) error
 	Pack(ctx context.Context, target string, opts PackOpts) (string, error)
 	Unpack(ctx context.Context, archive, destDir string) error
-
-	// The thirteen operations not yet implemented by the native backend.
-	// Until a backend implements them they return rocks.ErrNotImplemented.
 	Remove(ctx context.Context, name string, opts RemoveOpts) error
-	Purge(ctx context.Context, opts PurgeOpts) error
 	Search(ctx context.Context, pattern string, opts SearchOpts) ([]SearchResult, error)
 	Download(ctx context.Context, name string, opts DownloadOpts) (string, error)
+
+	// The ten operations not yet implemented by the native backend.
+	// Until a backend implements them they return rocks.ErrNotImplemented.
+	Purge(ctx context.Context, opts PurgeOpts) error
 	Lint(ctx context.Context, specPath string, opts LintOpts) error
 	NewVersion(ctx context.Context, specPath string, opts NewVersionOpts) (string, error)
 	WriteRockspec(ctx context.Context, url string, opts WriteRockspecOpts) (string, error)
@@ -51,7 +51,7 @@ type Backend int
 
 const (
 	// BackendNative is the pure-Go implementation (nativeEngine). It is the
-	// default (zero value) and serves all five currently-implemented write
+	// default (zero value) and serves all eight currently-implemented write
 	// operations.
 	BackendNative Backend = iota
 	// BackendLua selects the gopher-lua backend, which boots an embedded
