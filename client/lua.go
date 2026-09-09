@@ -55,6 +55,7 @@ import (
 	"github.com/tarantool/go-luarocks/build"
 	luarocksembed "github.com/tarantool/go-luarocks/internal/luarocks"
 	lua "github.com/yuin/gopher-lua"
+	"github.com/yuin/gopher-lua/parse"
 )
 
 // osExitSentinel prefixes the Lua error raised by the engine's os.exit
@@ -63,6 +64,12 @@ import (
 const osExitSentinel = "go-luarocks os.exit: "
 
 const (
+	// luaPoolSize is how many warm VMs the engine keeps parked. One keeps an
+	// idle engine at the same footprint the old single-VM reuse had (a booted VM
+	// is ~36 MB) while still hiding the warm-up of the next dispatch behind the
+	// current one. A burst of concurrent calls beyond this warms VMs inline.
+	luaPoolSize = 1
+
 	// ioOpenModeArgIndex is the 1-based Lua argument position of io.open's mode
 	// string; ioOpenMinArgsForMode is the argument count at or above which a
 	// mode string is present (io.open(filename, mode)).
@@ -86,16 +93,53 @@ const (
 )
 
 // luaEngine implements the Engine interface against an embedded LuaRocks VM.
+//
+// One VM per dispatch, never reused. Upstream LuaRocks is written for
+// one-process-per-command, so its module-level state IS per-command state:
+// cmd.lua prepends every --server onto cfg.rocks_servers and doubles it per
+// --dev; sets cfg.no_manifest, cfg.verbose, cfg.connection_timeout and friends
+// under "if args.X then" with no path back; accumulates VAR=VALUE into
+// cfg.variables; util.run_scheduled_functions runs its list without clearing
+// it, so rollbacks re-fire; fs/lua.lua's dir_stack survives an aborted command;
+// and the manifest caches in core/manif.lua and manif.lua never invalidate,
+// including for the local tree. Reusing one VM across dispatches inherits every
+// one of those, and the list grows with each upstream release.
+//
+// Isolation is bought with a pool rather than a bare fresh VM because the
+// expensive half is cfg.init (~45 ms on darwin/arm64), not the preload (~18 ms),
+// and cfg.init only happens inside a dispatch. acquire therefore starts warming
+// the next VM concurrently with the dispatch about to run, so that cost hides
+// behind work the caller wanted anyway.
+//
+// What it hides behind is the caller's own command, which sets the terms:
+// per-call cost is dispatch + max(0, warm - dispatch). A command that runs at
+// least as long as a warm-up — install, build, a search that touches the
+// network — pays nothing for isolation. A trivial one does not hide it:
+// measured, a bare `help` costs ~24 ms of dispatch and ~69 ms end to end,
+// which is what booting a VM per dispatch costs anyway.
+//
+// The alternative is to let the warm-up outlive the call, which measured ~24 ms
+// per `help` — but warming shells out, so that leaves processes starting after
+// the call returned, with nothing to stop them: the engine has no Close, and in
+// tests it raced the framework's os.Stdout and ran `cd` into directories the
+// test had already removed. release waits for the warm-up for that reason.
 type luaEngine struct {
 	cfg         rocks.Config
 	store       rocks.ManifestStore
 	logger      *slog.Logger
 	envOverride map[string]string
 
-	lstate   *lua.LState
-	bootOnce sync.Once
-	bootErr  error
-	mu       sync.Mutex
+	// pool holds VMs that are booted AND warmed (cfg.init already run), ready
+	// to serve exactly one dispatch. A VM is never reused: see the type comment
+	// for why. Capacity is luaPoolSize, so an idle engine holds the same single
+	// VM the old reuse model did.
+	pool chan *lua.LState
+
+	// warming tracks the background warm-up started by acquire. release waits
+	// on it, so no warm-up outlives the dispatch that triggered it: warming
+	// shells out (cfg.init runs uname and friends), and a library must not
+	// leave processes starting after the call it was asked to make returned.
+	warming sync.WaitGroup
 
 	// callImpl, when non-nil, replaces callViaState as the dispatch backend.
 	// It exists solely as a test seam so dispatch tests can assert the exact
@@ -141,21 +185,28 @@ func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 		store:       store,
 		logger:      logger,
 		envOverride: envOverride,
+		pool:        make(chan *lua.LState, luaPoolSize),
 	}
-	// Best-effort close of the cached LState when the engine is
-	// garbage-collected. The engine has no public Close (adding one would burden
-	// every caller); the engine owns no on-disk state, so this is the only
-	// resource a finalizer has to reclaim.
+	// Best-effort close of any warm VM still parked in the pool when the engine
+	// is garbage-collected. The engine has no public Close (adding one would
+	// burden every caller); it owns no on-disk state, so these are the only
+	// resources a finalizer has to reclaim.
 	runtime.SetFinalizer(e, func(e *luaEngine) { e.cleanup() })
 
 	return e
 }
 
-// cleanup closes the cached LState. Safe to call when boot never ran (nil
-// lstate).
+// cleanup closes every VM parked in the pool. Safe to call when none was ever
+// warmed. A VM currently serving a dispatch is not in the pool and is closed by
+// release.
 func (e *luaEngine) cleanup() {
-	if e.lstate != nil {
-		e.lstate.Close()
+	for {
+		select {
+		case L := <-e.pool:
+			L.Close()
+		default:
+			return
+		}
 	}
 }
 
@@ -275,31 +326,72 @@ var luaPreloadMap = func() map[string]string {
 	}
 }()
 
-// boot creates the gopher-lua VM, installs the custom os.getenv and the
-// glr_getwd global, preloads every embedded module, and caches the LState on
-// e.lstate for the engine's lifetime. It is invoked exactly once via
-// e.bootOnce.Do. The LState is intentionally NOT closed here — it lives as long
-// as the engine.
-//
-// LState reuse vs tt: tt opens a fresh lua.NewState per command and closes it,
-// so each command re-initializes LuaRocks config. We reuse one cached LState to
-// amortize the preload cost, which means LuaRocks' module-level state —
-// notably core.cfg, guarded by cfg.initialized in the tarantool fork — persists
-// across calls. This is safe here because cfg.Tree and cfg.Tarantool are fixed
-// for the engine's lifetime, so the cached config stays correct;
-// TestLuaEngine_ReusedLState_SequentialMakes is the regression gate. The one
-// known caveat is cfg.rocks_servers, which the fork *prepends* per --server, so
-// repeated calls passing different InstallOpts.Servers on the SAME engine
-// accumulate sources; a caller needing isolated server sets constructs a new
-// *Rocks (the same "want isolation → new client" rule).
-func (e *luaEngine) boot() error {
+// Compiled modules are shared by every VM. gopher-lua's *FunctionProto is
+// produced without an LState (parse.Parse then lua.Compile) and installed into
+// any of them with NewFunctionFromProto, which binds the proto to that VM's
+// environment and leaves the proto itself read-only. So the embedded LuaRocks
+// tree is parsed and compiled once per process instead of once per VM — which
+// is what makes one-VM-per-dispatch affordable: compiling ~100 modules was the
+// bulk of a boot.
+var (
+	luaProtoOnce sync.Once
+	luaProtos    map[string]*lua.FunctionProto
+	errLuaProto  error
+)
+
+// compiledModules parses and compiles every embedded module on first use and
+// returns the shared result. Failures are cached with it: the embedded tree
+// does not change between calls, so a retry could only fail the same way.
+func compiledModules() (map[string]*lua.FunctionProto, error) {
+	luaProtoOnce.Do(func() {
+		protos := make(map[string]*lua.FunctionProto, len(luaPreloadMap))
+
+		for modName, path := range luaPreloadMap {
+			src, err := luarocksembed.FS.ReadFile(path)
+			if err != nil {
+				errLuaProto = fmt.Errorf("luaEngine: read embedded %s: %w", path, err)
+
+				return
+			}
+
+			chunk, err := parse.Parse(bytes.NewReader(src), path)
+			if err != nil {
+				errLuaProto = fmt.Errorf("luaEngine: parse %s: %w", modName, err)
+
+				return
+			}
+
+			proto, err := lua.Compile(chunk, path)
+			if err != nil {
+				errLuaProto = fmt.Errorf("luaEngine: compile %s: %w", modName, err)
+
+				return
+			}
+
+			protos[modName] = proto
+		}
+
+		luaProtos = protos
+	})
+
+	return luaProtos, errLuaProto
+}
+
+// newVM creates a gopher-lua VM, installs the custom os.getenv and the glr_*
+// globals, and preloads every embedded module. The caller owns the returned
+// LState and must Close it; nothing is cached on the engine. cfg.init has NOT
+// run yet at this point — that happens inside the first dispatch, which is what
+// warmVM adds on top.
+func (e *luaEngine) newVM() (*lua.LState, error) {
 	L := lua.NewState() // full stdlibs; do NOT skip OpenLibs
 
 	// Install the custom os.getenv and the glr_* globals BEFORE preloading,
 	// since hardcoded.lua reads them at require time.
 	osTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "os").(*lua.LTable)
 	if !ok {
-		return errors.New("luaEngine: os table missing from Lua environment")
+		L.Close()
+
+		return nil, errors.New("luaEngine: os table missing from Lua environment")
 	}
 
 	L.SetField(osTbl, "getenv", L.NewFunction(func(L *lua.LState) int {
@@ -370,12 +462,16 @@ func (e *luaEngine) boot() error {
 	// behavior change — the resulting file is opened in the identical mode.
 	ioTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "io").(*lua.LTable)
 	if !ok {
-		return errors.New("luaEngine: io table missing from Lua environment")
+		L.Close()
+
+		return nil, errors.New("luaEngine: io table missing from Lua environment")
 	}
 
 	origOpen, ok := L.GetField(ioTbl, "open").(*lua.LFunction)
 	if !ok {
-		return errors.New("luaEngine: io.open missing from Lua environment")
+		L.Close()
+
+		return nil, errors.New("luaEngine: io.open missing from Lua environment")
 	}
 
 	L.SetField(ioTbl, "open", L.NewFunction(func(L *lua.LState) int {
@@ -459,25 +555,106 @@ func (e *luaEngine) boot() error {
 		return 0
 	}))
 
-	preload := L.GetField(L.GetField(L.Get(lua.EnvironIndex), "package"), "preload")
+	protos, err := compiledModules()
+	if err != nil {
+		L.Close()
 
-	for modName, path := range luaPreloadMap {
-		src, err := luarocksembed.FS.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("luaEngine: read embedded %s: %w", path, err)
-		}
-
-		mod, err := L.LoadString(string(src))
-		if err != nil {
-			return fmt.Errorf("luaEngine: load %s: %w", modName, err)
-		}
-
-		L.SetField(preload, modName, mod)
+		return nil, err
 	}
 
-	e.lstate = L
+	preload := L.GetField(L.GetField(L.Get(lua.EnvironIndex), "package"), "preload")
 
-	return nil
+	for modName, proto := range protos {
+		L.SetField(preload, modName, L.NewFunctionFromProto(proto))
+	}
+
+	return L, nil
+}
+
+// warmVM returns a VM that has both booted and run cfg.init, so a dispatch on
+// it costs only the command itself. The warm-up is a real `help` dispatch
+// rather than a direct cfg.init call: cmd.run_command initializes cfg with the
+// values it detected, and cfg.initialized makes that a one-shot, so priming it
+// any other way would leave the real dispatch with a config built from
+// different inputs. `help` takes no flags, so it leaves none of the sticky
+// cfg state behind that motivates the one-VM-per-dispatch rule. Its output is
+// discarded rather than drained to the logger — nobody asked for it.
+func (e *luaEngine) warmVM() (*lua.LState, error) {
+	L, err := e.newVM()
+	if err != nil {
+		return nil, err
+	}
+
+	restore := redirectIO(L, io.Discard, io.Discard)
+	doErr := L.DoString(dispatchString("go-luarocks", []string{"help"}))
+
+	restore()
+
+	// `help` unwinds through the os.exit shim, so a sentinel error carrying
+	// exit code 0 is the expected outcome, exactly as in callViaState.
+	if doErr != nil {
+		if code, ok := parseOsExit(doErr.Error()); !ok || code != 0 {
+			L.Close()
+
+			return nil, fmt.Errorf("luaEngine: warm-up dispatch: %w", doErr)
+		}
+	}
+
+	return L, nil
+}
+
+// acquire hands out a VM for exactly one dispatch, taking a warm one when the
+// pool has it and warming inline otherwise (a burst of concurrent calls, or the
+// very first call on a cold engine). It then starts warming the NEXT one in the
+// background, so that cost overlaps the dispatch about to run instead of
+// landing on the following call.
+func (e *luaEngine) acquire() (*lua.LState, error) {
+	var (
+		L   *lua.LState
+		err error
+	)
+
+	select {
+	case L = <-e.pool:
+	default:
+		L, err = e.warmVM()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	e.startWarming()
+
+	return L, nil
+}
+
+// startWarming prepares a replacement VM concurrently with the dispatch that is
+// about to run. Failures are dropped: nothing is lost, because the next acquire
+// warms inline and reports the error to whoever actually asked for work.
+func (e *luaEngine) startWarming() {
+	e.warming.Go(func() {
+		warm, err := e.warmVM()
+		if err != nil {
+			// Nothing is lost: the next acquire warms inline and reports the
+			// failure to whoever actually asked for work.
+			return
+		}
+
+		select {
+		case e.pool <- warm:
+		default:
+			warm.Close()
+		}
+	})
+}
+
+// release retires the VM a dispatch ran on. The VM is closed rather than
+// returned to the pool: whatever state the command left in it is exactly what
+// must not reach the next caller. It then waits for the background warm-up, so
+// a returned call leaves no work of ours still running — see the warming field.
+func (e *luaEngine) release(L *lua.LState) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
+	L.Close()
+	e.warming.Wait()
 }
 
 // shellSingleQuote wraps s in single quotes for the POSIX shell. A single
@@ -509,10 +686,10 @@ func (e *luaEngine) call(argv []string) error {
 	return err
 }
 
-// callViaState dispatches argv through extra/wrapper.lua's exec(). It serializes
-// access to the single-threaded LState via e.mu, lazily booting on first
-// use. progname is fixed to the default value. Each arg is single-quote-
-// escaped for embedding in the Lua single-quoted dispatch string.
+// callViaState dispatches argv through extra/wrapper.lua's exec() on a VM taken
+// from the pool and retired afterwards, so no state this command leaves behind
+// can reach the next one. progname is fixed to the default value. Each arg is
+// single-quote-escaped for embedding in the Lua single-quoted dispatch string.
 //
 // stdout/stderr capture: before running the command, callViaState
 // replaces the Lua VM's io.stdout and io.stderr fields with buffer-backed file
@@ -526,23 +703,19 @@ func (e *luaEngine) call(argv []string) error {
 // captured stdout string is returned so data-returning methods (e.g. Pack) can
 // parse it.
 func (e *luaEngine) callViaState(argv []string) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	e.bootOnce.Do(func() {
-		e.bootErr = e.boot()
-	})
-
-	if e.bootErr != nil {
-		return "", e.bootErr
+	L, err := e.acquire()
+	if err != nil {
+		return "", err
 	}
+
+	defer e.release(L)
 
 	var stdout, stderr bytes.Buffer
 
-	restore := e.redirectIO(&stdout, &stderr)
+	restore := redirectIO(L, &stdout, &stderr)
 	defer restore()
 
-	doErr := e.lstate.DoString(dispatchString("go-luarocks", argv))
+	doErr := L.DoString(dispatchString("go-luarocks", argv))
 
 	// Drain whatever the command printed into the logger before interpreting
 	// the result, so even a failing command's diagnostics reach the caller.
@@ -604,18 +777,14 @@ func quoteLua(s string) string {
 // Exit-code handling matches callViaState: os.exit(0) and a clean return
 // are success, any other code is surfaced as an error.
 func (e *luaEngine) callRaw(progname string, argv []string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	e.bootOnce.Do(func() {
-		e.bootErr = e.boot()
-	})
-
-	if e.bootErr != nil {
-		return e.bootErr
+	L, err := e.acquire()
+	if err != nil {
+		return err
 	}
 
-	doErr := e.lstate.DoString(dispatchString(progname, argv))
+	defer e.release(L)
+
+	doErr := L.DoString(dispatchString(progname, argv))
 	if doErr == nil {
 		return nil
 	}
@@ -631,14 +800,12 @@ func (e *luaEngine) callRaw(progname string, argv []string) error {
 	return doErr
 }
 
-// redirectIO points the VM's io.stdout and io.stderr at the supplied Go
+// redirectIO points the given VM's io.stdout and io.stderr at the supplied Go
 // buffers by installing buffer-backed file userdata via io.output()/io.errput.
 // It returns a function that restores the original handles; the function is
 // idempotent so callViaState can both defer it and call it eagerly. Only the
 // in-VM io handles are touched.
-func (e *luaEngine) redirectIO(stdout, stderr io.Writer) func() {
-	L := e.lstate
-
+func redirectIO(L *lua.LState, stdout, stderr io.Writer) func() { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
 	ioTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "io").(*lua.LTable)
 	if !ok {
 		return func() {}
