@@ -366,6 +366,17 @@ func (r *Rocks) Remove(ctx context.Context, name string, opts RemoveOpts) error 
 	return r.engine.Remove(ctx, name, opts)
 }
 
+// Search queries the configured servers for rocks matching pattern (upstream
+// `luarocks search`). Both backends implement it: BackendNative walks the
+// manifests itself through remote.Search, BackendLua runs upstream and parses
+// the --porcelain listing. The two agree on the result set and its order; see
+// nativeEngine.Search for the two documented differences at the edges (an
+// empty pattern without SearchOpts.All, and how the VM-provided rocks are
+// versioned).
+func (r *Rocks) Search(ctx context.Context, pattern string, opts SearchOpts) ([]SearchResult, error) {
+	return r.engine.Search(ctx, pattern, opts)
+}
+
 // --- engine-delegated operations not served by the native backend ---
 //
 // Each method below is a pure one-line delegation to r.engine — no
@@ -377,13 +388,6 @@ func (r *Rocks) Remove(ctx context.Context, name string, opts RemoveOpts) error 
 // BackendNative returns rocks.ErrNotImplemented; BackendLua runs upstream.
 func (r *Rocks) Purge(ctx context.Context, opts PurgeOpts) error {
 	return r.engine.Purge(ctx, opts)
-}
-
-// Search queries the configured servers for rocks matching pattern (upstream
-// `luarocks search`). BackendNative returns rocks.ErrNotImplemented; BackendLua
-// runs upstream.
-func (r *Rocks) Search(ctx context.Context, pattern string, opts SearchOpts) ([]SearchResult, error) {
-	return r.engine.Search(ctx, pattern, opts)
 }
 
 // Download fetches a rock file into r.cfg.WorkingDir and returns its path

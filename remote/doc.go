@@ -15,6 +15,11 @@
 //     paths under it, so a local mirror needs no server.
 //   - OrderedIndex composes any mix of the two, first-found-wins.
 //
+// Search is the other question a rock server answers, and it takes the
+// opposite rule: it walks EVERY server and reports everything matching a
+// pattern, because a search says what exists while an install picks one. It
+// reuses the same loaders, so it needs no index of its own.
+//
 // The indexes share everything but the transport: manifest probe order (the
 // zipped and plain manifest-<lua_version>, then manifest, then the
 // Go-specific manifest-<lua_version>.json), decoding, the arch filter, the
