@@ -35,6 +35,15 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 - client: `Config.Servers` and `InstallOpts.Servers` accept a local directory
   wherever they accept an HTTP(S) URL, so `Install` can resolve and install
   entirely offline from a mirror on disk.
+- remote: `Search`, a port of upstream `search.search_repos` over the same
+  manifest loaders the indexes use — substring or exact name matching,
+  version constraints, the arch filter, a cross-server merge, the
+  exact-version early stop, and the rocks the Lua VM provides.
+- client: `Search` on the native backend (upstream `luarocks search`), with
+  `--source` / `--binary` / `--all` and results identical to the lua
+  backend's. `SearchResult` gains `Arch` and `Namespace`, both filled by
+  either backend, so a caller can tell a rockspec from an installable
+  binary rock.
 - Runnable, godoc-rendered examples across all public packages.
 
 ### Changed

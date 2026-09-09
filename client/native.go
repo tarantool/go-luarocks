@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/build"
@@ -33,6 +34,12 @@ type nativeEngine struct {
 	store  rocks.ManifestStore
 	index  rocks.RemoteIndex
 	logger *slog.Logger
+
+	// luajitOnce guards the one-shot interpreter probe behind luajitVersion,
+	// whose answer (luajit, possibly empty) names the version of the
+	// VM-provided rocks a search reports. See native_search.go.
+	luajitOnce sync.Once
+	luajit     string
 }
 
 // unpackDirMode is the permission applied to directories created while
@@ -834,10 +841,6 @@ func (e *nativeEngine) Remove(_ context.Context, name string, opts RemoveOpts) e
 
 func (e *nativeEngine) Purge(ctx context.Context, opts PurgeOpts) error {
 	return rocks.ErrNotImplemented
-}
-
-func (e *nativeEngine) Search(ctx context.Context, pattern string, opts SearchOpts) ([]SearchResult, error) {
-	return nil, rocks.ErrNotImplemented
 }
 
 func (e *nativeEngine) Download(ctx context.Context, name string, opts DownloadOpts) (string, error) {

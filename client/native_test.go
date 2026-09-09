@@ -11,7 +11,7 @@ import (
 )
 
 // The native backend implements the install/build/make/pack/which/list/show
-// write and query operations plus Remove; the remaining operations return
+// write and query operations plus Remove and Search; the remaining operations return
 // rocks.ErrNotImplemented — loud, not a silent no-op. The table below exercises
 // EACH of them through a *Rocks built with the default (native) backend, so the
 // delegation path (r.engine == nativeEngine) is covered too.
@@ -27,11 +27,6 @@ func TestNativeEngine_Unimplemented_ReturnsErrNotImplemented(t *testing.T) {
 		call func() error
 	}{
 		{"Purge", func() error { return r.Purge(ctx, client.PurgeOpts{}) }},
-		{"Search", func() error {
-			_, e := r.Search(ctx, "foo", client.SearchOpts{})
-
-			return e
-		}},
 		{"Download", func() error {
 			_, e := r.Download(ctx, "foo", client.DownloadOpts{})
 

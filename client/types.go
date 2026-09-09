@@ -39,9 +39,9 @@ type PurgeOpts struct {
 	ForceFast bool
 }
 
-// SearchOpts tunes Search (luarocks search). See cmd/search.lua. The engine
-// always passes --porcelain so the listing is machine-parseable; that flag is
-// not modeled here.
+// SearchOpts tunes Search (luarocks search). See cmd/search.lua. The lua
+// backend always passes --porcelain so the listing is machine-parseable; that
+// flag is not modeled here.
 type SearchOpts struct {
 	// Version, if set, is the `version` positional to search for.
 	Version string
@@ -51,7 +51,15 @@ type SearchOpts struct {
 	Binary bool
 	// All maps to --all: list all suitable contents of the server(s).
 	All bool
-	// Servers, when non-empty, appends a --server <s> global option per entry.
+	// Servers, when non-empty, are searched BEFORE the servers in
+	// Config.Servers rather than instead of them — upstream's --server
+	// prepends to cfg.rocks_servers (cmd.lua:130), and a search reports
+	// everything that matches anywhere. Note this differs from
+	// InstallOpts.Servers, which overrides the configured list: an install
+	// picks one artifact, so restricting where it may come from is the useful
+	// meaning there.
+	//
+	// The lua backend appends a --server <s> global option per entry.
 	Servers []string
 }
 
@@ -63,8 +71,20 @@ type SearchResult struct {
 	Name string
 	// Version is the matched version-revision string.
 	Version string
-	// Server is the repository URL the match came from.
+	// Arch is the manifest arch of this offering: "rockspec" for a bare
+	// .rockspec, "src" for a source rock, "all" for a pure-Lua binary rock, a
+	// concrete "<os>-<cpu>" for a host-built one, or "installed" for a rock
+	// the Lua VM provides. It is what tells a rockspec from an installable
+	// binary rock, so tt needs it to decide between build and install.
+	Arch string
+	// Server is the repository the match came from, normalized as
+	// dir.normalize renders it: a local directory reads as a plain path with
+	// no file:// prefix and no trailing slash. A rock provided by the VM
+	// carries the pseudo-server "provided by VM or rocks_provided".
 	Server string
+	// Namespace is the namespace the match was found under, empty when the
+	// search carried none (the porcelain line then has only four fields).
+	Namespace string
 }
 
 // DownloadOpts tunes Download (luarocks download). See cmd/download.lua.

@@ -792,12 +792,18 @@ func parseWrotePath(stdout string) (string, bool) {
 // parseSearchResults parses the --porcelain listing search.print_result_tree
 // emits: one tab-separated record per match,
 // "<name>\t<version>\t<arch>\t<repo>\t<namespace>". Title lines are suppressed
-// under --porcelain, so every non-blank line with at least three tab fields is
+// under --porcelain, so every non-blank line with at least four tab fields is
 // a result; lines that do not match that shape are skipped (defensive against
-// stray diagnostics that may share the buffer). Name, Version and Server (the
-// repo URL, field index 3) are surfaced.
+// stray diagnostics that may share the buffer).
+//
+// The namespace field is present only when the match carries one:
+// util.printout concatenates its arguments and a nil namespace ends the
+// argument list, so an un-namespaced match prints four fields, not five.
 func parseSearchResults(stdout string) []SearchResult {
-	var out []SearchResult
+	// Non-nil so a search that matched nothing returns an empty slice rather
+	// than nil, which is what the native backend returns and what Search's
+	// contract promises.
+	out := []SearchResult{}
 
 	for line := range strings.SplitSeq(stdout, "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -809,11 +815,17 @@ func parseSearchResults(stdout string) []SearchResult {
 			continue
 		}
 
-		out = append(out, SearchResult{
+		res := SearchResult{
 			Name:    fields[0],
 			Version: fields[1],
+			Arch:    fields[2],
 			Server:  fields[3],
-		})
+		}
+		if len(fields) > searchFieldsMin {
+			res.Namespace = fields[searchFieldsMin]
+		}
+
+		out = append(out, res)
 	}
 
 	return out
