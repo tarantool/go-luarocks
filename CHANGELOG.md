@@ -79,6 +79,12 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   the prefix — so upstream Lua that runs `<LUA_BINDIR>/tarantool` failed and
   carried on: `bin` scripts were deployed unwrapped and the LuaJIT version
   read as nil, letting a pack report success with a changed result.
+- client: The lua backend honours `Config.Servers`. It previously queried only
+  its built-in default plus whatever a single call passed in, so two clients
+  built from the same configuration reached different servers depending on
+  which backend they used. A configured list now replaces the default rather
+  than being prepended to it, and the backend no longer writes a generated
+  configuration file into a temporary directory.
 - tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
   `build.type`, not only `make`. A `cmake` or `command` rock installing into
   `$(LUADIR)`/`$(LIBDIR)` left its modules under

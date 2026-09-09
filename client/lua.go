@@ -10,13 +10,25 @@ package client
 // envOverride map first and falls through to the host process env for any
 // other key. The override map serves the LuaRocks build-config keys
 // used by the embedded VM — LUAROCKS_PREFIX, LUA_INCDIR, LUA_BINDIR,
-// TARANTOOL_DIR, TT_CLI_TARANTOOL_VERSION and LUAROCKS_CONFIG. Every other os.getenv read (CC, CFLAGS, LDFLAGS, AR, RANLIB,
+// TARANTOOL_DIR and TT_CLI_TARANTOOL_VERSION. Every other os.getenv read (CC, CFLAGS, LDFLAGS, AR, RANLIB,
 // LINK, MT, MAKE, WINDRES, CMAKE_*, PATH, HOME, USER, TMPDIR/TMP/TEMP, XDG_*,
 // http_proxy/https_proxy/no_proxy, LUAROCKS_SYSCONFDIR,
 // LUAROCKS_CROSS_COMPILING, LUA_PATH_/LUA_CPATH_, and Windows-only vars) falls
 // through to the host process env by design — the build toolchain genuinely
 // lives there. The engine never mutates the host env: it never calls
 // os.Setenv.
+//
+// Config delivery:
+//
+// Everything the embedded LuaRocks needs from rocks.Config reaches it through
+// luarocks.core.hardcoded, which is this module's own extra/hardcoded.lua
+// preloaded from the embedded FS — never through a config file on disk. The
+// dynamic values are served by Go globals the engine installs before preload:
+// glr_getwd, glr_pwd_command and glr_servers. cfg.init consumes that module in
+// make_defaults (core/cfg.lua) and, because our hardcoded sets FORCE_HARDCODED,
+// deep-merges the whole table into cfg.variables afterwards. Keeping the engine
+// free of on-disk state is why: a generated file needs a temp dir, an owner and
+// a cleanup path, and the engine has no public Close to hang one on.
 //
 // Boot is lazy: newLuaEngine does not touch the VM; the LState is created
 // and populated on the first call() via bootOnce. The LState is single-threaded:
@@ -51,10 +63,6 @@ import (
 const osExitSentinel = "go-luarocks os.exit: "
 
 const (
-	// luaConfigFileMode is the permission for the generated LUAROCKS_CONFIG
-	// file: owner read/write only (it holds no secrets but needs no wider access).
-	luaConfigFileMode = 0o600
-
 	// ioOpenModeArgIndex is the 1-based Lua argument position of io.open's mode
 	// string; ioOpenMinArgsForMode is the argument count at or above which a
 	// mode string is present (io.open(filename, mode)).
@@ -88,13 +96,6 @@ type luaEngine struct {
 	bootOnce sync.Once
 	bootErr  error
 	mu       sync.Mutex
-
-	// configDir is the temp dir holding the generated LUAROCKS_CONFIG file
-	// (set by writeConfigFile during boot). It must outlive boot since cfg.lua
-	// is read on first require; a finalizer (set in newLuaEngine) removes it and
-	// closes the LState when the engine becomes unreachable — best-effort, since
-	// the engine has no explicit Close in the public API.
-	configDir string
 
 	// callImpl, when non-nil, replaces callViaState as the dispatch backend.
 	// It exists solely as a test seam so dispatch tests can assert the exact
@@ -141,22 +142,18 @@ func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 		logger:      logger,
 		envOverride: envOverride,
 	}
-	// Best-effort cleanup of the temp config dir and the cached LState when the
-	// engine is garbage-collected. The engine has no public Close (adding one
-	// would burden every caller); a finalizer keeps New(...WithBackend(BackendLua))
-	// from leaking a temp dir per instance (e.g. across test runs).
+	// Best-effort close of the cached LState when the engine is
+	// garbage-collected. The engine has no public Close (adding one would burden
+	// every caller); the engine owns no on-disk state, so this is the only
+	// resource a finalizer has to reclaim.
 	runtime.SetFinalizer(e, func(e *luaEngine) { e.cleanup() })
 
 	return e
 }
 
-// cleanup removes the generated config dir and closes the cached LState. Safe
-// to call when neither was created (empty configDir, nil lstate).
+// cleanup closes the cached LState. Safe to call when boot never ran (nil
+// lstate).
 func (e *luaEngine) cleanup() {
-	if e.configDir != "" {
-		_ = os.RemoveAll(e.configDir)
-	}
-
 	if e.lstate != nil {
 		e.lstate.Close()
 	}
@@ -296,25 +293,10 @@ var luaPreloadMap = func() map[string]string {
 // accumulate sources; a caller needing isolated server sets constructs a new
 // *Rocks (the same "want isolation → new client" rule).
 func (e *luaEngine) boot() error {
-	// Materialize the LuaRocks config file that aligns the tree layout with the
-	// native backend (tt-style subdirs). The vendored cfg.lua does NOT
-	// consume hardcoded.lua's ROCKS_SUBDIR / LUA_MODULES_*_SUBDIR keys (those
-	// were tt patches); left to its defaults it would write to
-	// <tree>/lib/luarocks/rocks-5.1 and <tree>/share/lua/5.1, diverging from the
-	// native engine's <tree>/share/tarantool/rocks etc. We point LUAROCKS_CONFIG
-	// at a generated file that sets the three path subdirs, which cfg.init
-	// deep-merges over the defaults. This is the LuaRocks-native override
-	// mechanism and keeps the no-Setenv invariant intact: LUAROCKS_CONFIG is
-	// served via the in-VM os.getenv shim (envOverride), never os.Setenv.
-	err := e.writeConfigFile()
-	if err != nil {
-		return err
-	}
-
 	L := lua.NewState() // full stdlibs; do NOT skip OpenLibs
 
-	// Install the custom os.getenv and glr_getwd BEFORE preloading, since
-	// hardcoded.lua reads them at require time.
+	// Install the custom os.getenv and the glr_* globals BEFORE preloading,
+	// since hardcoded.lua reads them at require time.
 	osTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "os").(*lua.LTable)
 	if !ok {
 		return errors.New("luaEngine: os table missing from Lua environment")
@@ -341,6 +323,39 @@ func (e *luaEngine) boot() error {
 
 	L.SetGlobal("glr_getwd", L.NewFunction(func(L *lua.LState) int {
 		L.Push(lua.LString(e.cfg.WorkingDir))
+
+		return 1
+	}))
+
+	// glr_pwd_command backs hardcoded.PWD. The shell-out fs backend
+	// (luarocks.fs.tools) resolves the base directory for every `cd <dir> && cmd`
+	// it runs by RUNNING cfg.variables.PWD (default "pwd"), which would report
+	// the host process cwd — wrong for an in-process engine whose logical cwd is
+	// cfg.WorkingDir. Handing it an echo of WorkingDir makes relative build paths
+	// (e.g. builtin `cp src/foo.lua`) resolve there, which replaces a host
+	// os.Chdir (forbidden: the host process is shared) with a per-command cd.
+	L.SetGlobal("glr_pwd_command", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LString("echo " + shellSingleQuote(e.cfg.WorkingDir)))
+
+		return 1
+	}))
+
+	// glr_servers backs hardcoded.ROCKS_SERVERS. Returning nil for an empty
+	// Config.Servers lets hardcoded.lua keep its own default visible in Lua
+	// rather than duplicating it here.
+	L.SetGlobal("glr_servers", L.NewFunction(func(L *lua.LState) int {
+		if len(e.cfg.Servers) == 0 {
+			L.Push(lua.LNil)
+
+			return 1
+		}
+
+		servers := L.NewTable()
+		for _, s := range e.cfg.Servers {
+			servers.Append(lua.LString(s))
+		}
+
+		L.Push(servers)
 
 		return 1
 	}))
@@ -465,61 +480,13 @@ func (e *luaEngine) boot() error {
 	return nil
 }
 
-// luaConfigContents builds the LuaRocks config file the engine generates. It
-// serves two purposes:
-//
-//  1. Tree-layout parity with the native backend (tree/paths.go):
-//     rocks_subdir=/share/tarantool/rocks (RocksDir),
-//     lua_modules_path=/share/tarantool (DeployLuaDir),
-//     lib_modules_path=/lib/tarantool (DeployLibDir). These mirror
-//     hardcoded.lua's ROCKS_SUBDIR / LUA_MODULES_*_SUBDIR, which this vendored
-//     cfg.lua does not read. cfg.init deep-merges them over defaults.
-//
-//  2. Working-directory anchoring without host mutation. The shell-out fs
-//     backend (luarocks.fs.tools) resolves the base directory for every
-//     `cd <dir> && <cmd>` it runs from `cfg.variables.PWD` (default "pwd"),
-//     which would return the host process cwd — wrong for an in-process engine
-//     whose logical cwd is cfg.WorkingDir. We override PWD to echo WorkingDir,
-//     so relative build paths (e.g. builtin `cp src/foo.lua`) resolve against
-//     WorkingDir. This replaces a host os.Chdir (forbidden) with a
-//     per-command cd into the engine's configured working directory.
-//
-// workDir is single-quote-escaped for the Lua string literal and shell echo.
-func luaConfigContents(workDir string) string {
-	escaped := strings.ReplaceAll(workDir, `'`, `'\''`)
-
-	return fmt.Sprintf(`-- Generated by go-luarocks luaEngine. Aligns tree layout with the native
--- backend (tree/paths.go) and anchors the shell-out cwd to WorkingDir. Do not
--- edit by hand.
-rocks_subdir = "/share/tarantool/rocks"
-lua_modules_path = "/share/tarantool"
-lib_modules_path = "/lib/tarantool"
-variables = {
-   PWD = "echo '%s'",
-}
-`, escaped)
-}
-
-// writeConfigFile materializes the generated config to a temp path and records
-// LUAROCKS_CONFIG in the env-override map so cfg.init loads it. Content depends
-// on cfg.WorkingDir, so it is regenerated per engine.
-func (e *luaEngine) writeConfigFile() error {
-	dir, err := os.MkdirTemp("", "go-luarocks-cfg-")
-	if err != nil {
-		return fmt.Errorf("luaEngine: create config dir: %w", err)
-	}
-
-	e.configDir = dir // tracked for finalizer cleanup
-
-	path := filepath.Join(dir, "config-5.1.lua")
-
-	if err := os.WriteFile(path, []byte(luaConfigContents(e.cfg.WorkingDir)), luaConfigFileMode); err != nil {
-		return fmt.Errorf("luaEngine: write config file: %w", err)
-	}
-
-	e.envOverride["LUAROCKS_CONFIG"] = path
-
-	return nil
+// shellSingleQuote wraps s in single quotes for the POSIX shell. A single
+// quote inside the value is escaped the standard way: close the quote, emit a
+// backslash-escaped quote, reopen. The result is embedded in the command
+// hardcoded.PWD hands to the shell-out fs backend, so a path containing a quote
+// must not be able to end the argument.
+func shellSingleQuote(s string) string {
+	return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
 }
 
 // dispatch routes argv to the active dispatch backend. callImpl is a test seam

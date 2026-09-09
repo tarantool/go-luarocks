@@ -2,6 +2,14 @@
 -- Adapted from tt/cli/rocks/extra/hardcoded.lua. Env var names align with
 -- upstream LuaRocks conventions; the go-luarocks lua engine serves them via a
 -- custom os.getenv backed by a Go map populated from Config.Tarantool.
+--
+-- This module is the ONLY channel through which rocks.Config reaches the
+-- embedded LuaRocks: the engine writes no config file. core/cfg.lua reads the
+-- keys below in make_defaults, and FORCE_HARDCODED (set at the bottom) makes it
+-- deep-merge this whole table into cfg.variables afterwards, which is how PWD
+-- lands there. Values that vary per engine come from globals the engine
+-- installs before this module is required: glr_getwd, glr_pwd_command,
+-- glr_servers.
 
 local function get_tarantool_path()
     return os.getenv('LUA_BINDIR') or "/usr/bin"
@@ -25,10 +33,17 @@ return {
     LUA_MODULES_LUA_SUBDIR = [[/share/tarantool]],
     LUA_INTERPRETER = [[tarantool]],
     ROCKS_SUBDIR = [[/share/tarantool/rocks]],
-    ROCKS_SERVERS = {
+    -- Config.Servers when the caller configured any, else the Tarantool
+    -- default. cfg.lua reads this as cfg.rocks_servers, so a configured list
+    -- REPLACES the default rather than stacking onto it.
+    ROCKS_SERVERS = glr_servers() or {
         [[http://rocks.tarantool.org/]],
     },
     LOCALDIR = cwd,
+
+    -- Anchors the shell-out fs backend to Config.WorkingDir; see
+    -- glr_pwd_command in client/lua.go for why this is not "pwd".
+    PWD = glr_pwd_command(),
 
     HOME_TREE_SUBDIR = [[/.rocks]],
     EXTERNAL_DEPS_SUBDIRS = {
