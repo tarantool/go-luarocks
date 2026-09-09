@@ -1,8 +1,8 @@
 // Package client implements the Rocks facade — the keystone public API that
 // composes the manif, rockspec, fetch, build, tree, deps and remote subsystems
-// into LuaRocks operations. The native backend implements five write ops —
-// Install, Build, Make, Pack, Unpack — and returns
-// rocks.ErrNotImplemented for the other thirteen; the lua backend covers the
+// into LuaRocks operations. The native backend implements eight write ops —
+// Install, Build, Make, Pack, Unpack, Remove, Search, Download — and returns
+// rocks.ErrNotImplemented for the other ten; the lua backend covers the
 // full upstream command set. Reads (List, Show, Which) are served by r.store
 // regardless of backend; the write set is the Engine interface (engine.go).
 //

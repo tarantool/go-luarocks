@@ -27,8 +27,10 @@ import (
 // five implemented method bodies and their private helpers are moved here
 // verbatim, with only the receiver renamed from (r *Rocks) to (e *nativeEngine).
 //
-// The thirteen operations the native backend does not implement return
-// rocks.ErrNotImplemented — never a silent no-op.
+// Remove, Search and Download were added natively afterwards (native.go,
+// native_search.go, native_download.go). The ten operations the native
+// backend does not implement return rocks.ErrNotImplemented — never a
+// silent no-op.
 type nativeEngine struct {
 	cfg    rocks.Config
 	store  rocks.ManifestStore
@@ -841,10 +843,6 @@ func (e *nativeEngine) Remove(_ context.Context, name string, opts RemoveOpts) e
 
 func (e *nativeEngine) Purge(ctx context.Context, opts PurgeOpts) error {
 	return rocks.ErrNotImplemented
-}
-
-func (e *nativeEngine) Download(ctx context.Context, name string, opts DownloadOpts) (string, error) {
-	return "", rocks.ErrNotImplemented
 }
 
 func (e *nativeEngine) Lint(ctx context.Context, specPath string, opts LintOpts) error {

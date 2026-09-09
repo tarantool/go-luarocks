@@ -97,9 +97,10 @@ func main() {
 Most callers want the fast path, so `client.New(cfg)` defaults to the native
 backend. Two backends exist:
 
-- **native** (default) — pure-Go, no Lua VM. Supports the five write ops
-  (`Install`/`Build`/`Make`/`Pack`/`Unpack`) plus `List`/`Show`/`Which`, and
-  returns `rocks.ErrNotImplemented` for the other upstream commands.
+- **native** (default) — pure-Go, no Lua VM. Supports the eight write ops
+  (`Install`/`Build`/`Make`/`Pack`/`Unpack`/`Remove`/`Search`/`Download`)
+  plus `List`/`Show`/`Which`, and returns `rocks.ErrNotImplemented` for the
+  other upstream commands.
 - **lua** — `client.New(cfg, client.WithBackend(client.BackendLua))`. Runs
   vendored upstream LuaRocks 3.9.2 through `gopher-lua` (the `LState` boots
   lazily on first use), giving full upstream command coverage. This is the
