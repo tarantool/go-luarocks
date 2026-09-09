@@ -1057,14 +1057,14 @@ func TestDirFiles_EmptyDir(t *testing.T) {
 func TestLuaEngineCleanup(t *testing.T) {
 	t.Parallel()
 
-	// Cleanup on a never-booted engine is a safe no-op.
+	// Cleanup on an engine that never warmed a VM is a safe no-op.
 	fresh := client.NewLuaEngine(rocks.Config{Tree: t.TempDir()}, manif.FileStore{}, nil)
 	client.LuaEngineCleanup(fresh)
 
-	// After boot, cleanup removes the generated config dir and closes the VM.
+	// After a dispatch the pool holds a warm VM; cleanup drains and closes it.
 	dir := t.TempDir()
 	e := client.NewLuaEngine(rocks.Config{Tree: dir, WorkingDir: dir}, manif.FileStore{}, nil)
-	require.NoError(t, e.Boot(), "boot")
-	require.NotNil(t, e.LState(), "LState after boot")
+	require.NoError(t, e.Call([]string{"help"}), "dispatch")
+	require.True(t, client.WaitForPooledVM(e), "pool never restocked after a dispatch")
 	client.LuaEngineCleanup(e)
 }

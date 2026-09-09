@@ -79,6 +79,13 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   the prefix — so upstream Lua that runs `<LUA_BINDIR>/tarantool` failed and
   carried on: `bin` scripts were deployed unwrapped and the LuaJIT version
   read as nil, letting a pack report success with a changed result.
+- client: The lua backend no longer carries state between operations. It ran
+  every command in one long-lived VM, where upstream's per-command state
+  outlived the call that set it: configuration flags that could only be
+  switched on, a server list that grew with each call, rollbacks that fired
+  again during a later command, and manifest caches that never invalidated —
+  including the one for the local tree, which the native backend can change
+  underneath. Each operation now runs in its own VM.
 - client: The lua backend honours `Config.Servers`. It previously queried only
   its built-in default plus whatever a single call passed in, so two clients
   built from the same configuration reached different servers depending on
