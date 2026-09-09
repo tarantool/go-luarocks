@@ -65,10 +65,53 @@ func ExampleRocks_Which() {
 	// Output: "" false
 }
 
-// ExampleRocks_Search shows the backend contract: operations the native
+// ExampleRocks_Search searches a rock server for every rock whose name
+// contains the pattern. The server here is a directory on disk, which is what
+// makes the example runnable offline; an https:// server is searched exactly
+// the same way. Arch tells the offerings apart: "rockspec" must be built,
+// "all" can be installed as-is.
+func ExampleRocks_Search() {
+	repo, err := os.MkdirTemp("", "rocks-repo")
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = os.RemoveAll(repo) }()
+
+	manifest := `commands = {}
+modules = {}
+repository = {
+   metrics = {
+      ["1.0-1"] = { { arch = "rockspec" }, { arch = "all" } },
+   },
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, "manifest"), []byte(manifest), 0o600); err != nil {
+		panic(err)
+	}
+
+	r, err := client.New(rocks.Config{Tree: repo, WorkingDir: ".", Servers: []string{repo}})
+	if err != nil {
+		panic(err)
+	}
+
+	found, err := r.Search(context.Background(), "metric", client.SearchOpts{})
+	if err != nil {
+		panic(err)
+	}
+
+	for _, m := range found {
+		fmt.Println(m.Name, m.Version, m.Arch)
+	}
+	// Output:
+	// metrics 1.0-1 rockspec
+	// metrics 1.0-1 all
+}
+
+// ExampleRocks_Purge shows the backend contract: operations the native
 // backend does not implement return rocks.ErrNotImplemented, discriminated
 // with errors.Is.
-func ExampleRocks_Search() {
+func ExampleRocks_Purge() {
 	dir, err := os.MkdirTemp("", "rocks-tree")
 	if err != nil {
 		panic(err)
@@ -81,7 +124,7 @@ func ExampleRocks_Search() {
 		panic(err)
 	}
 
-	_, err = r.Search(context.Background(), "metrics", client.SearchOpts{})
+	err = r.Purge(context.Background(), client.PurgeOpts{})
 	fmt.Println("not implemented:", errors.Is(err, rocks.ErrNotImplemented))
 	// Output: not implemented: true
 }
