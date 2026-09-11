@@ -82,15 +82,23 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # Lowest Go version the module requires (go.mod: go 1.26.0), plus the
-        # latest stable release.
-        go: ['1.26', 'stable']
+        # The two supported Go releases, named by role rather than by number:
+        # the job names are required checks in the master ruleset, and a
+        # number there goes stale on every Go release. setup-go resolves
+        # `oldstable` and `stable` to the latest patch of the previous and the
+        # current minor release.
+        go: [previous, current]
+        include:
+          - go: previous
+            go-version: oldstable
+          - go: current
+            go-version: stable
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
+          go-version: ${{ matrix.go-version }}
           check-latest: true
 
       - name: Build
