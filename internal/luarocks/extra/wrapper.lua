@@ -14,6 +14,15 @@ local function exec(bin, ...)
             return bin
         end
     end
+    -- luarocks.cmd freezes the program name at require time
+    -- (cmd.lua: `local program = util.this_program("luarocks")`), and a pooled
+    -- VM has already loaded it during warm-up under the default progname.
+    -- Drop it from package.loaded so this dispatch gets a module whose frozen
+    -- program matches THIS caller's progname, exactly as a fresh upstream
+    -- process would. Reloaded modules keep cached references to the old table,
+    -- but the frozen value is a module local that nothing outside cmd.lua can
+    -- read, so stale references cannot observe the wrong name.
+    package.loaded["luarocks.cmd"] = nil
     local cmd = require("luarocks.cmd")
 
     if arg == "admin" then
