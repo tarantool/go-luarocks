@@ -92,6 +92,13 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   which backend they used. A configured list now replaces the default rather
   than being prepended to it, and the backend no longer writes a generated
   configuration file into a temporary directory.
+- client: The lua backend reads the system configuration from
+  `/etc/luarocks/config-5.1.lua` again. The embedded tree is compiled under
+  its embed path, and upstream `cfg.init`, given no hardcoded `SYSCONFDIR`,
+  derives the directory from `cfg.lua`'s chunk name — which made it the
+  relative `src/src`, so the file was never read. `hardcoded.lua` now names
+  `/etc/luarocks`, as an upstream installer would; `LUAROCKS_SYSCONFDIR`
+  still overrides it.
 - tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
   `build.type`, not only `make`. A `cmake` or `command` rock installing into
   `$(LUADIR)`/`$(LIBDIR)` left its modules under

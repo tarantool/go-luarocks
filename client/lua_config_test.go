@@ -138,3 +138,20 @@ func TestLuaEngine_PwdAnchoredToWorkingDir(t *testing.T) {
 	require.Equal(t, work, luaProbe(t, e, "require('luarocks.fs').current_dir()"),
 		"fs.current_dir did not resolve to WorkingDir")
 }
+
+// TestLuaEngine_SysconfdirIsEtcLuarocks pins where the system configuration
+// file is read from. cfg.init takes hardcoded.SYSCONFDIR and, when that is
+// absent, guesses from cfg.lua's chunk name; the embedded tree is compiled
+// under its embed path, so the guess was the relative "src/src" and
+// /etc/luarocks/config-5.1.lua was silently never loaded.
+func TestLuaEngine_SysconfdirIsEtcLuarocks(t *testing.T) {
+	if os.Getenv("LUAROCKS_SYSCONFDIR") != "" {
+		t.Skip("LUAROCKS_SYSCONFDIR overrides the hardcoded default")
+	}
+
+	t.Parallel()
+
+	e := bootedEngine(t, luaTestCfg(t))
+
+	require.Equal(t, "/etc/luarocks", luaProbe(t, e, "require('luarocks.core.cfg').sysconfdir"))
+}
