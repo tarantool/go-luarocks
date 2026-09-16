@@ -33,6 +33,13 @@ return {
     LUA_MODULES_LUA_SUBDIR = [[/share/tarantool]],
     LUA_INTERPRETER = [[tarantool]],
     ROCKS_SUBDIR = [[/share/tarantool/rocks]],
+    -- Where the system config-5.1.lua lives, the same as an upstream
+    -- installer writes into its hardcoded.lua. Without it cfg.init falls
+    -- back to detect_sysconfdir(), which derives the directory from cfg.lua's
+    -- own chunk name — for the embedded tree that is the relative embed path
+    -- ("src/src"), so /etc/luarocks was never read. LUAROCKS_SYSCONFDIR in
+    -- the environment still overrides this.
+    SYSCONFDIR = [[/etc/luarocks]],
     -- Config.Servers when the caller configured any, else the Tarantool
     -- default. cfg.lua reads this as cfg.rocks_servers, so a configured list
     -- REPLACES the default rather than stacking onto it.
