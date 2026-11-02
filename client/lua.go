@@ -48,6 +48,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -736,10 +737,35 @@ func (e *luaEngine) callViaState(argv []string) (string, error) {
 			return out, nil
 		}
 
-		return out, fmt.Errorf("luaEngine: %v exited with code %d", argv, code)
+		return out, fmt.Errorf("luaEngine: %v exited with code %d%s", argv, code, failureMessage(stderr.String()))
 	}
 
 	return out, doErr
+}
+
+// failureMessage returns, prefixed with ": ", what a failed LuaRocks command
+// printed to explain the failure, so the error reporting it says why and not
+// only that it failed — the output itself reaches no one but the logger. That
+// is the text from its last "Error:" line on, the way cmd.die prints a
+// message, or else its last stderr line; empty when it printed nothing.
+func failureMessage(stderr string) string {
+	text := strings.TrimSpace(stderr)
+	if text == "" {
+		return ""
+	}
+
+	lines := strings.Split(text, "\n")
+	from := len(lines) - 1
+
+	for i, line := range slices.Backward(lines) {
+		if strings.HasPrefix(line, "Error:") {
+			from = i
+
+			break
+		}
+	}
+
+	return ": " + strings.Join(lines[from:], " ")
 }
 
 // dispatchString builds the Lua one-liner that invokes extra/wrapper.lua's
