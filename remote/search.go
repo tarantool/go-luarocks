@@ -172,7 +172,7 @@ func loadServerManifest(
 	ctx context.Context, server, namespace string, opts IndexOptions,
 ) (*remoteManifest, string, bool, error) {
 	if dir, ok := LocalServerPath(server); ok {
-		idx := &FileRemoteIndex{Server: server, LuaVersion: opts.LuaVersion, Arch: opts.Arch}
+		idx := &FileRemoteIndex{Server: server, LuaVersion: opts.LuaVersion, Arch: opts.Arch, Cache: opts.Cache}
 
 		mf, err := idx.load(dir, namespace)
 		if err != nil {
@@ -188,6 +188,7 @@ func loadServerManifest(
 		UserAgent:       opts.UserAgent,
 		LuaVersion:      opts.LuaVersion,
 		Arch:            opts.Arch,
+		Cache:           opts.Cache,
 	}
 
 	mf, err := idx.load(ctx, server, namespace)

@@ -111,10 +111,14 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 		return nil, errors.New("rocks: Config.Tree is required")
 	}
 
+	// One manifest cache for the client's life, shared by the configured
+	// index and by every index a call builds for its own server list.
+	manifests := &remote.ManifestCache{}
+
 	r := &Rocks{
 		cfg:    cfg,
 		store:  manif.FileStore{},
-		index:  serverIndex(cfg.Servers, cfg.InsecureServers),
+		index:  serverIndex(cfg.Servers, cfg.InsecureServers, manifests),
 		logger: cfg.Logger,
 	}
 	if r.logger == nil {
@@ -128,10 +132,11 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 	// cfg/store/index/logger so reads (r.store) and writes (r.engine) see
 	// one consistent tree.
 	native := &nativeEngine{
-		cfg:    r.cfg,
-		store:  r.store,
-		index:  r.index,
-		logger: r.logger,
+		cfg:       r.cfg,
+		store:     r.store,
+		index:     r.index,
+		manifests: manifests,
+		logger:    r.logger,
 	}
 
 	switch r.backend {
@@ -167,9 +172,10 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 // this repository's fixtures — the two rules coincide exactly.
 //
 //nolint:ireturn // returns the RemoteIndex interface the facade stores
-func serverIndex(servers, insecure []string) rocks.RemoteIndex {
+func serverIndex(servers, insecure []string, manifests *remote.ManifestCache) rocks.RemoteIndex {
 	return remote.NewOrderedIndex(remote.NewIndexes(servers, remote.IndexOptions{
 		InsecureServers: insecure,
+		Cache:           manifests,
 	})...)
 }
 

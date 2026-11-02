@@ -129,3 +129,10 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   is built from its bundled checkout or archive, and only a bare `.rockspec`
   fetches `source.url`. The artifact the resolver fetched to read the
   rockspec is reused rather than downloaded again.
+- client: A client fetches the manifest of a server once. Every `Install`
+  that named its own `Servers`, and every `Search` and `Download`, built a
+  fresh index and downloaded every manifest of the list again, so installing
+  a resolved closure rock by rock — what tt does — fetched the registry
+  manifests once per rock. The indexes of a client now share a
+  `remote.ManifestCache`, which `remote.IndexOptions.Cache` exposes to other
+  callers.

@@ -26,6 +26,10 @@ type IndexOptions struct {
 	// Arch is the host arch string used to accept host-built binary rocks.
 	// Empty defaults to the detected host arch.
 	Arch string
+
+	// Cache, when set, shares parsed manifests between the indexes built
+	// with these options; see ManifestCache.
+	Cache *ManifestCache
 }
 
 // NewIndex builds the index appropriate for one configured rock server,
@@ -44,6 +48,7 @@ func NewIndex(server string, opts IndexOptions) rocks.RemoteIndex {
 			Server:     server,
 			LuaVersion: opts.LuaVersion,
 			Arch:       opts.Arch,
+			Cache:      opts.Cache,
 		}
 	}
 
@@ -53,6 +58,7 @@ func NewIndex(server string, opts IndexOptions) rocks.RemoteIndex {
 		UserAgent:       opts.UserAgent,
 		LuaVersion:      opts.LuaVersion,
 		Arch:            opts.Arch,
+		Cache:           opts.Cache,
 	}
 }
 

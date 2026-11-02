@@ -97,6 +97,10 @@ type FileRemoteIndex struct {
 	// the detected host arch (hostArch).
 	Arch string
 
+	// Cache, when set, shares the parsed manifest with other indexes; see
+	// ManifestCache.
+	Cache *ManifestCache
+
 	// cache memoizes parsed manifests across calls, keyed by namespace.
 	cache map[string]*remoteManifest
 }
@@ -171,6 +175,13 @@ func (f *FileRemoteIndex) load(dir, namespace string) (*remoteManifest, error) {
 		lv = "5.1"
 	}
 
+	shared := manifestKey{server: f.Server, namespace: namespace, luaVersion: lv}
+	if m, ok := f.Cache.get(shared); ok {
+		f.cache[namespace] = m
+
+		return m, nil
+	}
+
 	base := dir
 	if namespace != "" {
 		base = filepath.Join(dir, "manifests", namespace)
@@ -222,6 +233,7 @@ func (f *FileRemoteIndex) load(dir, namespace string) (*remoteManifest, error) {
 		}
 
 		f.cache[namespace] = m
+		f.Cache.put(shared, m)
 
 		return m, nil
 	}
