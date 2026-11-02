@@ -208,3 +208,87 @@ func TestLuaEngine_ReusedLState_SequentialMakes(t *testing.T) {
 		require.True(t, ok, "Which(%s) after make on reused LState", name)
 	}
 }
+
+// TestLuaEngine_Make_CustomBuildTypeFromTree installs a luarocks-build-<type>
+// backend into the tree and then makes a rock of that build type. The engine
+// starts every VM with an empty package.path, so the backend module is found
+// only because luarocks.loader appends the rock trees to it
+// (cfg.init_package_paths) — this is the gate on that. The tree is the user
+// tree, <WorkingDir>/.rocks, the layout tt uses: cfg.rocks_trees holds it from
+// cfg.init on. A tree named only by --tree joins that list after the loader has
+// set package.path, so a backend installed there is not found; that does not
+// depend on package.path starting empty.
+func TestLuaEngine_Make_CustomBuildTypeFromTree(t *testing.T) {
+	t.Parallel()
+
+	ttBin, err := exec.LookPath("tarantool")
+	if err != nil {
+		t.Skipf("tarantool not found on PATH: %v", err)
+	}
+
+	prefix := filepath.Dir(filepath.Dir(ttBin))
+
+	incDir := filepath.Join(prefix, "include", "tarantool")
+	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
+		t.Skipf("tarantool lua.h not found at %s: %v", incDir, err)
+	}
+
+	work := t.TempDir()
+	tree := filepath.Join(work, ".rocks")
+
+	must := func(name, body string) string {
+		t.Helper()
+
+		p := filepath.Join(work, name)
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+
+		return p
+	}
+
+	// The backend writes one module into the rock's lua dir, which build.lua
+	// creates before running the driver and deploys after it.
+	must("glrtest.lua", `
+local dir = require("luarocks.dir")
+local path = require("luarocks.path")
+
+local glrtest = {}
+
+function glrtest.run(rockspec)
+   local out = dir.path(path.lua_dir(rockspec.name, rockspec.version), "glrtest_built.lua")
+   local f = assert(io.open(out, "w"))
+   f:write("return 'built by luarocks.build.glrtest'\n")
+   f:close()
+   return true
+end
+
+return glrtest
+`)
+	backendSpec := must("luarocks-build-glrtest-1.0-1.rockspec", `
+package = "luarocks-build-glrtest"
+version = "1.0-1"
+source = { url = "file://localhost/x" }
+build = { type = "builtin", modules = { ["luarocks.build.glrtest"] = "glrtest.lua" } }
+`)
+	appSpec := must("glrapp-1.0-1.rockspec", `
+rockspec_format = "3.0"
+package = "glrapp"
+version = "1.0-1"
+source = { url = "file://localhost/x" }
+build_dependencies = { "luarocks-build-glrtest" }
+build = { type = "glrtest" }
+`)
+
+	r, err := client.New(rocks.Config{
+		Tree:       tree,
+		WorkingDir: work,
+		Tarantool:  rocks.TarantoolConfig{Prefix: prefix, IncludeDir: incDir, Version: "2.11.0-1"},
+	}, client.WithBackend(client.BackendLua))
+	require.NoError(t, err, "New")
+
+	ctx := context.Background()
+	require.NoError(t, r.Make(ctx, client.MakeOpts{RockspecPath: backendSpec}), "Make the backend")
+	require.NoError(t, r.Make(ctx, client.MakeOpts{RockspecPath: appSpec}), "Make a rock of the custom build type")
+
+	_, err = os.Stat(filepath.Join(tree, "share", "tarantool", "glrtest_built.lua"))
+	require.NoError(t, err, "the custom backend did not build the rock")
+}

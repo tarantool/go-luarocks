@@ -1,10 +1,14 @@
 package client
 
 import (
+	"fmt"
+	"io"
 	"log/slog"
+	"slices"
 	"time"
 
 	rocks "github.com/tarantool/go-luarocks"
+	lua "github.com/yuin/gopher-lua"
 )
 
 // This file is the white-box bridge for the external (client_test) test
@@ -49,6 +53,71 @@ func (e *LuaEngine) Boot() error {
 	L.Close()
 
 	return nil
+}
+
+// FreshPackagePath returns package.path of a VM straight out of newVM, before
+// any dispatch has run on it: what every require LuaRocks makes searches until
+// luarocks.loader appends the rock trees.
+func (e *LuaEngine) FreshPackagePath() (string, error) {
+	L, err := e.newVM()
+	if err != nil {
+		return "", err
+	}
+
+	defer L.Close()
+
+	return L.GetField(L.GetGlobal("package"), "path").String(), nil
+}
+
+// Output runs one lua backend command and returns what it printed.
+func (e *LuaEngine) Output(argv []string) (string, error) { return e.callViaState(argv) }
+
+// UnresolvedRequires runs the commands one after another on a single fresh VM,
+// the way a warm-up and a dispatch share one, and returns each module a require
+// asked for that package.preload does not hold — each one a lookup on
+// package.path. A searcher placed ahead of preload records them;
+// luarocks.loader later puts its own ahead of that one, which consults only
+// the tree manifests before handing over.
+func (e *LuaEngine) UnresolvedRequires(argvs ...[]string) ([]string, error) {
+	L, err := e.newVM()
+	if err != nil {
+		return nil, err
+	}
+
+	defer L.Close()
+
+	pkg := L.GetGlobal("package")
+	preload := L.GetField(pkg, "preload")
+
+	var names []string
+
+	L.SetGlobal("glr_test_searcher", L.NewFunction(func(L *lua.LState) int {
+		name := L.CheckString(1)
+		if L.GetField(preload, name) == lua.LNil && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+
+		L.Push(lua.LString("\n\tnot recorded by glr_test_searcher"))
+
+		return 1
+	}))
+
+	if err := L.DoString("table.insert(package.loaders, 1, glr_test_searcher)"); err != nil {
+		return nil, err
+	}
+
+	restore := redirectIO(L, io.Discard, io.Discard)
+	defer restore()
+
+	for _, argv := range argvs {
+		if err := L.DoString(dispatchString("go-luarocks", argv)); err != nil {
+			if code, ok := parseOsExit(err.Error()); !ok || code != 0 {
+				return nil, fmt.Errorf("%v: %w", argv, err)
+			}
+		}
+	}
+
+	return names, nil
 }
 
 // Call exposes luaEngine.call for the boot/help smoke tests.
