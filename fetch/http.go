@@ -6,7 +6,6 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tarantool/go-luarocks/internal/transport"
 )
 
 // defaultUserAgent is the User-Agent header sent by httpBackend when
@@ -126,7 +127,10 @@ func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
 		return fmt.Errorf("fetch.http: GET %s: %w", rawURL, err)
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		transport.Drain(resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= httpStatusErrThreshold {
 		return fmt.Errorf("fetch.http: GET %s: status %d", rawURL, resp.StatusCode)
@@ -203,23 +207,8 @@ func unpackArchive(path, destDir string) error {
 }
 
 func buildHTTPClient(host string, opts Options) *http.Client {
-	insecure := false
-
-	for _, h := range opts.InsecureServers {
-		if strings.EqualFold(h, host) {
-			insecure = true
-
-			break
-		}
-	}
-
-	tr := &http.Transport{}
-	if insecure {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-
 	return &http.Client{
-		Transport: tr,
+		Transport: transport.For(host, opts.InsecureServers),
 		Timeout:   httpClientTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {

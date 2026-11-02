@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
+	"github.com/tarantool/go-luarocks/internal/transport"
 	"github.com/tarantool/go-luarocks/manif"
 )
 
@@ -416,17 +416,7 @@ func (h *HTTPRemoteIndex) get(ctx context.Context, rawURL string) ([]byte, error
 		return nil, fmt.Errorf("parse url: %w", err)
 	}
 
-	tr := &http.Transport{}
-
-	for _, host := range h.InsecureServers {
-		if strings.EqualFold(host, u.Host) {
-			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in
-
-			break
-		}
-	}
-
-	client := &http.Client{Transport: tr, Timeout: httpClientTimeout}
+	client := &http.Client{Transport: transport.For(u.Host, h.InsecureServers), Timeout: httpClientTimeout}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -445,7 +435,10 @@ func (h *HTTPRemoteIndex) get(ctx context.Context, rawURL string) ([]byte, error
 		return nil, err
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		transport.Drain(resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= httpStatusErrorThreshold {
 		return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)

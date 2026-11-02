@@ -136,3 +136,11 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   manifests once per rock. The indexes of a client now share a
   `remote.ManifestCache`, which `remote.IndexOptions.Cache` exposes to other
   callers.
+- fetch, remote: HTTP requests share two process-wide transports, one
+  verifying TLS and one skipping it for `InsecureServers`, cloned from
+  `http.DefaultTransport`. Each request used to build a zero
+  `http.Transport`, so every manifest, rockspec and source download opened a
+  new TCP connection and TLS handshake — to rocks.tarantool.org and to the S3
+  bucket it redirects to — and `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` were
+  ignored. An error response is now read before its body is closed, so a 404
+  of a manifest probe no longer drops the connection either.
