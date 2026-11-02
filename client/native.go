@@ -117,8 +117,15 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 
 	e.logger.Info("rocks.Install: selected", "name", name, "version", root.Version.Raw, "url", root.URL)
 
+	fetched, err := e.newArtifacts()
+	if err != nil {
+		return fmt.Errorf("rocks.Install: %w", err)
+	}
+
+	defer fetched.remove()
+
 	// Fetch + eval root rockspec so we can resolve transitive deps.
-	rootSpec, err := e.fetchAndEval(ctx, root.URL)
+	rootSpec, err := e.fetchAndEval(ctx, fetched, root.URL)
 	if err != nil {
 		return fmt.Errorf("rocks.Install: fetch/eval root: %w", err)
 	}
@@ -128,28 +135,28 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 	var plan []rocks.InstallStep
 
 	if opts.Deps != DepsNone {
-		plan, err = e.resolvePlan(ctx, rootSpec, idx)
+		plan, err = e.resolvePlan(ctx, fetched, rootSpec, idx)
 		if err != nil {
 			return fmt.Errorf("rocks.Install: resolve deps: %w", err)
 		}
 	}
 
 	for _, step := range plan {
-		err := e.installStep(ctx, step)
+		err := e.installStep(ctx, fetched, step)
 		if err != nil {
 			return fmt.Errorf("rocks.Install: dep %s-%s: %w", step.Name, step.Version.Raw, err)
 		}
 	}
 
-	// Finally install the requested rock itself. Its source is fetched from
-	// the rockspec's source.url, exactly like every dependency step.
+	// Finally install the requested rock itself, from the artifact it was
+	// chosen as, exactly like every dependency step.
 	rootStep := rocks.InstallStep{
 		Name:     rootSpec.Package,
 		Version:  root.Version,
 		URL:      root.URL,
 		Rockspec: rootSpec,
 	}
-	if err := e.installFromSource(ctx, rootStep); err != nil {
+	if err := e.installArtifact(ctx, fetched, rootStep); err != nil {
 		return fmt.Errorf("rocks.Install: install root: %w", err)
 	}
 
@@ -163,9 +170,11 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 // configured version (mirroring util.get_rocks_provided in the
 // tarantool/luarocks fork), and supplies the already-installed rocks so
 // satisfied deps are skipped (glr-n88).
-func (e *nativeEngine) resolvePlan(ctx context.Context, rootSpec *rocks.Rockspec, idx rocks.RemoteIndex) ([]rocks.InstallStep, error) {
+func (e *nativeEngine) resolvePlan(
+	ctx context.Context, fetched *artifacts, rootSpec *rocks.Rockspec, idx rocks.RemoteIndex,
+) ([]rocks.InstallStep, error) {
 	fetchSpec := func(ctx context.Context, rock rocks.VersionedRock) (*rocks.Rockspec, error) {
-		return e.fetchAndEval(ctx, rock.URL)
+		return e.fetchAndEval(ctx, fetched, rock.URL)
 	}
 
 	resolveOpts := []deps.Option{deps.WithSpecFetcher(fetchSpec)}
@@ -380,12 +389,12 @@ func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) erro
 
 // --- internal helpers (used only by the five native write operations) ---
 
-func (e *nativeEngine) installStep(ctx context.Context, step rocks.InstallStep) error {
+func (e *nativeEngine) installStep(ctx context.Context, fetched *artifacts, step rocks.InstallStep) error {
 	// deps.Resolve populates step.Rockspec via the spec fetcher; reuse it rather
 	// than fetching and evaluating the same version-pinned artifact a second
 	// time. It is nil only if a caller resolved without the fetcher.
 	if step.Rockspec == nil {
-		spec, err := e.fetchAndEval(ctx, step.URL)
+		spec, err := e.fetchAndEval(ctx, fetched, step.URL)
 		if err != nil {
 			return err
 		}
@@ -393,38 +402,166 @@ func (e *nativeEngine) installStep(ctx context.Context, step rocks.InstallStep) 
 		step.Rockspec = spec
 	}
 
-	return e.installFromSource(ctx, step)
+	return e.installArtifact(ctx, fetched, step)
 }
 
-// fetchAndEval fetches the resolver-produced rock/rockspec URL into a
-// throwaway directory, locates the `.rockspec` it contains (a bare
-// .rockspec, or one bundled inside a .src.rock), and evaluates it. Only the
-// parsed *Rockspec is returned — the fetched directory is the registry
-// artifact, NOT the rock's source tree, so it is removed before returning.
-// The actual source is fetched separately from spec.Source.URL at build
-// time (see installFromSource / Build), mirroring upstream luarocks which
-// never builds against the rockspec download directory.
-func (e *nativeEngine) fetchAndEval(ctx context.Context, urlStr string) (*rocks.Rockspec, error) {
-	tmp, err := os.MkdirTemp(e.cfg.WorkingDir, "rocks-fetch-*")
+// artifacts keeps the registry artifacts one Install fetched, each unpacked
+// under a directory removed when the Install returns. Resolving fetches every
+// chosen rock to read its rockspec; keeping what was unpacked lets the install
+// step deploy a .rock from it instead of fetching it a second time.
+type artifacts struct {
+	root string
+	dirs map[string]string
+}
+
+// newArtifacts creates the directory an Install unpacks its artifacts under.
+func (e *nativeEngine) newArtifacts() (*artifacts, error) {
+	root, err := os.MkdirTemp(e.cfg.WorkingDir, "rocks-fetch-*")
 	if err != nil {
 		return nil, fmt.Errorf("mkdir tmp: %w", err)
 	}
 
-	defer func() { _ = os.RemoveAll(tmp) }()
+	return &artifacts{root: root, dirs: map[string]string{}}, nil
+}
 
-	srcDir, err := fetch.FetchWith(ctx, urlStr, tmp, fetch.Options{
+// remove deletes every artifact the Install fetched.
+func (a *artifacts) remove() {
+	_ = os.RemoveAll(a.root)
+}
+
+// fetchArtifact returns the directory the registry artifact at urlStr is
+// unpacked in, fetching it on first use. A .rock or .src.rock is a zip, which
+// the fetch unpacks; a bare .rockspec is the only file of its directory.
+func (e *nativeEngine) fetchArtifact(ctx context.Context, fetched *artifacts, urlStr string) (string, error) {
+	if dir, ok := fetched.dirs[urlStr]; ok {
+		return dir, nil
+	}
+
+	tmp, err := os.MkdirTemp(fetched.root, "artifact-*")
+	if err != nil {
+		return "", fmt.Errorf("mkdir tmp: %w", err)
+	}
+
+	dir, err := fetch.FetchWith(ctx, urlStr, tmp, fetch.Options{
 		InsecureServers: e.cfg.InsecureServers,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", urlStr, err)
+		return "", fmt.Errorf("fetch %s: %w", urlStr, err)
 	}
 
-	specPath, err := findRockspecIn(srcDir)
+	fetched.dirs[urlStr] = dir
+
+	return dir, nil
+}
+
+// fetchAndEval fetches the resolver-produced rock/rockspec URL, locates the
+// `.rockspec` it contains (a bare .rockspec, or the one every .rock and
+// .src.rock bundles), and evaluates it. The unpacked artifact stays in fetched
+// for installArtifact.
+func (e *nativeEngine) fetchAndEval(ctx context.Context, fetched *artifacts, urlStr string) (*rocks.Rockspec, error) {
+	dir, err := e.fetchArtifact(ctx, fetched, urlStr)
+	if err != nil {
+		return nil, err
+	}
+
+	specPath, err := findRockspecIn(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	return evalAndPrepare(specPath, e.cfg)
+}
+
+// artifactKind is what a registry artifact holds, which decides how it
+// installs.
+type artifactKind int
+
+const (
+	// rockspecArtifact is a bare .rockspec: the sources are at source.url.
+	rockspecArtifact artifactKind = iota
+	// sourceRockArtifact is a .src.rock: the rockspec and the sources it was
+	// packed with.
+	sourceRockArtifact
+	// binaryRockArtifact is a .all.rock or a .<arch>.rock: built files laid
+	// out as lua/, lib/ and bin/, ready to deploy.
+	binaryRockArtifact
+)
+
+// kindOf tells the artifact kind from the file name the index built the URL
+// with (path.make_url: <name>-<version>.<arch>.rock, or .rockspec).
+func kindOf(urlStr string) artifactKind {
+	lower := strings.ToLower(urlStr)
+
+	switch {
+	case strings.HasSuffix(lower, ".src.rock"):
+		return sourceRockArtifact
+	case strings.HasSuffix(lower, ".rock"):
+		return binaryRockArtifact
+	default:
+		return rockspecArtifact
+	}
+}
+
+// installArtifact installs step from the artifact the index chose for it, as
+// upstream install does: a binary rock is deployed as built
+// (install_binary_rock), a source rock is built from the sources it bundles
+// (build.build_rock), and only a bare rockspec sends the build to source.url.
+// So a directory server mirroring .rock files installs with no network.
+func (e *nativeEngine) installArtifact(ctx context.Context, fetched *artifacts, step rocks.InstallStep) error {
+	switch kindOf(step.URL) {
+	case binaryRockArtifact:
+		dir, err := e.fetchArtifact(ctx, fetched, step.URL)
+		if err != nil {
+			return err
+		}
+
+		return e.deployBinary(step.Rockspec, dir)
+	case sourceRockArtifact:
+		dir, err := e.fetchArtifact(ctx, fetched, step.URL)
+		if err != nil {
+			return err
+		}
+
+		srcDir, err := bundledSource(ctx, step.Rockspec, dir)
+		if err != nil {
+			return err
+		}
+
+		return e.deployFromSource(ctx, step.Rockspec, srcDir)
+	case rockspecArtifact:
+	}
+
+	return e.installFromSource(ctx, step)
+}
+
+// bundledSource returns the source root of a .src.rock unpacked into dir.
+// LuaRocks packs a git checkout as the directory it was cloned into, and an
+// archive source as the archive itself, which build.build_rockspec unpacks
+// before entering source.dir; findSourceBaseDir then picks the root the same
+// way it does for fetched sources.
+func bundledSource(ctx context.Context, spec *rocks.Rockspec, dir string) (string, error) {
+	file := spec.Source.File
+	if file == "" && spec.Source.URL != "" {
+		file = filepath.Base(spec.Source.URL)
+	}
+
+	if file != "" {
+		archive := filepath.Join(dir, file)
+
+		if fi, err := os.Stat(archive); err == nil && fi.Mode().IsRegular() {
+			res, err := fetch.Sources(ctx, "file://"+archive, filepath.Join(dir, "sources"), fetch.Options{
+				File: file,
+				MD5:  spec.Source.MD5,
+			})
+			if err != nil {
+				return "", fmt.Errorf("unpack bundled %s: %w", file, err)
+			}
+
+			return findSourceBaseDir(res.Path, spec)
+		}
+	}
+
+	return findSourceBaseDir(dir, spec)
 }
 
 // installFromSource fetches the rockspec's declared source (spec.Source.URL)
@@ -673,7 +810,97 @@ func (e *nativeEngine) readTreeManifest(t *tree.Tree) (*rocks.Manifest, error) {
 	return m, nil
 }
 
+// deployFromSource builds spec from the sources in srcDir and deploys the
+// result.
 func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspec, srcDir string) error {
+	return e.deployRock(spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
+		destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
+		if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
+			return nil, fmt.Errorf("mkdir destDir: %w", err)
+		}
+
+		if err := build.RunBackend(ctx, spec, srcDir, destDir, e.cfg); err != nil {
+			return nil, err
+		}
+		// srcDir holds original .lua / install / copy_dirs files; destDir holds
+		// compiled .so artifacts from the build phase. Deploy reads from both.
+		rm, err := t.Deploy(spec, srcDir, destDir)
+		if err != nil {
+			return nil, fmt.Errorf("deploy: %w", err)
+		}
+
+		return rm, nil
+	})
+}
+
+// deployBinary deploys the binary rock of spec unpacked into rockDir without
+// building it, as upstream install_binary_rock does.
+func (e *nativeEngine) deployBinary(spec *rocks.Rockspec, rockDir string) error {
+	deploySpec, err := binarySpec(spec, rockDir)
+	if err != nil {
+		return err
+	}
+
+	return e.deployRock(deploySpec, func(t *tree.Tree) (*rocks.RockManifest, error) {
+		// The lua/ and lib/ trees of the rock are what tree.Deploy relocates
+		// from a build directory, so the rock directory serves as both.
+		rm, err := t.Deploy(deploySpec, rockDir, rockDir)
+		if err != nil {
+			return nil, fmt.Errorf("deploy: %w", err)
+		}
+
+		return rm, nil
+	})
+}
+
+// binarySpec returns the spec to deploy a binary rock unpacked into rockDir
+// with: its own rockspec without the build it was made with, since its files
+// are built already, plus a build.install.bin entry per bin/ script, so the
+// scripts get the wrappers a built rock's get, and every other top-level
+// directory (doc/, conf/, …) as a copy_directories entry, since upstream
+// unpacks the whole rock into the per-rock install dir.
+func binarySpec(spec *rocks.Rockspec, rockDir string) (*rocks.Rockspec, error) {
+	entries, err := os.ReadDir(rockDir)
+	if err != nil {
+		return nil, fmt.Errorf("read rock dir %s: %w", rockDir, err)
+	}
+
+	deploySpec := *spec
+	deploySpec.Build = rocks.Build{}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		switch entry.Name() {
+		case "lua", "lib":
+		case "bin":
+			bins, err := os.ReadDir(filepath.Join(rockDir, "bin"))
+			if err != nil {
+				return nil, fmt.Errorf("read rock bin dir: %w", err)
+			}
+
+			deploySpec.Build.Install.Bin = map[string]string{}
+
+			for _, bin := range bins {
+				if !bin.IsDir() {
+					deploySpec.Build.Install.Bin[bin.Name()] = filepath.Join("bin", bin.Name())
+				}
+			}
+		default:
+			deploySpec.Build.CopyDirectories = append(deploySpec.Build.CopyDirectories, entry.Name())
+		}
+	}
+
+	return &deploySpec, nil
+}
+
+// deployRock deploys one rock into the tree through deploy and records it in
+// the tree manifest.
+func (e *nativeEngine) deployRock(
+	spec *rocks.Rockspec, deploy func(t *tree.Tree) (*rocks.RockManifest, error),
+) error {
 	// Abort before build/deploy when the rockspec excludes the current platform
 	// (upstream deps.check_supported_platforms, deps.lua:247-273).
 	if err := checkSupportedPlatforms(spec, rockspec.RuntimePlatforms()); err != nil {
@@ -709,19 +936,9 @@ func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspe
 		}
 	}
 
-	destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
-	if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
-		return fmt.Errorf("mkdir destDir: %w", err)
-	}
-
-	if err := build.RunBackend(ctx, spec, srcDir, destDir, e.cfg); err != nil {
-		return err
-	}
-	// srcDir holds original .lua / install / copy_dirs files; destDir holds
-	// compiled .so artifacts from the build phase. Deploy reads from both.
-	rm, err := t.Deploy(spec, srcDir, destDir)
+	rm, err := deploy(t)
 	if err != nil {
-		return fmt.Errorf("deploy: %w", err)
+		return err
 	}
 
 	rockManifestPath := filepath.Join(t.InstallDir(spec.Package, spec.Version), "rock_manifest")

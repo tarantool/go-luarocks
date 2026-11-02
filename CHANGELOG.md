@@ -119,3 +119,13 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   deep and the build failed. Backends now report whether the path they return
   is already the source root, which also covers a `file://` source that copies
   a local tree.
+- client: The native backend installs a rock from the artifact the index
+  chose for it, as upstream `install` does. It read only the rockspec out of
+  every `.rock` and `.src.rock` and built from `source.url`, so a binary rock
+  was rebuilt from its repository and a source rock ignored the sources it
+  carries: a directory server mirroring rock files still went to the network
+  for every rock, and a cmake rock shipped as `.all.rock` needed cmake. A
+  `.all.rock` or a host-arch `.rock` is now deployed as built, a `.src.rock`
+  is built from its bundled checkout or archive, and only a bare `.rockspec`
+  fetches `source.url`. The artifact the resolver fetched to read the
+  rockspec is reused rather than downloaded again.
