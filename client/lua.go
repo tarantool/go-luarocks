@@ -215,7 +215,14 @@ func (e *luaEngine) cleanup() {
 // Mirrors tt/cli/rocks/rocks.go's rocks_preload, with the path prefixes adapted
 // to this module's embed layout: upstream modules live under "src/src/" (the
 // git subtree placed the upstream repo root at internal/luarocks/src/), shims
-// under "extra/". macosx maps to the upstream module — we ship no extra shim.
+// under "extra/". luarocks.cmd.path is a shim (extra/cmd_path.lua) over the
+// upstream module, which is preloaded as extra.upstream.luarocks.cmd.path: the
+// path command prints package.path, which newVM empties, so the shim shows the
+// one a stock VM would have had. luarocks.fs.lua is a shim (extra/fs_lua.lua)
+// over the upstream module, preloaded as extra.upstream.luarocks.fs.lua: it
+// limits external-command discovery to the command being run, so a
+// luarocks.cmd.external.<name> module is loaded only by `<name>` or
+// `help <name>`, rather than by every command as upstream does.
 var luaPreloadMap = func() map[string]string {
 	rocksPath := "src/src/"
 	extraPath := "extra/"
@@ -242,18 +249,20 @@ var luaPreloadMap = func() map[string]string {
 		"luarocks.tools.zip":      rocksPath + "luarocks/tools/zip.lua",
 		"luarocks.tools.tar":      rocksPath + "luarocks/tools/tar.lua",
 		"luarocks.fs.unix":        rocksPath + "luarocks/fs/unix.lua",
-		// luarocks.fs.macosx is INTENTIONALLY NOT preloaded. Its is_dir/is_file
+		// luarocks.fs.macosx is INTENTIONALLY NOT preloaded: it is one of
+		// luaAbsentModules. Its is_dir/is_file
 		// (internal/luarocks/.../fs/macosx.lua) probe directory-ness via
 		// io.open(path.."/.", "r") and inspect the PUC-Lua errno returned as the
 		// third result (codes 2/13/20/21). gopher-lua's io.open does not surface
 		// libc errno that way, so macosx.is_dir returns false for EVERY existing
 		// directory — which breaks fs.check_command_permissions (the tree always
-		// looks unwritable) and every downstream mkdir/copy. Omitting the module
-		// makes require("luarocks.fs.macosx") fail in load_platform_fns's pcall,
-		// so fs.init falls through to the shell-out tools backend
+		// looks unwritable) and every downstream mkdir/copy. The absent-module
+		// stub makes require("luarocks.fs.macosx") fail in load_platform_fns's
+		// pcall, so fs.init falls through to the shell-out tools backend
 		// (luarocks.fs.unix.tools → `test -d`), which works correctly in-VM.
 		"luarocks.fs.unix.tools":           rocksPath + "luarocks/fs/unix/tools.lua",
-		"luarocks.fs.lua":                  rocksPath + "luarocks/fs/lua.lua",
+		"luarocks.fs.lua":                  extraPath + "fs_lua.lua",
+		"extra.upstream.luarocks.fs.lua":   rocksPath + "luarocks/fs/lua.lua",
 		"luarocks.fs.tools":                rocksPath + "luarocks/fs/tools.lua",
 		"luarocks.queries":                 rocksPath + "luarocks/queries.lua",
 		"luarocks.type_check":              rocksPath + "luarocks/type_check.lua",
@@ -274,7 +283,8 @@ var luaPreloadMap = func() map[string]string {
 		"luarocks.search":                  rocksPath + "luarocks/search.lua",
 		"luarocks.repos":                   rocksPath + "luarocks/repos.lua",
 		"luarocks.cmd.show":                rocksPath + "luarocks/cmd/show.lua",
-		"luarocks.cmd.path":                rocksPath + "luarocks/cmd/path.lua",
+		"luarocks.cmd.path":                extraPath + "cmd_path.lua",
+		"extra.upstream.luarocks.cmd.path": rocksPath + "luarocks/cmd/path.lua",
 		"luarocks.cmd.write_rockspec":      rocksPath + "luarocks/cmd/write_rockspec.lua",
 		"luarocks.manif.writer":            rocksPath + "luarocks/manif/writer.lua",
 		"luarocks.remove":                  rocksPath + "luarocks/remove.lua",
@@ -327,6 +337,69 @@ var luaPreloadMap = func() map[string]string {
 	}
 }()
 
+// luaAbsentModules are the modules LuaRocks probes for on its own, each under
+// pcall, to pick up optional features — and that the engine therefore answers
+// itself: newVM preloads a stub for each that fails the require the way a
+// missing module does, so the fallback upstream has for it runs and nothing is
+// looked up on disk. Without the stubs the probes reach the rock trees, which
+// luarocks.loader puts on package.path, and a repository that commits
+// .rocks/share/tarantool/lfs.lua would have it run by a plain `list`.
+//
+// The list comes from recording every require the preload did not satisfy —
+// during help, list, path, config, show, which, remove, purge, the --help of
+// every command and the builds of the integration suite, on Linux — and from
+// reading the sources for what that run cannot reach: the platforms other than
+// linux, ssl.https (probed only once socket.http has loaded) and mimetypes
+// (upload only).
+//
+//   - luarocks.fs.<platform> and luarocks.fs.<platform>.tools (fs.init, for
+//     each platform cfg detects; luaRocksPlatforms lists the ones it knows).
+//     unix and unix.tools are preloaded and stay real. Of the rest upstream
+//     ships only macosx, which is broken in gopher-lua (see luaPreloadMap),
+//     and win32, which the engine never preloaded; for the others the stub
+//     only settles the miss without a lookup.
+//   - lfs, posix, md5, digest, bz2, zlib, socket.http, socket.ftp, ltn12 and
+//     ssl.https (fs/lua.lua, tools/zip.lua, upload/api.lua): C libraries, or
+//     Lua ones that need theirs, which gopher-lua cannot load.
+//   - cjson, dkjson, json (util.lua, for config --json and upload) and
+//     mimetypes (upload/multipart.lua): JSON and MIME helpers, some of them
+//     pure Lua, kept off disk like the rest. A command that needs one fails
+//     the way it does when none is installed.
+//
+// The plugin points stay open: luarocks.build.<type>, luarocks.test.<type>,
+// luarocks.fetch.<protocol>, luarocks.cmd.external.<name> and
+// luarocks.admin.cmd.external.<name> still load from the rock trees, because a
+// backend or command installed there is how LuaRocks is extended. Each loads
+// only when it is used: a build or test type a rockspec names, a protocol a
+// source URL names, an external command argv names (see the luarocks.fs.lua
+// shim in luaPreloadMap).
+var luaAbsentModules = func() []string {
+	mods := []string{
+		"lfs", "posix", "md5", "digest", "bz2", "zlib",
+		"socket.http", "socket.ftp", "ltn12", "ssl.https",
+		"cjson", "dkjson", "json", "mimetypes",
+	}
+
+	for _, platform := range luaRocksPlatforms {
+		if platform == "unix" {
+			continue
+		}
+
+		mods = append(mods, "luarocks.fs."+platform, "luarocks.fs."+platform+".tools")
+	}
+
+	return mods
+}()
+
+// luaRocksPlatforms is platform_order from the vendored core/cfg.lua: every
+// platform cfg.each_platform can yield, so every luarocks.fs.<platform> that
+// fs.init can probe for.
+var luaRocksPlatforms = []string{
+	"unix", "bsd", "solaris", "netbsd", "openbsd", "freebsd", "dragonfly",
+	"linux", "macosx", "cygwin", "msys", "haiku",
+	"windows", "win32", "mingw", "mingw32", "msys2_mingw_w64",
+}
+
 // Compiled modules are shared by every VM. gopher-lua's *FunctionProto is
 // produced without an LState (parse.Parse then lua.Compile) and installed into
 // any of them with NewFunctionFromProto, which binds the proto to that VM's
@@ -378,13 +451,43 @@ func compiledModules() (map[string]*lua.FunctionProto, error) {
 	return luaProtos, errLuaProto
 }
 
-// newVM creates a gopher-lua VM, installs the custom os.getenv and the glr_*
-// globals, and preloads every embedded module. The caller owns the returned
-// LState and must Close it; nothing is cached on the engine. cfg.init has NOT
-// run yet at this point — that happens inside the first dispatch, which is what
-// warmVM adds on top.
+// newVM creates a gopher-lua VM with an empty package.path, installs the custom
+// os.getenv and the glr_* globals, and preloads every embedded module. The
+// caller owns the returned LState and must Close it; nothing is cached on the
+// engine. cfg.init has NOT run yet at this point — that happens inside the
+// first dispatch, which is what warmVM adds on top.
 func (e *luaEngine) newVM() (*lua.LState, error) {
 	L := lua.NewState() // full stdlibs; do NOT skip OpenLibs
+
+	pkgTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "package").(*lua.LTable)
+	if !ok {
+		L.Close()
+
+		return nil, errors.New("luaEngine: package table missing from Lua environment")
+	}
+
+	// Kept for the path command, which prints it (extra/cmd_path.lua).
+	defaultPath := L.GetField(pkgTbl, "path").String()
+
+	// Find modules only in package.preload and in the rock trees. gopher-lua
+	// seeds package.path from $LUA_PATH or "./?.lua;/usr/local/share/lua/5.1/…",
+	// and LuaRocks requires many modules we do not preload — luarocks.fs.linux,
+	// lfs, socket.http, every luarocks.cmd.external.* it finds on the path — so
+	// any file of that name in the current directory, in a system LuaRocks or on
+	// $LUA_PATH would run inside the engine. The rock trees still get there:
+	// luarocks.loader, which luarocks.cmd.which requires while cmd.run_command
+	// loads the command table, appends cfg.rocks_trees to package.path
+	// (cfg.init_package_paths), so a build backend installed into one of them
+	// still loads; the optional modules LuaRocks probes for are stubbed in the
+	// preload and never get that far (luaAbsentModules). package.cpath needs
+	// nothing: gopher-lua leaves it empty and cannot load C modules.
+	L.SetField(pkgTbl, "path", lua.LString(""))
+
+	L.SetGlobal("glr_default_package_path", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LString(defaultPath))
+
+		return 1
+	}))
 
 	// Install the custom os.getenv and the glr_* globals BEFORE preloading,
 	// since hardcoded.lua reads them at require time.
@@ -563,10 +666,22 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 		return nil, err
 	}
 
-	preload := L.GetField(L.GetField(L.Get(lua.EnvironIndex), "package"), "preload")
+	preload := L.GetField(pkgTbl, "preload")
 
 	for modName, proto := range protos {
 		L.SetField(preload, modName, L.NewFunctionFromProto(proto))
+	}
+
+	// Fail every probe for an optional module the way a missing module fails,
+	// without looking anywhere; see luaAbsentModules.
+	absent := L.NewFunction(func(L *lua.LState) int {
+		L.RaiseError("module %s not found: the go-luarocks engine does not provide it", L.OptString(1, "?"))
+
+		return 0
+	})
+
+	for _, modName := range luaAbsentModules {
+		L.SetField(preload, modName, absent)
 	}
 
 	return L, nil

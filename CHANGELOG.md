@@ -148,3 +148,19 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   LuaRocks printed, from its last `Error:` line on. The captured output went
   only to the logger, so the error said `exited with code 1` and not why —
   whether no server had the rock, a header was missing or a download failed.
+- client: The lua backend no longer loads Lua modules from the current
+  directory, `$LUA_PATH` or `/usr/local/share/lua/5.1`, nor the optional
+  ones LuaRocks probes for from a rock tree. Its VM kept gopher-lua's default
+  `package.path`, and LuaRocks requires modules the engine does not embed —
+  `luarocks.fs.linux`, `lfs`, `socket.http` and every
+  `luarocks.cmd.external.*` it finds on the path — so a file of that name in
+  the directory a command ran in was executed, and a system LuaRocks under
+  `/usr/local` broke the backend (tarantool/tt#847). The VM now starts with
+  an empty `package.path`, and the optional modules (`lfs`, `socket.http`,
+  `md5`, the platform fs modules, ...) are preloaded stubs that fail the way
+  a missing module does, so a repository's committed `.rocks` cannot supply
+  them either. An external command is loaded only when it is the command
+  being run (or the subject of `help`), not during every command, and plain
+  `help` no longer lists external commands. LuaRocks still appends the rock
+  trees to the path, so a build backend or an external command installed
+  into a tree keeps working, and `path` prints the same `LUA_PATH` as before.

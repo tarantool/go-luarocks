@@ -1,4 +1,59 @@
-local function exec(bin, ...)
+-- requested holds the names this dispatch asks for as a command: the command
+-- and, for help, the command it asks about. The luarocks.fs.lua shim
+-- (extra/fs_lua.lua) lets external-command discovery yield only these, so an
+-- external command is loaded only when it is the one being run.
+local wrapper = { requested = {} }
+
+-- Options of the main parser that take a value (get_parser in cmd.lua),
+-- hidden aliases included. Everything else that starts with "-" is a flag.
+local valued_options = {
+    ["--server"] = true, ["--from"] = true,
+    ["--only-server"] = true, ["--only-from"] = true,
+    ["--only-sources"] = true, ["--only-sources-from"] = true,
+    ["--namespace"] = true,
+    ["--lua-dir"] = true,
+    ["--lua-version"] = true,
+    ["--tree"] = true, ["--to"] = true,
+    ["--timeout"] = true,
+    ["--project-tree"] = true,
+}
+
+-- requested_commands finds the command in argv the way the main parser does:
+-- the first positional, skipping global options with their values and the
+-- VAR=VALUE assignments cmd.run_command strips before parsing. For help it
+-- adds the next positional, the command help is asked about.
+local function requested_commands(...)
+    local args = { ... }
+    local positionals = {}
+    local i = 1
+    while i <= #args and #positionals < 2 do
+        local a = args[i]
+        if a == "--" then
+            for j = i + 1, #args do
+                table.insert(positionals, args[j])
+            end
+            break
+        elseif a:sub(1, 1) == "-" then
+            if valued_options[a] then
+                i = i + 1
+            end
+        elseif not a:match("^[^-][^=]*=") then
+            table.insert(positionals, a)
+        end
+        i = i + 1
+    end
+
+    local requested = {}
+    if positionals[1] then
+        requested[positionals[1]] = true
+        if positionals[1] == "help" and positionals[2] then
+            requested[positionals[2]] = true
+        end
+    end
+    return requested
+end
+
+function wrapper.exec(bin, ...)
     local cfg = require("luarocks.core.cfg")
     local util = require("luarocks.util")
 
@@ -30,6 +85,7 @@ local function exec(bin, ...)
         local admin_args = {...}
 
         table.remove(admin_args, 1)
+        wrapper.requested = requested_commands(unpack(admin_args))
 
         local commands = {
            make_manifest = "luarocks.admin.cmd.make_manifest",
@@ -67,9 +123,8 @@ local function exec(bin, ...)
         write_rockspec = "luarocks.cmd.write_rockspec",
     }
 
+    wrapper.requested = requested_commands(...)
     cmd.run_command('LuaRocks package manager', rocks_commands, 'luarocks.cmd.external', ...)
 end
 
-return {
-    exec = exec
-}
+return wrapper
