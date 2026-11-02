@@ -144,3 +144,7 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   bucket it redirects to — and `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` were
   ignored. An error response is now read before its body is closed, so a 404
   of a manifest probe no longer drops the connection either.
+- client: The error of a failed lua backend command carries the message
+  LuaRocks printed, from its last `Error:` line on. The captured output went
+  only to the logger, so the error said `exited with code 1` and not why —
+  whether no server had the rock, a header was missing or a download failed.
