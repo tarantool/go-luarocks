@@ -66,6 +66,10 @@ type HTTPRemoteIndex struct {
 	// binary arch is excluded, mirroring results:satisfies (results.lua:57).
 	Arch string
 
+	// Cache, when set, shares the parsed manifests with other indexes; see
+	// ManifestCache.
+	Cache *ManifestCache
+
 	// cache memoizes parsed manifests across calls. Keyed by the server
 	// string as passed to load (the raw, un-normalized entry from Servers).
 	cache map[string]*remoteManifest
@@ -203,6 +207,13 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 		lv = "5.1"
 	}
 
+	shared := manifestKey{server: server, namespace: namespace, luaVersion: lv}
+	if m, ok := h.Cache.get(shared); ok {
+		h.cache[cacheKey] = m
+
+		return m, nil
+	}
+
 	base := strings.TrimRight(server, "/") + "/"
 	if namespace != "" {
 		base += "manifests/" + namespace + "/"
@@ -228,6 +239,7 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 		}
 
 		h.cache[cacheKey] = m
+		h.Cache.put(shared, m)
 
 		return m, nil
 	}

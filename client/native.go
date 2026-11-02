@@ -17,6 +17,7 @@ import (
 	"github.com/tarantool/go-luarocks/build"
 	"github.com/tarantool/go-luarocks/deps"
 	"github.com/tarantool/go-luarocks/fetch"
+	"github.com/tarantool/go-luarocks/remote"
 	"github.com/tarantool/go-luarocks/rockspec"
 	"github.com/tarantool/go-luarocks/tree"
 )
@@ -32,10 +33,13 @@ import (
 // backend does not implement return rocks.ErrNotImplemented — never a
 // silent no-op.
 type nativeEngine struct {
-	cfg    rocks.Config
-	store  rocks.ManifestStore
-	index  rocks.RemoteIndex
-	logger *slog.Logger
+	cfg   rocks.Config
+	store rocks.ManifestStore
+	index rocks.RemoteIndex
+	// manifests is the client's manifest cache, which the index of a per-call
+	// server list and the searches of Search and Download share with index.
+	manifests *remote.ManifestCache
+	logger    *slog.Logger
 
 	// luajitOnce guards the one-shot interpreter probe behind luajitVersion,
 	// whose answer (luajit, possibly empty) names the version of the
@@ -91,7 +95,7 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 	if len(opts.Servers) > 0 {
 		// Same dispatch as the facade's own server list (serverIndex): an
 		// override entry may be a local directory as readily as an HTTP URL.
-		idx = serverIndex(opts.Servers, e.cfg.InsecureServers)
+		idx = serverIndex(opts.Servers, e.cfg.InsecureServers, e.manifests)
 	}
 
 	cs, err := deps.ParseConstraints(opts.Version)

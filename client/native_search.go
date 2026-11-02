@@ -106,6 +106,7 @@ func (e *nativeEngine) Search(
 
 	matches, err := remote.Search(ctx, servers, remote.IndexOptions{
 		InsecureServers: e.cfg.InsecureServers,
+		Cache:           e.manifests,
 	}, remote.Query{
 		Name:        name,
 		Namespace:   namespace,

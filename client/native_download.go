@@ -165,6 +165,7 @@ func (e *nativeEngine) downloadOne(
 
 	matches, err := remote.Search(ctx, servers, remote.IndexOptions{
 		InsecureServers: e.cfg.InsecureServers,
+		Cache:           e.manifests,
 	}, q)
 	if err != nil {
 		return "", fmt.Errorf("rocks.Download: %w", err)
@@ -211,6 +212,7 @@ func (e *nativeEngine) downloadAll(
 ) (string, error) {
 	matches, err := remote.Search(ctx, servers, remote.IndexOptions{
 		InsecureServers: e.cfg.InsecureServers,
+		Cache:           e.manifests,
 	}, q)
 	if err != nil {
 		return "", fmt.Errorf("rocks.Download: %w", err)
