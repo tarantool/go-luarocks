@@ -55,7 +55,14 @@ func NativeInstalledLookup(e *NativeEngine) (deps.InstalledLookup, error) {
 // NativeInstallStep exposes nativeEngine.installStep so the nil-Rockspec
 // fetch branch can be driven directly with a file:// step URL.
 func NativeInstallStep(e *NativeEngine, ctx context.Context, step rocks.InstallStep) error {
-	return e.installStep(ctx, step)
+	fetched, err := e.newArtifacts()
+	if err != nil {
+		return err
+	}
+
+	defer fetched.remove()
+
+	return e.installStep(ctx, fetched, step)
 }
 
 // NativeFetchSource exposes nativeEngine.fetchSource so the source-root
