@@ -61,6 +61,42 @@ func (t *Tree) resolveSpot(deployDir, plainTarget, item, newName, newVer string)
 	return plainTarget, nil
 }
 
+// spots records the deploy targets one Deploy call has already resolved: the
+// plain (unversioned) target path of each deployed file → the final path
+// resolveSpot chose for it.
+//
+// Upstream deploys a rock in a single pass: the build backend and
+// install_files both write into the per-rock install dir, install_files
+// overwriting whatever the backend put at the same path (build.lua:412-423),
+// and repos.deploy_files then moves each file of the resulting rock_manifest to
+// its deploy spot exactly once (repos.lua:488-541). Deploy instead reads the
+// same file from more than one place — the builtin backend stages build.modules
+// and build.install.lua/lib in the build dir that stage 4 relocates — so a
+// second resolveSpot of a target the first one just wrote would find an
+// "untracked" file there and back it up to <target>~ (or, on an upgrade, demote
+// the new rock's own file over the old version's). spots makes the second
+// visit reuse the first decision instead.
+type spots map[string]string
+
+// claim returns the final on-disk target for the file at plainTarget and
+// whether this is the first time the Deploy call reaches it. The first claim
+// resolves the spot (resolveSpot); a repeat returns the recorded final path
+// without consulting the tree again.
+func (s spots) claim(t *Tree, deployDir, plainTarget, item, newName, newVer string) (string, bool, error) {
+	if final, ok := s[plainTarget]; ok {
+		return final, false, nil
+	}
+
+	final, err := t.resolveSpot(deployDir, plainTarget, item, newName, newVer)
+	if err != nil {
+		return "", false, err
+	}
+
+	s[plainTarget] = final
+
+	return final, true, nil
+}
+
 // currentProvider looks up the active provider of item via t.Provider, with the
 // legacy ".init" fallback upstream keeps for backward compatibility (older
 // LuaRocks registered "foo.init" files under "foo"; repos.lua:253-256).

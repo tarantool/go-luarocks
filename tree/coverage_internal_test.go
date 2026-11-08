@@ -268,6 +268,32 @@ func TestIsLua_MissingFile(t *testing.T) {
 	assert.False(t, isLua(filepath.Join(t.TempDir(), "nope.lua")))
 }
 
+// TestIsLua_Shebang — upstream fs.is_lua asks the interpreter's loadfile,
+// which skips a first line starting with '#', so a "#!" Lua script is Lua
+// (and gets wrapped) while a "#!" shell script still is not.
+func TestIsLua_Shebang(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"lua script", "#!/usr/bin/env tarantool\nprint('hi')\n", true},
+		{"shebang only", "#!/usr/bin/env tarantool", true},
+		{"shell script", "#!/bin/sh\necho hi\n", false},
+		{"no shebang", "print('hi')\n", true},
+		{"second shebang", "#!/usr/bin/env tarantool\n#!/usr/bin/env tarantool\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := filepath.Join(t.TempDir(), "script")
+			require.NoError(t, os.WriteFile(p, []byte(tc.body), 0o600))
+			assert.Equal(t, tc.want, isLua(p))
+		})
+	}
+}
+
 func TestDeployDirForKind(t *testing.T) {
 	t.Parallel()
 

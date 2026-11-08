@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -228,6 +229,137 @@ build = {
 	// module too, which upstream's repos.package_modules also reports and the
 	// rockspec-keyed loop missed.
 	assert.Equal(t, "foo/extras.lua", entry.Modules["foo.extras"], "RepoEntry.Modules[foo.extras]")
+}
+
+// stageInstallSections writes the backend-parity "install-sections" fixture
+// (build.modules, build.install.lua and build.install.bin of a builtin rock)
+// under a fresh source dir and returns a native client over a fresh tree plus
+// the rockspec path. The Tarantool prefix is fake: a pure-Lua rock never runs
+// the interpreter or the compiler.
+func stageInstallSections(t *testing.T) (*client.Rocks, string, string) {
+	t.Helper()
+
+	src := t.TempDir()
+	treeDir := t.TempDir()
+
+	for rel, body := range map[string]string{
+		"src/withinstall.lua": "return { name = 'withinstall' }\n",
+		"src/helper.lua":      "return 42\n",
+		"bin/wi-cli":          "#!/usr/bin/env tarantool\nprint('hi')\n",
+	} {
+		full := filepath.Join(src, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o750))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o600))
+	}
+
+	rockspec := `
+package = "withinstall"
+version = "1.0-1"
+source = { url = "file://localhost/withinstall.tar.gz" }
+build = {
+   type = "builtin",
+   modules = {
+      ["withinstall"] = "src/withinstall.lua",
+   },
+   install = {
+      lua = { ["withinstall.helper"] = "src/helper.lua" },
+      bin = { ["wi-cli"] = "bin/wi-cli" },
+   },
+}
+`
+	specPath := filepath.Join(src, "withinstall-1.0-1.rockspec")
+	require.NoError(t, os.WriteFile(specPath, []byte(rockspec), 0o600))
+
+	r, err := client.New(rocks.Config{
+		Tree:       treeDir,
+		WorkingDir: src,
+		Tarantool: rocks.TarantoolConfig{
+			Prefix:     "/opt/test",
+			IncludeDir: "/opt/test/include",
+		},
+	})
+	require.NoError(t, err, "New")
+
+	return r, treeDir, specPath
+}
+
+// deployedOutsideRocks returns the slash-separated tree-relative path of every
+// file outside share/tarantool/rocks/ — the deployed artifacts the backend
+// parity contract covers.
+func deployedOutsideRocks(t *testing.T, treeDir string) []string {
+	t.Helper()
+
+	var got []string
+
+	require.NoError(t, filepath.WalkDir(treeDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		rel, err := filepath.Rel(treeDir, p)
+		if err != nil {
+			return err
+		}
+
+		if rel = filepath.ToSlash(rel); !strings.HasPrefix(rel, "share/tarantool/rocks/") {
+			got = append(got, rel)
+		}
+
+		return nil
+	}), "walk %q", treeDir)
+
+	return got
+}
+
+// TestMake_BuiltinDeploysEachFileOnce — the builtin backend stages the
+// modules and build.install.lua files in the build dir, which the deploy also
+// relocates, so a native Make deployed each of them twice and the second copy
+// backed the first up to <file>~. Upstream (the lua backend) deploys exactly
+// the files below, on a fresh tree and on a re-make of the same version.
+func TestMake_BuiltinDeploysEachFileOnce(t *testing.T) {
+	t.Parallel()
+
+	r, treeDir, specPath := stageInstallSections(t)
+
+	want := []string{
+		"bin/wi-cli",
+		"share/tarantool/withinstall.lua",
+		"share/tarantool/withinstall/helper.lua",
+	}
+
+	require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make")
+	assert.ElementsMatch(t, want, deployedOutsideRocks(t, treeDir), "deployed artifacts after a Make of a fresh tree")
+
+	require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "re-Make")
+	assert.ElementsMatch(t, want, deployedOutsideRocks(t, treeDir), "deployed artifacts after a re-make")
+}
+
+// TestMake_WrapsShebangBinScript — upstream wraps a build.install.bin Lua
+// script (repos.deploy_files → fs.wrap_script) when fs.is_lua accepts it, and
+// the interpreter's loadfile accepts a "#!/usr/bin/env tarantool" script. A
+// native Make copied it to <tree>/bin verbatim instead; it must install the
+// script under the per-rock bin dir and deploy a launcher that execs the
+// configured Tarantool on it.
+func TestMake_WrapsShebangBinScript(t *testing.T) {
+	t.Parallel()
+
+	r, treeDir, specPath := stageInstallSections(t)
+
+	require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make")
+
+	realScript := filepath.Join(treeDir, "share/tarantool/rocks/withinstall/1.0-1/bin/wi-cli")
+	got, err := os.ReadFile(realScript) //nolint:gosec // test temp path
+	require.NoError(t, err, "the real script must land in the per-rock bin dir")
+	assert.Equal(t, "#!/usr/bin/env tarantool\nprint('hi')\n", string(got), "the real script must be installed verbatim")
+
+	wrapper, err := os.ReadFile(filepath.Join(treeDir, "bin", "wi-cli")) //nolint:gosec // test temp path
+	require.NoError(t, err, "read bin/wi-cli")
+	assert.True(t, strings.HasPrefix(string(wrapper), "#!/bin/sh\n\nLUAROCKS_SYSCONFDIR="),
+		"bin/wi-cli must be the launcher, got:\n%s", wrapper)
+	assert.Contains(t, string(wrapper), " exec '/opt/test/bin/tarantool' -e ",
+		"the launcher must exec the configured Tarantool")
+	assert.True(t, strings.HasSuffix(string(wrapper), " '"+realScript+"' \"$@\"\n"),
+		"the launcher must exec the real script, got:\n%s", wrapper)
 }
 
 // TestMake_NonBuiltinBackendIndexesModules — TNTP-9962: a rock built by any
