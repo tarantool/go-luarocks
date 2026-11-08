@@ -33,8 +33,10 @@ LuaJIT-as-distinct, no Windows. Linux + macOS, amd64 + arm64.
 
 - Two Backends: a pure-Go `native` engine (default) and a vendored upstream
   LuaRocks `lua` engine, selectable per client
-- Backend Parity: the native backend is a byte-equal drop-in for the lua
-  reference in all deployed artifacts, verified by a differential harness
+- Backend Parity: the native backend deploys the same artifacts, byte for
+  byte, as the lua reference wherever the two share semantics, verified by a
+  differential harness; where it keeps go-luarocks' own semantics, the
+  differences are documented
 - Rock Operations: `Install`, `Build`, `Make`, `Pack`, `Unpack`, plus
   `List`, `Show`, and `Which`
 - Dependency Resolution: version parsing, dependency constraints, and a
@@ -109,29 +111,119 @@ backend. Two backends exist:
   behavior.
 
 Reads (`List`/`Show`/`Which`) always go through the native tree reader
-regardless of backend.
+regardless of backend. `List` and `Show` answer as upstream's `list` and
+`show` do: `Show` reports the newest installed version and its modules by
+name. `Which` keeps go-luarocks' own lookup: the module's plain paths in
+`Config.Tree` alone, where upstream's `which` (which `Exec` runs) asks the
+LuaRocks loader over the manifests of every rock tree.
+
+`InstallOpts.Deps` and `RemoveOpts.Deps` take a `client.DepsPolicy`:
+`DepsAll` (the zero value), `DepsNone` or `DepsOnlyNew`. The native backend
+reads it as go-luarocks always has: `Install` resolves the transitive closure
+of the rock and installs, in topological order, every dependency a rock in
+`Config.Tree` does not satisfy, unless `DepsNone`, which installs the rock
+alone; `Build` and `Make` install no dependency at all. It consults and
+writes `Config.Tree` alone: no other rock tree satisfies a dependency, and a
+deployed command wrapper puts only `Config.Tree` on `package.path`. The lua
+backend passes the policy to upstream as `--deps-mode` on `Install` and
+`Remove` (`all`, `none` and `order` for `DepsAll`, `DepsNone` and
+`DepsOnlyNew`); `Build` and `Make` pass none, so the configured `deps_mode`,
+`one` by default, applies. Its typed methods run over the rock trees
+`Config.Tree`, then `Config.Tarantool.Prefix`, whatever a LuaRocks config file
+sets, so the tree they install into is always one of them, as upstream
+assumes; `Exec` runs the command as the host's LuaRocks would, over the
+configured trees.
 
 #### Backend Parity
 
-The native backend is built to be a behavioral drop-in for the lua reference —
-**zero divergence in deployed artifacts** — so a consumer like `tt` can prefer
-`tt → lua → go` and treat the backend choice as a pure performance decision.
+The native backend reproduces what upstream LuaRocks — the lua backend —
+deploys: for the same operation, wherever the two backends share semantics,
+every deployed artifact is byte-equal between them, and each rock's
+`rock_manifest` and the tree `manifest` record the same contents. That is
+not zero divergence overall. In a few places the native backend keeps
+go-luarocks' own semantics, by decision: `tt`, its main consumer, drives it
+as a deterministic executor — exact pins, `DepsNone`, a topological order and
+its own pruning of the tree — and relies on them, while the lua backend stays
+upstream. Switching backends on the same calls can therefore change the
+outcome in these areas:
 
-A differential harness verifies this: it installs the same fixture through
-both backends into two separate trees and diffs the deployed trees against each
-other (upstream LuaRocks is its own oracle). The contract is that every
-deployed artifact — any file NOT under `share/tarantool/rocks/` — is byte-equal
-between backends. Run it (needs a real `tarantool` on `PATH` plus its `lua.h`):
+| Area | native backend (go-luarocks) | lua backend (upstream) |
+| --- | --- | --- |
+| Dependencies of `Install` | `DepsAll`/`DepsOnlyNew` resolve the closure and install what `Config.Tree` lacks; `DepsNone` installs the rock alone | `--deps-mode all`/`order`/`none`: a rock in the prefix's tree satisfies a dependency |
+| Dependencies of `Build`, `Make` | none installed, `build_dependencies` included | the missing ones are installed first |
+| Other versions of the rock on `Install`, `Build`, `Make` | kept | removed unless `--keep`, which only `BuildOpts.Keep` passes (on the native backend it keeps the staging build dir) |
+| `Remove` of a rock another depends on | removed; `Force` and `ForceFast` change nothing | refused unless forced, or another version in the rock trees satisfies the dependent |
+| Rock trees consulted, and listed by a command wrapper | `Config.Tree` alone | `Config.Tree`, then `Config.Tarantool.Prefix`, as the deps mode selects them |
+| Resolved dependencies in the tree manifest | a rock's direct ones, recorded at its deploy (the installed version with the greatest string); the other entries are left as they are | every rock's, transitively, recomputed on each write |
+| `Which` | plain paths in `Config.Tree` | (`Exec` `which`) the loader, over every rock tree's manifest |
+
+A differential harness verifies the parity: it builds the same fixture
+through both backends, with `Make`, with `Build` and with `Install`, into
+two separate trees and diffs the trees against each other (upstream LuaRocks
+is its own oracle). The fixtures cover the `builtin`, `make`, `cmake` and
+`command` build types, and trees holding several versions of a rock, or
+several rocks providing the same module. Where a scenario meets one of the
+differences above, it is listed as a known divergence with its reason
+(`client/parity_divergence_test.go`) and checks what each backend does
+instead — every version kept on the native backend and the expected ones on
+the lua backend, the manifests equal but for the resolved dependencies — and
+`TestBackendDivergence_*` runs the dependency policies and the removal of a
+dependency through both backends and checks each one's outcome. The contract
+is that every deployed artifact — any file NOT under `share/tarantool/rocks/`
+— is byte-equal between backends, a command wrapper once the prefix's tree
+upstream's `install` adds is left out, and that each rock's `rock_manifest`
+and the tree `manifest` record the same contents. Run it (needs a real
+`tarantool` on `PATH` plus its `lua.h`, and `cmake`):
 
 ```bash
-go test ./client/ -tags integration_luaengine -run TestBackendParity -v
+go test ./client/ -tags integration_luaengine -run 'TestBackendParity|TestBackendDivergence' -v
 ```
 
-Documented, non-failing differences: the manifest format
-(`share/tarantool/rocks/manifest`), the per-rock bookkeeping subtree under
-`share/tarantool/rocks/` (native does not copy the `.rockspec` into the install
-dir), and compiled `.so` modules (not byte-reproducible across two
-compilations — asserted by presence, not bytes).
+Documented, non-failing differences: the formatting of the manifest files
+(`share/tarantool/rocks/manifest` and each `rock_manifest`), the `build/`
+staging directory the native backend keeps in each rock's install dir under
+`share/tarantool/rocks/` (not listed in its `rock_manifest`), and compiled
+`.so` modules (not byte-reproducible across two compilations — asserted by
+presence, not bytes).
+
+Besides the differences of semantics above, the native backend departs from
+upstream deliberately in what it deploys and in the paths it follows, each
+documented where it is made: a `cmake` rockspec that sets no
+`CMAKE_INSTALL_PREFIX` installs under the rock's `$(PREFIX)` rather than
+CMake's `/usr/local` (`build/cmake.go`); a rock
+shipping both `foo.lua` and `foo.so` is indexed by its `.so`
+(`tree.ModuleIndex`); and whether a command script is Lua, and so gets a
+wrapper, is decided by parsing it as Lua 5.1 rather than by the Tarantool
+interpreter's `loadfile`, which also accepts LuaJIT bytecode and LuaJIT's
+syntax extensions (`tree/deploy.go` `isLua`); and `Pack` copies a demoted
+file in a subdirectory back from the versioned name the deploy gave it, where
+upstream looks for one the deploy never writes and packs another rock's file
+(`client/native.go` `copyBackFiles`).
+
+#### Backend Interoperability
+
+The parity harness compares two trees; a second one,
+`TestBackendInterop_*`, has both backends work on the same tree, as `tt`
+does when it switches backends on an existing project. One backend installs,
+builds or makes a rock, and the other lists and shows it and resolves its
+modules — through the native readers and through upstream's own `list`,
+`show`, `which` and `path` — installs it again, upgrades or downgrades it,
+removes it with and without dependents, packs it, or rewrites the tree
+manifest by installing an unrelated rock. Every mixed run must end where a
+run of either backend alone ends, and the two readers must agree on every
+tree. Where the backends differ by design (the table above), the two
+single-backend runs end differently, and a mixed run must end where the run
+of the backend whose semantics decide it ends — the one that made the last
+version, removed the dependency, or last recomputed the resolved
+dependencies — or, where neither does, is skipped as a named known
+divergence.
+
+Run it as the parity harness (packing also needs `zip`, which upstream packs
+with):
+
+```bash
+go test ./client/ -tags integration_luaengine -run TestBackendInterop -v
+```
 
 ### Packages
 

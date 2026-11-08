@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,7 +79,8 @@ func sysconfDir() string {
 //
 //  1. Query the remote index for `name` candidates.
 //  2. Pick the newest version satisfying opts.Version.
-//  3. Resolve transitive deps (unless DepsNone).
+//  3. Resolve transitive deps (unless DepsNone), skipping the ones a rock
+//     installed in e.cfg.Tree satisfies.
 //  4. For each step in topo order: fetch source, eval rockspec, merge
 //     platforms, validate, build, deploy, update tree manifest.
 //  5. Install the requested rock itself.
@@ -190,8 +192,8 @@ func (e *nativeEngine) resolvePlan(
 		}
 	}
 
-	// Tarantool is single-tree, so the deps_mode tree selection reduces to
-	// "consult this tree" for every mode except none (which never reaches here).
+	// Only Config.Tree is consulted: a rock installed in another rock tree
+	// does not satisfy a dependency, whatever opts.Deps says.
 	if lookup, lerr := e.installedLookup(); lerr == nil {
 		resolveOpts = append(resolveOpts, deps.WithInstalled(lookup))
 	}
@@ -202,9 +204,10 @@ func (e *nativeEngine) resolvePlan(
 // Build evaluates the rockspec at specPath, fetches its declared source,
 // runs the build backend, and deploys the result into e.cfg.Tree.
 //
-// Unlike Install, Build does not perform dependency resolution — it
-// assumes prerequisites are already present (matching upstream
-// `luarocks build`).
+// Unlike Install, Build does not resolve or install dependencies, its
+// build_dependencies included — it assumes the prerequisites are already
+// present. Upstream `luarocks build`, which the lua backend runs, installs
+// the missing ones first.
 func (e *nativeEngine) Build(ctx context.Context, specPath string, opts BuildOpts) error {
 	spec, err := evalAndPrepare(specPath, e.cfg)
 	if err != nil {
@@ -230,7 +233,8 @@ func (e *nativeEngine) Build(ctx context.Context, specPath string, opts BuildOpt
 
 // Make is "build the rockspec found in cwd against the source already
 // present in cwd" — the upstream `luarocks make` flow. It is the
-// developer-iteration form of Build.
+// developer-iteration form of Build, and like Build it installs no
+// dependencies.
 func (e *nativeEngine) Make(ctx context.Context, opts MakeOpts) error {
 	specPath := opts.RockspecPath
 	if specPath == "" {
@@ -267,10 +271,15 @@ func (e *nativeEngine) Make(ctx context.Context, opts MakeOpts) error {
 }
 
 // Pack produces a .rock or .src.rock archive for `target` (rock name) in
-// e.cfg.WorkingDir and returns its path.
+// e.cfg.WorkingDir and returns its path. It packs the newest installed version
+// of the rock, as upstream `luarocks pack` picks it
+// (search.pick_installed_rock).
 //
-//   - opts.SrcOnly == false: zip the installed tree at
-//     <tree>/share/tarantool/rocks/<name>/<version>/ into <name>-<ver>.rock.
+//   - opts.SrcOnly == false: a binary rock, <name>-<ver>.<arch>.rock, as
+//     upstream `luarocks pack <name>` makes it: the rock's install dir
+//     <tree>/share/tarantool/rocks/<name>/<version>/ with its deployed lua
+//     and lib files copied back in, arch being the host's for a rock with a
+//     lib file or a binary command and "all" otherwise.
 //   - opts.SrcOnly == true:  zip the rockspec only into
 //     <name>-<ver>.src.rock. (Source download lives outside the rockspec;
 //     upstream pulls source per `source.url` and inlines it. We omit that
@@ -293,37 +302,212 @@ func (e *nativeEngine) Pack(ctx context.Context, target string, opts PackOpts) (
 		return "", fmt.Errorf("rocks.Pack: %q not installed in %s", target, t.Tree)
 	}
 
-	var picked string
-	for v := range versions {
-		if picked == "" || v < picked {
-			picked = v
-		}
+	picked := newestVersion(versions)
+
+	if !opts.SrcOnly {
+		return e.packInstalled(t, target, picked)
 	}
 
-	installDir := t.InstallDir(target, picked)
+	outPath := filepath.Join(e.cfg.WorkingDir, target+"-"+picked+".src.rock")
+	specPath := filepath.Join(t.InstallDir(target, picked), target+"-"+picked+".rockspec")
 
-	suffix := ".rock"
-	if opts.SrcOnly {
-		suffix = ".src.rock"
-	}
-
-	outPath := filepath.Join(e.cfg.WorkingDir, target+"-"+picked+suffix)
-
-	if opts.SrcOnly {
-		specPath := filepath.Join(installDir, target+"-"+picked+".rockspec")
-
-		err := zipSingleFile(outPath, specPath, target+"-"+picked+".rockspec")
-		if err != nil {
-			return "", fmt.Errorf("rocks.Pack: zip rockspec: %w", err)
-		}
-	} else {
-		err := zipDir(outPath, installDir)
-		if err != nil {
-			return "", fmt.Errorf("rocks.Pack: zip install dir: %w", err)
-		}
+	if err := zipSingleFile(outPath, specPath, target+"-"+picked+".rockspec"); err != nil {
+		return "", fmt.Errorf("rocks.Pack: zip rockspec: %w", err)
 	}
 
 	return outPath, nil
+}
+
+// packInstalled packs name/version, installed in t, into a binary rock in
+// e.cfg.WorkingDir, as upstream pack.pack_installed_rock does (pack.lua:83-133):
+// the contents of the rock's install dir, plus the lua and lib files its
+// rock_manifest lists, copied back from the deploy dirs (copy_back_files), into
+// <name>-<version>.<arch>.rock, where arch is the host's when the rock has a
+// lib file or a command that is an actual binary (repos.has_binaries), and
+// "all" otherwise. That is the layout a binary rock is installed from, so the
+// rock installs as built on either backend.
+func (e *nativeEngine) packInstalled(t *tree.Tree, name, version string) (string, error) {
+	installDir := t.InstallDir(name, version)
+	if _, err := os.Stat(installDir); err != nil {
+		return "", fmt.Errorf("rocks.Pack: %s %s does not seem to be an installed rock: %w", name, version, err)
+	}
+
+	rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest"))
+	if err != nil {
+		return "", fmt.Errorf("rocks.Pack: %w", err)
+	}
+
+	stage, err := os.MkdirTemp(e.cfg.WorkingDir, "rocks-pack-*")
+	if err != nil {
+		return "", fmt.Errorf("rocks.Pack: mkdir tmp: %w", err)
+	}
+
+	defer func() { _ = os.RemoveAll(stage) }()
+
+	if err := copyDirContents(installDir, stage); err != nil {
+		return "", fmt.Errorf("rocks.Pack: copy %s: %w", installDir, err)
+	}
+
+	for _, sec := range []struct {
+		files     map[string]string
+		deployDir string
+		sub       string
+		mode      os.FileMode
+	}{
+		{rm.Lib, t.DeployLibDir(), "lib", packExecMode},
+		{rm.Lua, t.DeployLuaDir(), "lua", packReadMode},
+	} {
+		if err := copyBackFiles(sec.files, sec.deployDir, filepath.Join(stage, sec.sub), name, version, sec.mode); err != nil {
+			return "", fmt.Errorf("rocks.Pack: failed copying back files: %w", err)
+		}
+	}
+
+	arch := "all"
+	if len(rm.Lib) > 0 || hasBinaries(t, rm) {
+		arch = remote.HostArch()
+	}
+
+	outPath := filepath.Join(e.cfg.WorkingDir, name+"-"+version+"."+arch+".rock")
+	_ = os.Remove(outPath)
+
+	if err := zipDir(outPath, stage); err != nil {
+		return "", fmt.Errorf("rocks.Pack: zip %s: %w", outPath, err)
+	}
+
+	return outPath, nil
+}
+
+// Modes of the files Pack copies back from the deploy dirs, upstream's "exec"
+// and "read" permissions (fs.copy in copy_back_files).
+const (
+	packExecMode os.FileMode = 0o755
+	packReadMode os.FileMode = 0o644
+)
+
+// copyBackFiles mirrors upstream copy_back_files (pack.lua:61-79): it copies
+// each file of a rock_manifest section, keyed by its path under deployDir,
+// into packDir, from the versioned name the rock's file was demoted to when
+// there is one (path.versioned_name) and from its plain path otherwise.
+//
+// One deliberate departure: upstream's recursion into a subdirectory passes
+// the subdirectory as the deploy dir, so for "foo/bar.lua" it looks for
+// foo/<name>_<version>-bar.lua, which no deploy ever writes — deploy_files
+// demotes it to <name>_<version>-foo/bar.lua — and packs the plain foo/bar.lua,
+// another rock's file, instead. The versioned name is formed here the way the
+// deploy formed it.
+func copyBackFiles(files map[string]string, deployDir, packDir, name, version string, mode os.FileMode) error {
+	for _, rel := range slices.Sorted(maps.Keys(files)) {
+		source := filepath.Join(deployDir, filepath.FromSlash(rel))
+
+		if versioned := tree.MungedPath(deployDir, source, name, version); fileExists(versioned) {
+			source = versioned
+		}
+
+		if err := copyFileMode(source, filepath.Join(packDir, filepath.FromSlash(rel)), mode); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// hasBinaries mirrors upstream repos.has_binaries (repos.lua:151-165): whether
+// one of the entries of rm's bin section is an actual binary at its deploy
+// path — neither a .lua file nor a file starting with "#!" — as
+// fs.is_actual_binary (fs/unix.lua:140-155) tells, which takes a file it
+// cannot read for one. Like upstream, it looks at the top-level entries of
+// the section: a command in a subdirectory, such as tools/nested, makes the
+// entry the directory tools, which reads as nothing and so counts as a binary.
+func hasBinaries(t *tree.Tree, rm *rocks.RockManifest) bool {
+	for rel := range rm.Bin {
+		top, _, _ := strings.Cut(rel, "/")
+		if isActualBinary(filepath.Join(t.BinDir(), top)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isActualBinary is upstream fs.is_actual_binary (fs/unix.lua:140-155).
+func isActualBinary(p string) bool {
+	if strings.HasSuffix(p, ".lua") {
+		return false
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		return true
+	}
+
+	defer func() { _ = f.Close() }()
+
+	first := make([]byte, len(shebang))
+	n, _ := io.ReadFull(f, first)
+
+	return n < len(shebang) || string(first) != shebang
+}
+
+// shebang starts a script fs.is_actual_binary does not take for a binary.
+const shebang = "#!"
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+
+	return err == nil
+}
+
+// copyFileMode copies the file src to dst, creating dst's directory, with
+// mode as dst's permissions.
+func copyFileMode(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), unpackDirMode); err != nil {
+		return err
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+
+		return err
+	}
+
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	return os.Chmod(dst, mode)
+}
+
+// copyDirContents copies every file under src to the same path under dst,
+// keeping its permissions, as upstream fs.copy_contents does.
+func copyDirContents(src, dst string) error {
+	return filepath.Walk(src, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+
+		if fi.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), unpackDirMode)
+		}
+
+		return copyFileMode(p, filepath.Join(dst, rel), fi.Mode().Perm())
+	})
 }
 
 // Unpack extracts `archive` (a .rock or .src.rock zip) into destDir.
@@ -917,14 +1101,29 @@ func (e *nativeEngine) deployRock(
 	}
 
 	// Read the current tree manifest BEFORE deploying so Deploy can consult the
-	// active provider of each module/command (check_spot_if_available) — this
-	// drives version promotion on reinstall/upgrade (glr-5e9).
+	// providers of each module/command (check_spot_if_available) — this drives
+	// version promotion on reinstall/upgrade (glr-5e9).
 	m, err := e.readTreeManifest(t)
 	if err != nil {
 		return err
 	}
 
-	t.Provider = manifestProvider(m)
+	t.Providers = manifestProviders(m)
+
+	// A version already installed is deleted first, as upstream build_rockspec
+	// and install_binary_rock do (build.lua:393-395, install.lua:86-88): the
+	// rebuilt rock starts from a tree without it, so a file the new build no
+	// longer ships does not linger, and the old copy is not mistaken for another
+	// provider of the new one's files.
+	if _, err := os.Stat(t.InstallDir(spec.Package, spec.Version)); err == nil {
+		if err := e.deleteVersion(t, m, spec.Package, spec.Version); err != nil {
+			return err
+		}
+
+		if err := e.store.WriteTree(t.RocksDir(), m); err != nil {
+			return fmt.Errorf("write tree manifest: %w", err)
+		}
+	}
 
 	// Match upstream's command-wrapper deploy (repos.deploy_files →
 	// fs.wrap_script): the interpreter path is LUA_BINDIR/lua_interpreter
@@ -932,7 +1131,8 @@ func (e *nativeEngine) deployRock(
 	// repos.should_wrap_bin_scripts wraps unless the rockspec sets
 	// deploy.wrap_bin_scripts = false; when it does, leave BinWrap nil so
 	// Deploy copies scripts verbatim. (Upstream also honors a cfg-level
-	// wrap_bin_scripts override, which the hardcoded Tarantool cfg lacks.)
+	// wrap_bin_scripts override, which the hardcoded Tarantool cfg lacks.) The
+	// wrapper's package.path lists Config.Tree alone.
 	if wrapBinScripts(spec) {
 		t.BinWrap = &tree.BinWrap{
 			Interpreter: filepath.Join(e.cfg.Tarantool.Prefix, "bin", luaInterpreter),
@@ -961,23 +1161,27 @@ func (e *nativeEngine) deployRock(
 	// inversion upstream's repos.package_modules performs over the rock_manifest,
 	// and it subsumes the rockspec loop on builtin rocks (Deploy writes each
 	// declared module at exactly the slashed path the module name maps to).
+	//
+	// Every provider is listed, whether it holds an item's plain path or a
+	// versioned one, in upstream's order (addProvider), which is the order of
+	// the spots Deploy gave them.
 	entry := rocks.RepoEntry{Arch: "installed"}
 	pkgVer := spec.Package + "/" + spec.Version
 
-	if mods := tree.ModuleIndex(rm, spec.Package, spec.Version); len(mods) > 0 {
+	if mods := tree.ModuleIndex(rm); len(mods) > 0 {
 		entry.Modules = mods
 		for modName := range mods {
-			m.Modules[modName] = upsertProvider(m.Modules[modName], pkgVer, true)
+			m.Modules[modName] = addProvider(m.Modules[modName], pkgVer)
 		}
 	}
 
 	// The commands index likewise comes from what Deploy wrote (rm.Bin), as
 	// upstream repos.package_commands reads it: keyed and valued by the path
 	// under the bin dir, not by the rockspec's build.install.bin source paths.
-	if cmds := tree.CommandIndex(rm, spec.Package, spec.Version); len(cmds) > 0 {
+	if cmds := tree.CommandIndex(rm); len(cmds) > 0 {
 		entry.Commands = cmds
 		for cmd := range cmds {
-			m.Commands[cmd] = upsertProvider(m.Commands[cmd], pkgVer, true)
+			m.Commands[cmd] = addProvider(m.Commands[cmd], pkgVer)
 		}
 	}
 
@@ -1001,9 +1205,34 @@ func (e *nativeEngine) deployRock(
 	return nil
 }
 
+// deleteVersion undeploys name/version from the tree and drops it from m, as
+// upstream repos.delete_version does: tree.DeleteVersion consults m, which
+// still lists the version, to tell which of its files hold plain paths and
+// which provider takes each over, and the version leaves m afterwards. The
+// caller writes m.
+func (e *nativeEngine) deleteVersion(t *tree.Tree, m *rocks.Manifest, name, version string) error {
+	t.Providers = manifestProviders(m)
+
+	if err := t.DeleteVersion(name, version); err != nil {
+		return err
+	}
+
+	removeFromManifest(m, name, version)
+
+	return nil
+}
+
 // Remove deletes the requested version (or every installed version when
 // opts.Version is empty) from the on-disk tree, drops its module/command
-// providers from the manifest, and rewrites the tree manifest.
+// providers from the manifest, and rewrites the tree manifest. Each version
+// goes through deleteVersion, so the plain paths it held pass to the next
+// provider.
+//
+// It removes what it is asked to without checking whether another installed
+// rock depends on it, so opts.Force and opts.ForceFast change nothing here;
+// they reach upstream `luarocks remove` on the lua backend, which refuses to
+// break a dependent without them. The caller owns the dependency graph, as
+// tt, which prunes a tree it resolved itself, does.
 func (e *nativeEngine) Remove(_ context.Context, name string, opts RemoveOpts) error {
 	t, err := tree.Open(e.cfg)
 	if err != nil {
@@ -1033,26 +1262,14 @@ func (e *nativeEngine) Remove(_ context.Context, name string, opts RemoveOpts) e
 		for v := range versions {
 			toRemove = append(toRemove, v)
 		}
+
+		slices.Sort(toRemove)
 	}
 
 	for _, v := range toRemove {
-		if err := t.DeleteVersion(name, v); err != nil {
+		if err := e.deleteVersion(t, m, name, v); err != nil {
 			return fmt.Errorf("rocks.Remove: %s %s: %w", name, v, err)
 		}
-
-		pkgVer := name + "/" + v
-		delete(m.Repository[name], v)
-		removeProvider(m.Modules, pkgVer)
-		removeProvider(m.Commands, pkgVer)
-
-		if vers, ok := m.Dependencies[name]; ok {
-			delete(vers, v)
-		}
-	}
-
-	if len(m.Repository[name]) == 0 {
-		delete(m.Repository, name)
-		delete(m.Dependencies, name)
 	}
 
 	if err := e.store.WriteTree(t.RocksDir(), m); err != nil {

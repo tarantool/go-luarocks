@@ -287,21 +287,7 @@ func manifestToTable(m *rocks.Manifest) map[string]any {
 				arr := make([]any, len(list))
 
 				for i, d := range list {
-					depTbl := map[string]any{"name": d.Name}
-
-					if len(d.Constraints) > 0 {
-						cs := make([]any, len(d.Constraints))
-						for j, c := range d.Constraints {
-							cs[j] = map[string]any{
-								"op":      c.Op,
-								"version": versionToTable(c.Version),
-							}
-						}
-
-						depTbl["constraints"] = cs
-					}
-
-					arr[i] = depTbl
+					arr[i] = depToTable(d)
 				}
 
 				verMap[ver] = arr
@@ -311,6 +297,32 @@ func manifestToTable(m *rocks.Manifest) map[string]any {
 		}
 
 		out["dependencies"] = deps
+	}
+
+	return out
+}
+
+// depToTable lays out one dependency the way upstream stores the query of a
+// rockspec dependency (queries.from_dep_string): its name, its namespace
+// when it has one, and its constraints, always present and the empty table
+// {} for a dependency without any. The table is required: the next write of
+// the tree manifest by upstream matches every dependency against the
+// installed and provided rocks (writer.update_dependencies → deps.scan_deps →
+// match_dep), and vers.match_constraints asserts that its constraints are a
+// table. The namespace restricts the installed versions that match to the
+// ones installed from that namespace (manif.get_versions).
+func depToTable(d rocks.Dep) map[string]any {
+	cs := make([]any, len(d.Constraints))
+	for i, c := range d.Constraints {
+		cs[i] = map[string]any{
+			"op":      c.Op,
+			"version": versionToTable(c.Version),
+		}
+	}
+
+	out := map[string]any{"name": d.Name, "constraints": cs}
+	if d.Namespace != "" {
+		out["namespace"] = d.Namespace
 	}
 
 	return out
@@ -493,6 +505,10 @@ func extractRepoEntry(v any) (rocks.RepoEntry, error) {
 	return re, nil
 }
 
+// loadDepList reads the dependency list of one rock version, the inverse of
+// depToTable: each entry's name, namespace and constraints. The no_upgrade
+// flag upstream sets on a constraint written with an "@" prefix has no field
+// in rocks.VersionConstraint and is not kept.
 func loadDepList(v any) ([]rocks.Dep, error) {
 	arr, ok := v.([]any)
 	if !ok {
@@ -517,7 +533,8 @@ func loadDepList(v any) ([]rocks.Dep, error) {
 		}
 
 		name, _ := m["name"].(string)
-		d := rocks.Dep{Name: name}
+		namespace, _ := m["namespace"].(string)
+		d := rocks.Dep{Name: name, Namespace: namespace}
 
 		if cs, ok := m["constraints"].([]any); ok {
 			for _, c := range cs {

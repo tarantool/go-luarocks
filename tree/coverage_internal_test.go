@@ -65,14 +65,26 @@ func TestVersionGreater(t *testing.T) {
 	}
 }
 
+// providersOf returns a Providers lookup answering lists for module items
+// (and nothing for commands) from mods.
+func providersOf(mods map[string][]string) func(ItemKind, string) []string {
+	return func(kind ItemKind, item string) []string {
+		if kind != ModuleItem {
+			return nil
+		}
+
+		return mods[item]
+	}
+}
+
 func TestCurrentProvider(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil provider", func(t *testing.T) {
+	t.Run("nil providers", func(t *testing.T) {
 		t.Parallel()
 
 		tr := &Tree{}
-		name, ver, ok := tr.currentProvider(testPkg)
+		name, ver, ok := tr.currentProvider(deployLua, "demo.lua")
 		assert.False(t, ok)
 		assert.Empty(t, name)
 		assert.Empty(t, ver)
@@ -81,14 +93,8 @@ func TestCurrentProvider(t *testing.T) {
 	t.Run("direct hit", func(t *testing.T) {
 		t.Parallel()
 
-		tr := &Tree{Provider: func(item string) (string, string, bool) {
-			if item == testPkg {
-				return testPkg, testVer, true
-			}
-
-			return "", "", false
-		}}
-		name, ver, ok := tr.currentProvider(testPkg)
+		tr := &Tree{Providers: providersOf(map[string][]string{testPkg: {testPkg + "/" + testVer, "other/1.0-1"}})}
+		name, ver, ok := tr.currentProvider(deployLua, "demo.lua")
 		assert.True(t, ok)
 		assert.Equal(t, testPkg, name)
 		assert.Equal(t, testVer, ver)
@@ -97,53 +103,67 @@ func TestCurrentProvider(t *testing.T) {
 	t.Run("init fallback hit", func(t *testing.T) {
 		t.Parallel()
 
-		tr := &Tree{Provider: func(item string) (string, string, bool) {
-			if item == testPkg {
-				return testPkg, testVer, true
-			}
-
-			return "", "", false
-		}}
-		name, ver, ok := tr.currentProvider("demo.init")
+		tr := &Tree{Providers: providersOf(map[string][]string{testPkg: {testPkg + "/" + testVer}})}
+		name, ver, ok := tr.currentProvider(deployLua, "demo/init.lua")
 		assert.True(t, ok)
 		assert.Equal(t, testPkg, name)
 		assert.Equal(t, testVer, ver)
 	})
 
+	t.Run("init fallback is for lua files only", func(t *testing.T) {
+		t.Parallel()
+
+		tr := &Tree{Providers: providersOf(map[string][]string{testPkg: {testPkg + "/" + testVer}})}
+		_, _, ok := tr.currentProvider(deployLib, "demo/init.so")
+		assert.False(t, ok, "upstream checks the legacy .init name for deploy_type lua alone")
+	})
+
 	t.Run("init fallback miss", func(t *testing.T) {
 		t.Parallel()
 
-		tr := &Tree{Provider: func(string) (string, string, bool) {
-			return "", "", false
-		}}
-		_, _, ok := tr.currentProvider("demo.init")
+		tr := &Tree{Providers: providersOf(nil)}
+		_, _, ok := tr.currentProvider(deployLua, "demo/init.lua")
 		assert.False(t, ok)
 	})
 
-	t.Run("no suffix miss", func(t *testing.T) {
+	t.Run("commands are looked up as commands", func(t *testing.T) {
 		t.Parallel()
 
-		tr := &Tree{Provider: func(string) (string, string, bool) {
-			return "", "", false
+		tr := &Tree{Providers: func(kind ItemKind, item string) []string {
+			if kind == CommandItem && item == "tools/demo" {
+				return []string{"cli/3.0-1"}
+			}
+
+			return nil
 		}}
-		_, _, ok := tr.currentProvider(testPkg)
-		assert.False(t, ok)
+		name, ver, ok := tr.currentProvider(deployBin, "tools/demo")
+		assert.True(t, ok)
+		assert.Equal(t, "cli", name)
+		assert.Equal(t, "3.0-1", ver)
 	})
 }
 
-// TestResolveSpot_UntrackedFileBackedUp covers the !ok branch: a plain-path
-// file that exists but has no recorded provider is renamed to a "~" backup
-// rather than clobbered.
+func TestCounterpartExts(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "a/b.so", withSoExt("a/b.lua"))
+	assert.Equal(t, "a/b.txt", withSoExt("a/b.txt"), "another extension is left alone")
+	assert.Equal(t, "a/b.lua", withLuaExt("a/b.so"))
+	assert.Equal(t, "a/b", withLuaExt("a/b"), "no extension: left alone")
+	assert.Equal(t, "a.lua", withLuaExt("a.b/c"), "Lua's %.[^.]+$ crosses the slash")
+}
+
+// TestResolveSpot_UntrackedFileBackedUp: a plain-path file that exists but has
+// no recorded provider is renamed to a "~" backup rather than clobbered.
 func TestResolveSpot_UntrackedFileBackedUp(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	tr := &Tree{Paths: Paths{Tree: dir}}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
+	plain := filepath.Join(tr.DeployLuaDir(), "demo.lua")
 	writeInternal(t, plain, "untracked")
 
-	got, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
+	got, err := tr.resolveSpot(deployLua, "demo.lua", testPkg, testVer, nil)
 	require.NoError(t, err)
 	assert.Equal(t, plain, got)
 
@@ -152,115 +172,6 @@ func TestResolveSpot_UntrackedFileBackedUp(t *testing.T) {
 	b, err := os.ReadFile(backup) //nolint:gosec // test temp path
 	require.NoError(t, err)
 	assert.Equal(t, "untracked", string(b))
-}
-
-// TestResolveSpot_ReinstallSameVersion covers the ok==true, same name+version
-// branch: neither the demote nor the backup case fires, and the file is left
-// for the caller to overwrite in place.
-func TestResolveSpot_ReinstallSameVersion(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	tr := &Tree{
-		Paths: Paths{Tree: dir},
-		Provider: func(item string) (string, string, bool) {
-			if item == testPkg {
-				return testPkg, testVer, true
-			}
-
-			return "", "", false
-		},
-	}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
-	writeInternal(t, plain, "old bytes")
-
-	got, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
-	require.NoError(t, err)
-	assert.Equal(t, plain, got)
-
-	// Untouched: no backup, no demotion — the file is exactly as written.
-	assert.NoFileExists(t, plain+"~")
-	b, err := os.ReadFile(plain) //nolint:gosec // test temp path
-	require.NoError(t, err)
-	assert.Equal(t, "old bytes", string(b))
-}
-
-// TestResolveSpot_DemoteMkdirError covers the demote branch's MkdirAll
-// failure: the new file's plain target lives in a subdirectory whose munged
-// sibling directory must be freshly created, but the parent deploy dir is
-// read-only.
-func TestResolveSpot_DemoteMkdirError(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	tr := &Tree{
-		Paths: Paths{Tree: dir},
-		Provider: func(item string) (string, string, bool) {
-			if item == "foo.demo" {
-				return "other", testVer, true
-			}
-
-			return "", "", false
-		},
-	}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "foo", "demo.lua")
-	writeInternal(t, plain, "old bytes")
-
-	// deployDir must stay read-only until after resolveSpot runs; register the
-	// restore before chmod so cleanup can remove the tree afterward.
-	readOnlyDir(t, deployDir)
-
-	_, err := tr.resolveSpot(deployDir, plain, "foo.demo", testPkg, "2.0-1")
-	require.Error(t, err)
-}
-
-// TestResolveSpot_DemoteRenameError covers the demote branch's os.Rename
-// failure: the munged destination already exists as a non-empty directory,
-// which os.Rename refuses to replace with a file.
-func TestResolveSpot_DemoteRenameError(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	tr := &Tree{
-		Paths: Paths{Tree: dir},
-		Provider: func(item string) (string, string, bool) {
-			if item == testPkg {
-				return "other", testVer, true
-			}
-
-			return "", "", false
-		},
-	}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
-	writeInternal(t, plain, "old bytes")
-
-	demoted := MungedPath(deployDir, plain, "other", testVer)
-	writeInternal(t, filepath.Join(demoted, "blocker"), "occupied")
-
-	_, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, "2.0-1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "demote")
-}
-
-// TestResolveSpot_BackupRenameError covers the backup branch's os.Rename
-// failure: the deploy dir is read-only, so the untracked file cannot be moved.
-func TestResolveSpot_BackupRenameError(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	tr := &Tree{Paths: Paths{Tree: dir}}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
-	writeInternal(t, plain, "untracked")
-
-	readOnlyDir(t, deployDir)
-
-	_, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "backup")
 }
 
 // TestResolveSpot_BackupKeepsEarlierBackups is the regression test for the
@@ -272,13 +183,12 @@ func TestResolveSpot_BackupKeepsEarlierBackups(t *testing.T) {
 
 	dir := t.TempDir()
 	tr := &Tree{Paths: Paths{Tree: dir}}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
+	plain := filepath.Join(tr.DeployLuaDir(), "demo.lua")
 	writeInternal(t, plain, "untracked")
 	writeInternal(t, plain+"~", "first backup")
 	writeInternal(t, plain+"~~", "second backup")
 
-	_, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
+	_, err := tr.resolveSpot(deployLua, "demo.lua", testPkg, testVer, nil)
 	require.NoError(t, err)
 
 	for p, want := range map[string]string{
@@ -301,24 +211,148 @@ func TestResolveSpot_VersionedTargetBackedUp(t *testing.T) {
 
 	dir := t.TempDir()
 	tr := &Tree{
-		Paths: Paths{Tree: dir},
-		Provider: func(item string) (string, string, bool) {
-			if item == testPkg {
-				return testPkg, "2.0-1", true
-			}
-
-			return "", "", false
-		},
+		Paths:     Paths{Tree: dir},
+		Providers: providersOf(map[string][]string{testPkg: {testPkg + "/2.0-1"}}),
 	}
-	deployDir := tr.DeployLuaDir()
-	plain := filepath.Join(deployDir, "demo.lua")
-	versioned := MungedPath(deployDir, plain, testPkg, testVer)
+	versioned := MungedPath(tr.DeployLuaDir(), filepath.Join(tr.DeployLuaDir(), "demo.lua"), testPkg, testVer)
 	writeInternal(t, versioned, "stale")
 
-	got, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
+	got, err := tr.resolveSpot(deployLua, "demo.lua", testPkg, testVer, nil)
 	require.NoError(t, err)
 	assert.Equal(t, versioned, got, "an older version takes the versioned name")
 	assert.FileExists(t, versioned+"~", "the file already there is backed up")
+}
+
+// TestResolveSpot_ReinstallSameVersion: when the current provider is the very
+// name and version being deployed, the file at the target is removed for the
+// caller to write afresh — no backup (repos.lua:270-274), and the plain path is
+// kept.
+func TestResolveSpot_ReinstallSameVersion(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{
+		Paths:     Paths{Tree: dir},
+		Providers: providersOf(map[string][]string{testPkg: {testPkg + "/" + testVer}}),
+	}
+	plain := filepath.Join(tr.DeployLuaDir(), "demo.lua")
+	writeInternal(t, plain, "old bytes")
+
+	got, err := tr.resolveSpot(deployLua, "demo.lua", testPkg, testVer, map[string]bool{})
+	require.NoError(t, err)
+	assert.Equal(t, plain, got)
+	assert.NoFileExists(t, plain+"~")
+}
+
+// TestResolveSpot_DemotesTheModulesOtherForm: when the new rock takes the plain
+// path of a module, the current provider's file of the other form — the .so of
+// a .lua, the .lua of a .so — is demoted with it (repos.lua:495-500, 514-519),
+// except a file this Deploy already wrote.
+func TestResolveSpot_DemotesTheModulesOtherForm(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		dt, rel    string
+		otherDT    string
+		otherRel   string
+		otherIsNew bool
+	}{
+		{"lua demotes the so", deployLua, "pair/impl.lua", deployLib, "pair/impl.so", false},
+		{"so demotes the lua", deployLib, "pair/impl.so", deployLua, "pair/impl.lua", false},
+		{"the new rock's own file stays", deployLib, "pair/impl.so", deployLua, "pair/impl.lua", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tr := &Tree{
+				Paths:     Paths{Tree: t.TempDir()},
+				Providers: providersOf(map[string][]string{"pair.impl": {"pair/1.0-1"}}),
+			}
+			other := filepath.Join(tr.deployDirOf(tc.otherDT), tc.otherRel)
+			writeInternal(t, other, "1.0")
+
+			written := map[string]bool{}
+			if tc.otherIsNew {
+				written[other] = true
+			}
+
+			_, err := tr.resolveSpot(tc.dt, tc.rel, "pair", "2.0-1", written)
+			require.NoError(t, err)
+
+			demoted := MungedPath(tr.deployDirOf(tc.otherDT), other, "pair", "1.0-1")
+			if tc.otherIsNew {
+				assert.FileExists(t, other)
+				assert.NoFileExists(t, demoted)
+			} else {
+				assert.NoFileExists(t, other)
+				assert.FileExists(t, demoted)
+			}
+		})
+	}
+}
+
+// TestResolveSpot_DemoteMkdirError covers the demote branch's MkdirAll
+// failure: the new file's plain target lives in a subdirectory whose munged
+// sibling directory must be freshly created, but the parent deploy dir is
+// read-only.
+func TestResolveSpot_DemoteMkdirError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{
+		Paths:     Paths{Tree: dir},
+		Providers: providersOf(map[string][]string{"foo.demo": {"other/" + testVer}}),
+	}
+	deployDir := tr.DeployLuaDir()
+	writeInternal(t, filepath.Join(deployDir, "foo", "demo.lua"), "old bytes")
+
+	// deployDir must stay read-only until after resolveSpot runs; register the
+	// restore before chmod so cleanup can remove the tree afterward.
+	readOnlyDir(t, deployDir)
+
+	_, err := tr.resolveSpot(deployLua, "foo/demo.lua", testPkg, "2.0-1", nil)
+	require.Error(t, err)
+}
+
+// TestResolveSpot_DemoteRenameError covers the demote branch's os.Rename
+// failure: the munged destination's directory cannot be created because a
+// plain file occupies its path.
+func TestResolveSpot_DemoteRenameError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{
+		Paths:     Paths{Tree: dir},
+		Providers: providersOf(map[string][]string{"foo.demo": {"other/" + testVer}}),
+	}
+	deployDir := tr.DeployLuaDir()
+	plain := filepath.Join(deployDir, "foo", "demo.lua")
+	writeInternal(t, plain, "old bytes")
+
+	demoted := MungedPath(deployDir, plain, "other", testVer)
+	writeInternal(t, filepath.Dir(demoted), "a file where the directory goes")
+
+	_, err := tr.resolveSpot(deployLua, "foo/demo.lua", testPkg, "2.0-1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "demote")
+}
+
+// TestResolveSpot_BackupRenameError covers the backup branch's os.Rename
+// failure: the deploy dir is read-only, so the untracked file cannot be moved.
+func TestResolveSpot_BackupRenameError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{Paths: Paths{Tree: dir}}
+	deployDir := tr.DeployLuaDir()
+	writeInternal(t, filepath.Join(deployDir, "demo.lua"), "untracked")
+
+	readOnlyDir(t, deployDir)
+
+	_, err := tr.resolveSpot(deployLua, "demo.lua", testPkg, testVer, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backup")
 }
 
 func TestIsLua_MissingFile(t *testing.T) {
@@ -353,13 +387,13 @@ func TestIsLua_Shebang(t *testing.T) {
 	}
 }
 
-func TestDeployDirForKind(t *testing.T) {
+func TestDeployDirOf(t *testing.T) {
 	t.Parallel()
 
-	p := Paths{Tree: "/opt/tt"}
-	assert.Equal(t, p.DeployLuaDir(), deployDirForKind(p, kindLua))
-	assert.Equal(t, p.DeployLibDir(), deployDirForKind(p, kindLib))
-	assert.Equal(t, p.Tree, deployDirForKind(p, "bogus"))
+	tr := &Tree{Paths: Paths{Tree: "/opt/tt"}}
+	assert.Equal(t, tr.DeployLuaDir(), tr.deployDirOf(deployLua))
+	assert.Equal(t, tr.DeployLibDir(), tr.deployDirOf(deployLib))
+	assert.Equal(t, tr.BinDir(), tr.deployDirOf(deployBin))
 }
 
 func TestLuaQuote(t *testing.T) {

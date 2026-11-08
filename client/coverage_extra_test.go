@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,7 @@ import (
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
 	"github.com/tarantool/go-luarocks/manif"
+	"github.com/tarantool/go-luarocks/remote"
 )
 
 // --- fixtures ---
@@ -102,11 +104,20 @@ dependencies = { "dep >= 1.0" }
 	}
 	require.NoError(t, (manif.FileStore{}).WriteRock(filepath.Join(installDir, "rock_manifest"), rm), "WriteRock")
 
+	// The deployed files the rock_manifest lists, empty as their digests say.
+	for _, p := range []string{
+		filepath.Join(tree, "share", "tarantool", "hello.lua"),
+		filepath.Join(tree, "lib", "tarantool", "native.so"),
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o750))
+		require.NoError(t, os.WriteFile(p, nil, 0o600))
+	}
+
 	m := &rocks.Manifest{
 		Repository: map[string]map[string]rocks.RepoEntry{
 			"hello": {
 				"1.0-1": {Arch: "installed"},
-				"2.0-1": {Arch: "installed"},
+				"0.9-1": {Arch: "installed"},
 			},
 		},
 		Modules:      map[string][]string{},
@@ -249,8 +260,8 @@ func TestShow_Installed_FullInfo(t *testing.T) {
 	require.NoError(t, err, "Show")
 
 	assert.Equal(t, "hello", info.Package, "Package")
-	assert.Equal(t, "1.0-1", info.Version, "Version — lexicographically lowest wins")
-	assert.ElementsMatch(t, []string{"hello.lua", "native.so"}, info.Modules, "Modules")
+	assert.Equal(t, "1.0-1", info.Version, "Version: the newest installed one, as upstream show picks it")
+	assert.Equal(t, []string{"hello", "native"}, info.Modules, "Modules, by name, as upstream show lists them")
 	assert.Equal(t, "test summary", info.Summary, "Summary")
 	assert.Equal(t, "MIT", info.License, "License")
 	assert.Equal(t, "https://example.com/hello", info.Homepage, "Homepage")
@@ -313,6 +324,75 @@ func TestNativeBuild_KeepLeavesStagingDir(t *testing.T) {
 	staging, err := filepath.Glob(filepath.Join(work, "rocks-build-*"))
 	require.NoError(t, err, "Glob")
 	assert.NotEmpty(t, staging, "Keep should leave the staging dir in place")
+}
+
+// TestNative_ProviderListsKeepUpstreamOrder: a command's provider list in the
+// tree manifest is in upstream's order whatever the install order, so after a
+// downgrade the newer version, which keeps the plain path, stays first.
+// Recording each newly made rock at the front listed the older version first,
+// as if it held the plain path, and the next deploy demoted the wrong file.
+func TestNative_ProviderListsKeepUpstreamOrder(t *testing.T) {
+	t.Parallel()
+
+	tree := t.TempDir()
+
+	for _, v := range []string{"2.0-1", "1.0-1"} {
+		src := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(src, "hello.lua"), []byte("return '"+v+"'\n"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "hello-cli"), []byte("print('"+v+"')\n"), 0o600))
+
+		specPath := filepath.Join(src, "hello-"+v+".rockspec")
+		require.NoError(t, os.WriteFile(specPath, []byte(`
+package = "hello"
+version = "`+v+`"
+source = { url = "file://`+src+`" }
+build = {
+   type = "builtin",
+   modules = { hello = "hello.lua" },
+   install = { bin = { ["hello-cli"] = "hello-cli" } },
+}
+`), 0o600))
+
+		r := newNativeClient(t, tree, src)
+		require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make %s", v)
+	}
+
+	m, err := manif.ReadTreeManifest(filepath.Join(tree, "share", "tarantool", "rocks"))
+	require.NoError(t, err, "ReadTreeManifest")
+	assert.Equal(t, []string{"hello/2.0-1", "hello/1.0-1"}, m.Commands["hello-cli"], "provider list of command hello-cli")
+	assert.Equal(t, []string{"hello/2.0-1", "hello/1.0-1"}, m.Modules["hello"], "provider list of module hello")
+	assert.Equal(t, map[string]string{"hello": "hello.lua"}, m.Repository["hello"]["1.0-1"].Modules,
+		"1.0 lists the module it deployed under its versioned name")
+	assert.FileExists(t, filepath.Join(tree, "bin", "hello_1_0_1-hello-cli"), "1.0 took the versioned name")
+	assert.FileExists(t, filepath.Join(tree, "share", "tarantool", "hello_1_0_1-hello.lua"), "1.0 took the versioned name")
+}
+
+// TestNativeRemove_PromotesNextVersion: removing the version that holds a
+// module's plain path hands the path to the next installed version, as
+// upstream repos.delete_version renames its versioned file back. Native
+// deleted the plain file and left the remaining version under its versioned
+// name, where require cannot find it.
+func TestNativeRemove_PromotesNextVersion(t *testing.T) {
+	t.Parallel()
+
+	tree := t.TempDir()
+
+	for _, v := range []string{"2.0-1", "1.0-1"} {
+		src := t.TempDir()
+		specPath := stageRockSource(t, src, "hello", v, "")
+
+		r := newNativeClient(t, tree, src)
+		require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make %s", v)
+	}
+
+	lua := filepath.Join(tree, "share", "tarantool")
+	require.FileExists(t, filepath.Join(lua, "hello_1_0_1-hello.lua"), "1.0 is deployed under its versioned name")
+
+	r := newNativeClient(t, tree, t.TempDir())
+	require.NoError(t, r.Remove(context.Background(), "hello", client.RemoveOpts{Version: "2.0-1"}), "Remove 2.0")
+
+	assert.FileExists(t, filepath.Join(lua, "hello.lua"), "1.0 takes the plain path")
+	assert.NoFileExists(t, filepath.Join(lua, "hello_1_0_1-hello.lua"), "no versioned copy is left")
 }
 
 func TestNativeBuild_BadSpecPath(t *testing.T) {
@@ -589,6 +669,111 @@ func TestNativePack_TargetNotInstalled(t *testing.T) {
 	_, err = r.Pack(context.Background(), "absent", client.PackOpts{})
 	require.Error(t, err, "Pack of a rock that is not installed")
 	assert.Contains(t, err.Error(), "not installed", "error text")
+}
+
+// TestNativePack_NewestVersion checks that Pack packs the newest installed
+// version of the rock, as upstream pack does (search.pick_installed_rock),
+// rather than the lexicographically lowest one.
+func TestNativePack_NewestVersion(t *testing.T) {
+	t.Parallel()
+
+	tree := t.TempDir()
+	stageInstalledRock(t, tree)
+
+	r, err := client.New(rocks.Config{Tree: tree, WorkingDir: t.TempDir()})
+	require.NoError(t, err, "New")
+
+	archive, err := r.Pack(context.Background(), "hello", client.PackOpts{})
+	require.NoError(t, err, "Pack")
+	assert.True(t, strings.HasPrefix(filepath.Base(archive), "hello-1.0-1."), "packed %s, want hello 1.0-1", archive)
+}
+
+// TestNativePack_BinaryRock checks that Pack packs an installed rock the way
+// upstream pack_installed_rock does: the install dir with the deployed lua and
+// lib files copied back into lua/ and lib/, from the versioned name a file was
+// demoted to, into <name>-<version>.<arch>.rock, arch being the host's for a
+// rock with a lib file.
+func TestNativePack_BinaryRock(t *testing.T) {
+	t.Parallel()
+
+	tree := t.TempDir()
+	stageInstalledRock(t, tree)
+
+	// Another rock holds the plain path of hello.lua; hello's own copy is
+	// demoted to its versioned name.
+	luaDir := filepath.Join(tree, "share", "tarantool")
+	require.NoError(t, os.WriteFile(filepath.Join(luaDir, "hello.lua"), []byte("return 'other'\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(luaDir, "hello_1_0_1-hello.lua"), []byte("return 'hello'\n"), 0o600))
+
+	work := t.TempDir()
+	r, err := client.New(rocks.Config{Tree: tree, WorkingDir: work})
+	require.NoError(t, err, "New")
+
+	archive, err := r.Pack(context.Background(), "hello", client.PackOpts{})
+	require.NoError(t, err, "Pack")
+	assert.Equal(t, filepath.Join(work, "hello-1.0-1."+remote.HostArch()+".rock"), archive, "the packed rock")
+
+	out := filepath.Join(work, "out")
+	require.NoError(t, r.Unpack(context.Background(), archive, out), "Unpack")
+
+	got, err := os.ReadFile(filepath.Join(out, "lua", "hello.lua")) //nolint:gosec // test temp path
+	require.NoError(t, err, "lua/hello.lua")
+	assert.Equal(t, "return 'hello'\n", string(got), "lua/hello.lua is the rock's own, demoted copy")
+	assert.FileExists(t, filepath.Join(out, "lib", "native.so"), "lib/native.so")
+	assert.FileExists(t, filepath.Join(out, "rock_manifest"), "rock_manifest")
+	assert.FileExists(t, filepath.Join(out, "hello-1.0-1.rockspec"), "the rockspec")
+}
+
+// TestNativePack_ArchOfCommands checks how Pack names a rock with commands
+// and no lib file, as upstream pack does through repos.has_binaries: "all"
+// when every command is a script, the host arch when one is a binary or when
+// one sits in a subdirectory, whose top-level entry upstream cannot read.
+func TestNativePack_ArchOfCommands(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		bin  map[string]string
+		arch string
+	}{
+		{"scripts", map[string]string{"run": "#!/bin/sh\necho run\n", "go.lua": "print(1)\n"}, "all"},
+		{"binary", map[string]string{"run": "#!/bin/sh\n", "tool": "\x7fELF"}, remote.HostArch()},
+		{"subdirectory", map[string]string{"tools/nested": "#!/bin/sh\n"}, remote.HostArch()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tree := t.TempDir()
+			installDir := filepath.Join(tree, "share", "tarantool", "rocks", "cmds", "1.0-1")
+			require.NoError(t, os.MkdirAll(installDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(installDir, "cmds-1.0-1.rockspec"), []byte("package = 'cmds'\n"), 0o600))
+
+			rm := &rocks.RockManifest{Bin: map[string]string{}}
+
+			for rel, body := range tc.bin {
+				rm.Bin[rel] = "0123456789abcdef0123456789abcdef"
+
+				for _, dir := range []string{filepath.Join(tree, "bin"), filepath.Join(installDir, "bin")} {
+					p := filepath.Join(dir, filepath.FromSlash(rel))
+					require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o750))
+					require.NoError(t, os.WriteFile(p, []byte(body), 0o600))
+				}
+			}
+
+			require.NoError(t, (manif.FileStore{}).WriteRock(filepath.Join(installDir, "rock_manifest"), rm), "WriteRock")
+			require.NoError(t, (manif.FileStore{}).WriteTree(filepath.Join(tree, "share", "tarantool", "rocks"), &rocks.Manifest{
+				Repository: map[string]map[string]rocks.RepoEntry{"cmds": {"1.0-1": {Arch: "installed"}}},
+			}), "WriteTree")
+
+			work := t.TempDir()
+			r, err := client.New(rocks.Config{Tree: tree, WorkingDir: work})
+			require.NoError(t, err, "New")
+
+			archive, err := r.Pack(context.Background(), "cmds", client.PackOpts{})
+			require.NoError(t, err, "Pack")
+			assert.Equal(t, filepath.Join(work, "cmds-1.0-1."+tc.arch+".rock"), archive, "the packed rock")
+		})
+	}
 }
 
 func TestNativePack_NoManifest(t *testing.T) {

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -52,23 +54,32 @@ type InstallOpts struct {
 	Deps DepsPolicy
 }
 
-// DepsPolicy mirrors upstream's `--deps-mode` flag.
+// DepsPolicy says whether Install resolves and installs the transitive
+// dependencies of a rock. The native backend reads it as its name says; the
+// lua backend passes it to upstream as --deps-mode (DepsAll as "all",
+// DepsNone as "none", DepsOnlyNew as "order"), which also selects the rock
+// trees a dependency may be satisfied from and a command wrapper lists.
 type DepsPolicy int
 
 const (
-	// DepsAll resolves and installs every transitive dependency.
+	// DepsAll resolves and installs every transitive dependency that the
+	// tree does not already satisfy. It is the zero value.
 	DepsAll DepsPolicy = 0
-	// DepsNone installs only the named rock; missing deps cause Install
-	// to fail.
+	// DepsNone installs only the named rock; its dependencies are neither
+	// resolved nor checked.
 	DepsNone DepsPolicy = 1
-	// DepsOnlyNew installs deps that aren't already in the tree.
+	// DepsOnlyNew installs deps that aren't already in the tree, as DepsAll
+	// does on the native backend.
 	DepsOnlyNew DepsPolicy = 2
 )
 
 // BuildOpts tunes Build.
 type BuildOpts struct {
 	// Keep, if true, leaves the staging build directory in place after a
-	// successful build for debugging. Default removes it.
+	// successful build for debugging. Default removes it. The lua backend
+	// passes it to upstream as `luarocks build --keep`, which keeps the
+	// other installed versions of the rock instead; the native Build keeps
+	// them either way.
 	Keep bool
 }
 
@@ -232,16 +243,18 @@ func (r *Rocks) Install(ctx context.Context, name string, opts InstallOpts) erro
 // Build evaluates the rockspec at specPath, fetches its declared source,
 // runs the build backend, and deploys the result into r.cfg.Tree.
 //
-// Unlike Install, Build does not perform dependency resolution — it
-// assumes prerequisites are already present (matching upstream
-// `luarocks build`).
+// Unlike Install, Build on the native backend does not resolve or install
+// dependencies, its build_dependencies included — it assumes the
+// prerequisites are already present. On the lua backend it runs upstream
+// `luarocks build`, which installs the missing ones first.
 func (r *Rocks) Build(ctx context.Context, specPath string, opts BuildOpts) error {
 	return r.engine.Build(ctx, specPath, opts)
 }
 
 // Make is "build the rockspec found in cwd against the source already
 // present in cwd" — the upstream `luarocks make` flow. It is the
-// developer-iteration form of Build.
+// developer-iteration form of Build, and installs dependencies on the lua
+// backend only, as Build does.
 func (r *Rocks) Make(ctx context.Context, opts MakeOpts) error {
 	return r.engine.Make(ctx, opts)
 }
@@ -275,8 +288,10 @@ func (r *Rocks) List(ctx context.Context) ([]InstalledRock, error) {
 	return out, nil
 }
 
-// Show returns the summary info for a single rock installed in the tree.
-// Returns an error wrapping os.ErrNotExist when the rock is not present.
+// Show returns the summary info for a single rock installed in the tree: of
+// its newest installed version, as upstream `luarocks show` picks it
+// (search.pick_installed_rock). Returns an error wrapping os.ErrNotExist when
+// the rock is not present.
 func (r *Rocks) Show(ctx context.Context, name string) (*ShowInfo, error) {
 	_ = ctx
 
@@ -294,29 +309,19 @@ func (r *Rocks) Show(ctx context.Context, name string) (*ShowInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("rocks.Show: %q not installed: %w", name, os.ErrNotExist)
 	}
-	// Pick the lexicographically lowest installed version string, so the
-	// choice is deterministic across runs regardless of map iteration order.
-	var picked string
-	for v := range versions {
-		if picked == "" || v < picked {
-			picked = v
-		}
-	}
+
+	picked := newestVersion(versions)
 
 	out := &ShowInfo{Package: name, Version: picked}
 
-	// Load the per-rock manifest to enumerate modules.
+	// Its modules by the name require takes, as upstream show lists the
+	// rock_manifest's lua and lib entries through path.path_to_module
+	// (cmd/show.lua modules_to_list), not by the files that provide them.
 	rockManifestPath := filepath.Join(t.InstallDir(name, picked), "rock_manifest")
 
 	rm, err := r.store.ReadRock(rockManifestPath)
 	if err == nil && rm != nil {
-		for k := range rm.Lua {
-			out.Modules = append(out.Modules, k)
-		}
-
-		for k := range rm.Lib {
-			out.Modules = append(out.Modules, k)
-		}
+		out.Modules = slices.Sorted(maps.Keys(tree.ModuleIndex(rm)))
 	}
 
 	// Try to read the rockspec for richer info — non-fatal if missing.
@@ -332,7 +337,12 @@ func (r *Rocks) Show(ctx context.Context, name string) (*ShowInfo, error) {
 }
 
 // Which resolves a dotted Lua module name to its on-disk file path in
-// r.cfg.Tree. Returns (path, true, nil) on hit; ("", false, nil) on miss.
+// r.cfg.Tree, by the module's plain paths there (tree.Tree.Which). Returns
+// (path, true, nil) on hit; ("", false, nil) on miss.
+//
+// It looks in r.cfg.Tree alone, whichever backend the client uses, and so
+// differs from upstream `luarocks which`, which the lua engine's Exec runs:
+// that asks the LuaRocks loader, over the manifests of every rock tree.
 func (r *Rocks) Which(ctx context.Context, module string) (string, bool, error) {
 	_ = ctx
 
@@ -347,10 +357,15 @@ func (r *Rocks) Which(ctx context.Context, module string) (string, bool, error) 
 }
 
 // Pack produces a .rock or .src.rock archive for `target` (rock name) in
-// r.cfg.WorkingDir and returns its path.
+// r.cfg.WorkingDir and returns its path. It packs the newest installed version
+// of the rock, as upstream `luarocks pack` picks it
+// (search.pick_installed_rock).
 //
-//   - opts.SrcOnly == false: zip the installed tree at
-//     <tree>/share/tarantool/rocks/<name>/<version>/ into <name>-<ver>.rock.
+//   - opts.SrcOnly == false: a binary rock, <name>-<ver>.<arch>.rock, as
+//     upstream `luarocks pack <name>` makes it: the rock's install dir
+//     <tree>/share/tarantool/rocks/<name>/<version>/ with its deployed lua
+//     and lib files copied back in, arch being the host's for a rock with a
+//     lib file or a binary command and "all" otherwise.
 //   - opts.SrcOnly == true:  zip the rockspec only into
 //     <name>-<ver>.src.rock. (Source download lives outside the rockspec;
 //     upstream pulls source per `source.url` and inlines it. We omit that
@@ -469,11 +484,13 @@ func (r *Rocks) Admin(ctx context.Context, subCmd string, args []string, opts Ad
 
 // --- internal helpers ---
 
-// upsertProvider records provider (a "name/version" token) in the module or
-// command provider list. When active, it is moved to the front (index 0) — the
-// active provider slot upstream get_current_provider reads; otherwise it is
-// appended after the current active provider. Duplicates are removed first.
-func upsertProvider(list []string, provider string, active bool) []string {
+// addProvider records provider (a "name/version" token) in a module or command
+// provider list and keeps the list in upstream's order (manif/writer.lua
+// sort_package_matching_table): by rock name, then newest version first, with
+// no duplicates. Index 0 is then the provider holding the item's plain path,
+// the one tree.Deploy gives it (repos.lua check_spot_if_available), and index 1
+// the one that takes it over when index 0 is removed.
+func addProvider(list []string, provider string) []string {
 	out := make([]string, 0, len(list)+1)
 	for _, x := range list {
 		if x != provider {
@@ -481,11 +498,31 @@ func upsertProvider(list []string, provider string, active bool) []string {
 		}
 	}
 
-	if active {
-		return append([]string{provider}, out...)
+	out = append(out, provider)
+	slices.SortStableFunc(out, compareProviders)
+
+	return out
+}
+
+// compareProviders orders provider tokens as upstream sort_pkgs does
+// (manif/writer.lua:116-127): rocks by name, and versions of one rock newest
+// first. Versions that do not parse compare as strings.
+func compareProviders(a, b string) int {
+	na, va, _ := strings.Cut(a, "/")
+	nb, vb, _ := strings.Cut(b, "/")
+
+	if na != nb {
+		return strings.Compare(na, nb)
 	}
 
-	return append(out, provider)
+	pa, errA := deps.ParseVersion(va)
+	pb, errB := deps.ParseVersion(vb)
+
+	if errA != nil || errB != nil {
+		return strings.Compare(vb, va)
+	}
+
+	return deps.Compare(pb, pa)
 }
 
 // resolveInstalledDeps builds the per-entry repo.dependencies map (name →
@@ -494,6 +531,10 @@ func upsertProvider(list []string, provider string, active bool) []string {
 // already present in the tree manifest's repository. Dependencies not (yet)
 // installed are omitted; the self-entry never appears. Always returns a
 // non-nil map so the manifest carries `dependencies = {}` for a dep-less rock.
+//
+// It is computed once, when the rock is deployed, and the entries of the
+// other rocks are left as they are, where upstream recomputes every entry,
+// transitively, on each write of the manifest.
 func resolveInstalledDeps(spec *rocks.Rockspec, m *rocks.Manifest) map[string]string {
 	out := map[string]string{}
 
@@ -543,20 +584,39 @@ func removeProvider(index map[string][]string, provider string) {
 	}
 }
 
-// manifestProvider builds a tree.Tree provider lookup over the manifest's
-// module and command indexes: the active provider of an item is index 0 of its
-// list, split into rock name + version.
-func manifestProvider(m *rocks.Manifest) func(item string) (string, string, bool) {
-	return func(item string) (string, string, bool) {
-		for _, idx := range []map[string][]string{m.Modules, m.Commands} {
-			if list, ok := idx[item]; ok && len(list) > 0 {
-				if name, version, ok := strings.Cut(list[0], "/"); ok {
-					return name, version, true
-				}
-			}
+// manifestProviders builds the tree.Tree provider lookup over the manifest's
+// module and command indexes, as upstream manif.get_providers reads them: a
+// module is looked up in m.Modules and a command in m.Commands, never one in
+// the other's index, since a rock may well ship a module and a command of the
+// same name. The lookup reads m as it is when called, so it follows the
+// manifest's updates.
+func manifestProviders(m *rocks.Manifest) func(kind tree.ItemKind, item string) []string {
+	return func(kind tree.ItemKind, item string) []string {
+		if kind == tree.CommandItem {
+			return m.Commands[item]
 		}
 
-		return "", "", false
+		return m.Modules[item]
+	}
+}
+
+// removeFromManifest drops name/version from the tree manifest: its
+// repository entry, its place in the module and command provider lists, and
+// its dependency list (upstream writer.remove_from_manifest).
+func removeFromManifest(m *rocks.Manifest, name, version string) {
+	pkgVer := name + "/" + version
+
+	delete(m.Repository[name], version)
+	removeProvider(m.Modules, pkgVer)
+	removeProvider(m.Commands, pkgVer)
+
+	if vers, ok := m.Dependencies[name]; ok {
+		delete(vers, version)
+	}
+
+	if len(m.Repository[name]) == 0 {
+		delete(m.Repository, name)
+		delete(m.Dependencies, name)
 	}
 }
 
@@ -630,6 +690,43 @@ func pickNewest(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) 
 	}
 
 	return best, have
+}
+
+// newestVersion returns the newest of the installed versions of a rock, the
+// one upstream search.pick_installed_rock picks for show and pack
+// (search.lua:395: the first of the versions sorted by vers.compare_versions,
+// newest first). A version that does not parse sorts below every one that
+// does, and two that do not parse compare as strings, so the choice does not
+// depend on map order.
+func newestVersion(versions map[string]rocks.RepoEntry) string {
+	var (
+		picked string
+		best   rocks.Version
+		bestOK bool
+	)
+
+	for raw := range versions {
+		v, err := deps.ParseVersion(raw)
+		ok := err == nil
+
+		switch {
+		case picked == "":
+		case ok && bestOK:
+			if deps.Compare(v, best) <= 0 {
+				continue
+			}
+		case ok != bestOK:
+			if !ok {
+				continue
+			}
+		case raw < picked:
+			continue
+		}
+
+		picked, best, bestOK = raw, v, ok
+	}
+
+	return picked
 }
 
 func unwrapPathErr(err error) error {

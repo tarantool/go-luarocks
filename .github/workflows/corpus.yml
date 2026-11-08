@@ -1,0 +1,79 @@
+name: corpus
+
+# Installs the rock corpus of client/corpus_test.go — real rocks from
+# rocks.tarantool.org and luarocks.org, each at a pinned version — through
+# both backends and compares the trees (see CONTRIBUTING.md). It needs the
+# network, takes long and runs third-party build scripts, so it is a scheduled
+# signal rather than a pull-request check, and it runs in the sandbox of
+# scripts/test-in-docker.sh: a read-only root and source tree, an unprivileged
+# user, and a check that nothing was left outside the test's temp dirs.
+
+on:
+  schedule:
+    - cron: "0 4 * * 6" # Weekly on Saturday at 04:00 UTC.
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "Tests to run (go test -run), e.g. TestCorpus_Parity/http@"
+        type: string
+        default: "TestCorpus"
+      test_notification:
+        description: "Send notification regardless of the corpus outcome (for testing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the sandbox image
+        run: scripts/test-in-docker.sh true
+
+      - name: Corpus
+        id: corpus
+        env:
+          RUN: ${{ inputs.run || 'TestCorpus' }}
+        # -v streams the per-rock logs and the report the test prints at the
+        # end; a passing package would otherwise print neither.
+        run: |
+          set -o pipefail
+          scripts/test-in-docker.sh --no-build --net go test -count=1 -v -timeout 150m \
+            -tags integration,integration_luaengine,integration_corpus \
+            -run "$RUN" ./client/ 2>&1 | tee corpus.log
+
+      - name: Extract the report
+        if: always()
+        run: |
+          sed -n '/<!-- corpus-report:begin -->/,/<!-- corpus-report:end -->/p' corpus.log > corpus-report.md
+          if [ -s corpus-report.md ]; then
+            cat corpus-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No corpus report: the run ended before printing it; see corpus.log." | tee corpus-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-report
+          path: |
+            corpus-report.md
+            corpus.log
+
+      - name: Send notification on scheduled run failure
+        if: |
+          always() &&
+          ((github.event_name == 'schedule' && steps.corpus.outcome == 'failure') ||
+           (github.event_name == 'workflow_dispatch' && inputs.test_notification))
+        uses: tarantool/actions/report-job-status@master
+        with:
+          bot-token: ${{ secrets.ECO_VK_WORKSPACE_BOT_TOKEN }}
+          chat-id: ${{ secrets.ECO_VK_WORKSPACE_GOVULNCHECK_CHAT_ID }}
+          job-name: ${{ github.job }}
+          job-steps: ${{ toJson(steps) }}

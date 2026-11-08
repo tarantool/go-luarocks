@@ -213,6 +213,47 @@ func TestDeploy_ShebangLuaBinWrapped(t *testing.T) {
 		"the launcher must exec the real script, got:\n%s", pub)
 }
 
+// TestDeploy_BinWrapperListsOwnTree pins the launcher of a Lua command
+// against the bytes upstream's fs/unix.lua wrap_script writes for one rock
+// tree: package.path and package.cpath list the module directories of the
+// tree deployed to alone, each list ending in ";" before the interpreter's
+// own path. Upstream lists every tree its deps mode selects; go-luarocks
+// lists its own tree only.
+func TestDeploy_BinWrapperListsOwnTree(t *testing.T) {
+	t.Parallel()
+
+	const interp = "/opt/tarantool/bin/tarantool"
+
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "bin", "tool"), "print('hi')\n")
+
+	own := t.TempDir()
+	tr, err := tree.Open(rocks.Config{Tree: own})
+	require.NoError(t, err)
+
+	tr.BinWrap = &tree.BinWrap{Interpreter: interp, Sysconfdir: "/etc/luarocks"}
+
+	_, err = tr.Deploy(&rocks.Rockspec{
+		Package: demoPkg,
+		Version: "1.0.0-1",
+		Build: rocks.Build{
+			Install: rocks.BuildInstall{Bin: map[string]string{"tool": "bin/tool"}},
+		},
+	}, src, src)
+	require.NoError(t, err)
+
+	got, err := os.ReadFile(filepath.Join(tr.BinDir(), "tool"))
+	require.NoError(t, err)
+
+	realScript := filepath.Join(tr.InstallDir(demoPkg, "1.0.0-1"), "bin", "tool")
+	want := "#!/bin/sh\n\nLUAROCKS_SYSCONFDIR='/etc/luarocks' exec '" + interp + "' -e '" +
+		`package.path="` + own + `/share/tarantool/?.lua;` + own + `/share/tarantool/?/init.lua;"..package.path;` +
+		`package.cpath="` + own + `/lib/tarantool/?.so;"..package.cpath;` +
+		`local k,l,_=pcall(require,"luarocks.loader") _=k and l.add_context("demo","1.0.0-1")' '` +
+		realScript + `' "$@"` + "\n"
+	assert.Equal(t, want, string(got), "the launcher")
+}
+
 func TestDeploy_NonLuaBinCopiedVerbatim(t *testing.T) {
 	t.Parallel()
 
@@ -244,8 +285,12 @@ func TestDeploy_NonLuaBinCopiedVerbatim(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(tr.BinDir(), "tool"))
 	require.NoError(t, err)
 	assert.Equal(t, body, string(got), "non-Lua bin must be copied verbatim, not wrapped")
-	// The verbatim path does not create a per-rock bin copy.
-	assert.NoFileExists(t, filepath.Join(tr.InstallDir(demoPkg, "1.0.0-1"), "bin", "tool"))
+	// The script itself stays in the per-rock bin dir, as upstream's does:
+	// install_files puts it there and install_binary copies it from there
+	// (repos.lua:452-458), so a pack of the rock finds it.
+	kept, err := os.ReadFile(filepath.Join(tr.InstallDir(demoPkg, "1.0.0-1"), "bin", "tool"))
+	require.NoError(t, err, "the per-rock copy of the script")
+	assert.Equal(t, body, string(kept), "the per-rock copy of the script")
 }
 
 func TestDeploy_WritesRockspecIntoInstallDir(t *testing.T) {
@@ -306,6 +351,101 @@ func TestDeleteVersion(t *testing.T) {
 	assert.NoFileExists(t, deployed, "deployed module must be removed")
 	assert.NoDirExists(t, tr.InstallDir(demoPkg, "1.0.0-1"), "install dir must be removed")
 	assert.NoDirExists(t, filepath.Join(tr.RocksDir(), demoPkg), "empty name dir must be pruned")
+}
+
+// TestDeleteVersion_PromotesNextProvider: removing the version that holds an
+// item's plain path deletes that file and renames the next provider's
+// versioned files to their plain names, as upstream repos.delete_version does
+// (repos.lua:585-695). The files of the removed version are found through its
+// rock_manifest, which lists plain paths only.
+func TestDeleteVersion_PromotesNextProvider(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr, err := tree.Open(rocks.Config{Tree: dir})
+	require.NoError(t, err)
+
+	// demo 2.0 holds the plain paths, its module as a .so; demo 1.0 holds
+	// versioned ones, its module as a .lua.
+	lua, lib := tr.DeployLuaDir(), tr.DeployLibDir()
+	writeFile(t, filepath.Join(lib, "demo", "impl.so"), "2.0")
+	writeFile(t, filepath.Join(lua, "demo_1_0_1-demo", "impl.lua"), "1.0")
+	writeFile(t, filepath.Join(tr.BinDir(), "demo-cli"), "2.0 cli")
+	writeFile(t, filepath.Join(tr.BinDir(), "demo_1_0_1-demo-cli"), "1.0 cli")
+
+	providers := map[string][]string{"demo.impl": {"demo/2.0-1", "demo/1.0-1"}, "demo-cli": {"demo/2.0-1", "demo/1.0-1"}}
+	tr.Providers = func(_ tree.ItemKind, item string) []string { return providers[item] }
+
+	for v, rm := range map[string]*rocks.RockManifest{
+		"2.0-1": {Lib: map[string]string{"demo/impl.so": "x"}, Bin: map[string]string{"demo-cli": "x"}},
+		"1.0-1": {Lua: map[string]string{"demo/impl.lua": "x"}, Bin: map[string]string{"demo-cli": "x"}},
+	} {
+		require.NoError(t, tr.Store.WriteRock(filepath.Join(tr.InstallDir(demoPkg, v), "rock_manifest"), rm))
+	}
+
+	require.NoError(t, tr.DeleteVersion(demoPkg, "2.0-1"))
+
+	assert.Empty(t, deployedFiles(t, lib), "2.0's module is deleted")
+	assert.Equal(t, []string{"demo/impl.lua"}, deployedModules(t, lua), "1.0's .lua, the other form, takes the plain path")
+	assert.Equal(t, []string{"demo-cli"}, deployedFiles(t, tr.BinDir()), "1.0's command takes the plain path")
+
+	got, err := os.ReadFile(filepath.Join(tr.BinDir(), "demo-cli")) //nolint:gosec // test temp path
+	require.NoError(t, err)
+	assert.Equal(t, "1.0 cli", string(got), "the promoted command is 1.0's")
+
+	// 1.0 is now the only provider, at the plain paths; deleting it leaves
+	// nothing behind.
+	providers = map[string][]string{"demo.impl": {"demo/1.0-1"}, "demo-cli": {"demo/1.0-1"}}
+
+	require.NoError(t, tr.DeleteVersion(demoPkg, "1.0-1"))
+	assert.Empty(t, deployedModules(t, lua))
+	assert.Empty(t, deployedFiles(t, tr.BinDir()))
+	assert.NoDirExists(t, filepath.Join(tr.RocksDir(), demoPkg), "empty name dir must be pruned")
+}
+
+// TestDeleteVersion_LuaDoesNotPromoteNextSo pins a quirk of upstream's
+// delete_version that is mirrored on purpose: removing a .lua that holds the
+// plain path renames the next provider's lib counterpart named with the .lua
+// extension (repos.lua:638, `file_path:gsub("%.[^.]+$", ".lua")`), so the next
+// provider's .so of the module keeps its versioned name.
+func TestDeleteVersion_LuaDoesNotPromoteNextSo(t *testing.T) {
+	t.Parallel()
+
+	tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
+	require.NoError(t, err)
+
+	lua, lib := tr.DeployLuaDir(), tr.DeployLibDir()
+	writeFile(t, filepath.Join(lua, "demo", "impl.lua"), "2.0")
+	writeFile(t, filepath.Join(lib, "demo_1_0_1-demo", "impl.so"), "1.0")
+
+	tr.Providers = func(tree.ItemKind, string) []string { return []string{"demo/2.0-1", "demo/1.0-1"} }
+	require.NoError(t, tr.Store.WriteRock(filepath.Join(tr.InstallDir(demoPkg, "2.0-1"), "rock_manifest"),
+		&rocks.RockManifest{Lua: map[string]string{"demo/impl.lua": "x"}}))
+
+	require.NoError(t, tr.DeleteVersion(demoPkg, "2.0-1"))
+
+	assert.Empty(t, deployedModules(t, lua), "2.0's module is deleted")
+	assert.Equal(t, []string{"demo_1_0_1-demo/impl.so"}, deployedFiles(t, lib), "1.0's .so stays versioned, as upstream leaves it")
+}
+
+// TestDeleteVersion_VersionedFilesOnly: a version that lost every item to
+// another provider removes its versioned files and leaves the plain ones.
+func TestDeleteVersion_VersionedFilesOnly(t *testing.T) {
+	t.Parallel()
+
+	tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
+	require.NoError(t, err)
+
+	lua := tr.DeployLuaDir()
+	writeFile(t, filepath.Join(lua, "shared.lua"), "aaa")
+	writeFile(t, filepath.Join(lua, "bbb_1_0_1-shared.lua"), "bbb")
+
+	tr.Providers = func(tree.ItemKind, string) []string { return []string{"aaa/1.0-1", "bbb/1.0-1"} }
+	require.NoError(t, tr.Store.WriteRock(filepath.Join(tr.InstallDir("bbb", "1.0-1"), "rock_manifest"),
+		&rocks.RockManifest{Lua: map[string]string{"shared.lua": "x"}}))
+
+	require.NoError(t, tr.DeleteVersion("bbb", "1.0-1"))
+	assert.Equal(t, []string{"shared.lua"}, deployedModules(t, lua), "aaa's plain file stays")
 }
 
 func TestDeploy_MakeInstalledSubtree(t *testing.T) {
@@ -705,7 +845,7 @@ func TestDeploy_BuiltinStagedFilesDeployOnce(t *testing.T) {
 	assert.Equal(t, map[string]string{"cdemo.so": md5Hex("ELF 1.0-1")}, rm.Lib, "rock_manifest.lib")
 
 	// A re-deploy of the installed version (a re-make) overwrites in place.
-	tr.Provider = func(string) (string, string, bool) { return demoPkg, "1.0-1", true }
+	tr.Providers = func(tree.ItemKind, string) []string { return []string{demoPkg + "/1.0-1"} }
 
 	_, err = tr.Deploy(spec, src, buildDir)
 	require.NoError(t, err)
@@ -730,7 +870,7 @@ func TestDeploy_BuiltinUpgradeKeepsDemotedFile(t *testing.T) {
 	_, err = tr.Deploy(oldSpec, oldSrc, oldBuild)
 	require.NoError(t, err)
 
-	tr.Provider = func(string) (string, string, bool) { return demoPkg, "1.0-1", true }
+	tr.Providers = func(tree.ItemKind, string) []string { return []string{demoPkg + "/1.0-1"} }
 
 	newSpec, newSrc, newBuild := stageBuiltinRock(t, "2.0-1")
 	_, err = tr.Deploy(newSpec, newSrc, newBuild)
@@ -809,6 +949,22 @@ func md5Hex(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// deployedModules is deployedFiles of a deploy dir without the rocks/
+// bookkeeping subtree the lua deploy dir holds.
+func deployedModules(t *testing.T, root string) []string {
+	t.Helper()
+
+	var out []string
+
+	for _, f := range deployedFiles(t, root) {
+		if !strings.HasPrefix(f, "rocks/") {
+			out = append(out, f)
+		}
+	}
+
+	return out
+}
+
 // deployedFiles returns the slash-separated paths of every regular file under
 // root, relative to it.
 func deployedFiles(t *testing.T, root string) []string {
@@ -850,12 +1006,12 @@ func TestDeploy_PromotesHigherVersion(t *testing.T) {
 	active := filepath.Join(tr.DeployLuaDir(), "demo.lua")
 	writeFile(t, active, "v1")
 
-	tr.Provider = func(item string) (string, string, bool) {
-		if item == demoPkg {
-			return demoPkg, "1.0.0-1", true
+	tr.Providers = func(kind tree.ItemKind, item string) []string {
+		if kind == tree.ModuleItem && item == demoPkg {
+			return []string{demoPkg + "/1.0.0-1"}
 		}
 
-		return "", "", false
+		return nil
 	}
 
 	spec := &rocks.Rockspec{
@@ -894,12 +1050,12 @@ func TestDeploy_LowerVersionTakesVersionedName(t *testing.T) {
 	active := filepath.Join(tr.DeployLuaDir(), "demo.lua")
 	writeFile(t, active, "v2")
 
-	tr.Provider = func(item string) (string, string, bool) {
-		if item == demoPkg {
-			return demoPkg, "2.0.0-1", true
+	tr.Providers = func(kind tree.ItemKind, item string) []string {
+		if kind == tree.ModuleItem && item == demoPkg {
+			return []string{demoPkg + "/2.0.0-1"}
 		}
 
-		return "", "", false
+		return nil
 	}
 
 	spec := &rocks.Rockspec{
@@ -918,7 +1074,10 @@ func TestDeploy_LowerVersionTakesVersionedName(t *testing.T) {
 	versioned := tree.MungedPath(tr.DeployLuaDir(), active, demoPkg, "1.0.0-1")
 	b, _ = os.ReadFile(versioned) //nolint:gosec // G304: test-controlled temp path.
 	assert.Equal(t, "v1old", string(b), "lower version stored under its versioned name")
-	assert.Contains(t, rm.Lua, "demo_1_0_0_1-demo.lua", "rm.Lua should key the versioned entry")
+	// Upstream's rock_manifest is a listing of the per-rock install dir, so it
+	// names the file by its plain path whichever path the file was deployed
+	// to; DeleteVersion tells the two apart from the tree manifest.
+	assert.Equal(t, map[string]string{"demo.lua": md5Hex("v1old")}, rm.Lua, "rm.Lua keys the plain path")
 }
 
 func TestWhich(t *testing.T) {
@@ -994,46 +1153,55 @@ func TestModuleIndex(t *testing.T) {
 			},
 			want: map[string]string{"demo": "demo.so"},
 		},
-		{
-			// A munged key belongs to an install that lost the plain spot; it
-			// must not be reported as a module (its name would be mangled and
-			// it is not the active provider).
-			name: "munged key skipped",
-			rm: &rocks.RockManifest{Lua: map[string]string{
-				"demo/init.lua":              "d1",
-				"demo_1_0_0_1-other/one.lua": "d2",
-			}},
-			want: map[string]string{"demo.init": "demo/init.lua"},
-		},
 	}
 
 	for _, c := range cases {
-		assert.Equal(t, c.want, tree.ModuleIndex(c.rm, demoPkg, "1.0.0-1"), c.name)
+		assert.Equal(t, c.want, tree.ModuleIndex(c.rm), c.name)
 	}
 }
 
-// TestModuleIndex_InvertsMungedPath pins the munged-key skip to the formation
-// MungedPath actually produces, rather than to a hand-written prefix.
-func TestModuleIndex_InvertsMungedPath(t *testing.T) {
+// TestDeploy_LosingProviderStillListsItsModules: a rock whose module lost its
+// plain path to another provider keeps it in its rock_manifest and module
+// index, under the plain path, as upstream records it (make_rock_manifest walks
+// the install dir before deploy_files picks the versioned name). Keying the
+// rock_manifest by the versioned path dropped the module from the rock's
+// tree-manifest entry and from the module's provider list.
+func TestDeploy_LosingProviderStillListsItsModules(t *testing.T) {
 	t.Parallel()
 
-	p := tree.Paths{Tree: "/tmp/r"}
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "shared.lua"), "return 'bbb'")
+	writeFile(t, filepath.Join(src, "shared-cli"), "#!/bin/sh\necho bbb\n")
 
-	plain := filepath.Join(p.DeployLuaDir(), "demo", "init.lua")
-	munged := tree.MungedPath(p.DeployLuaDir(), plain, demoPkg, "1.0.0-1")
-
-	rel, err := filepath.Rel(p.DeployLuaDir(), munged)
+	tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
 	require.NoError(t, err)
 
-	rm := &rocks.RockManifest{Lua: map[string]string{filepath.ToSlash(rel): "d1"}}
-	assert.Empty(t, tree.ModuleIndex(rm, demoPkg, "1.0.0-1"),
-		"a MungedPath-formed key must not be indexed as a module")
+	tr.Providers = func(tree.ItemKind, string) []string { return []string{"aaa/1.0-1"} }
+
+	spec := &rocks.Rockspec{
+		Package: "bbb",
+		Version: "1.0-1",
+		Build: rocks.Build{
+			Modules: map[string]rocks.Module{"shared": {Path: "shared.lua"}},
+			Install: rocks.BuildInstall{Bin: map[string]string{"shared-cli": "shared-cli"}},
+		},
+	}
+	rm, err := tr.Deploy(spec, src, src)
+	require.NoError(t, err)
+
+	assert.FileExists(t, filepath.Join(tr.DeployLuaDir(), "bbb_1_0_1-shared.lua"), "bbb sorts after aaa: versioned name")
+	assert.FileExists(t, filepath.Join(tr.BinDir(), "bbb_1_0_1-shared-cli"), "bbb sorts after aaa: versioned name")
+	assert.Equal(t, map[string]string{"shared.lua": md5Hex("return 'bbb'")}, rm.Lua, "rock_manifest.lua")
+	assert.Equal(t, map[string]string{"shared-cli": md5Hex("#!/bin/sh\necho bbb\n")}, rm.Bin, "rock_manifest.bin")
+	assert.Equal(t, map[string]string{"shared": "shared.lua"}, tree.ModuleIndex(rm), "module index")
+	assert.Equal(t, map[string]string{"shared-cli": "shared-cli"}, tree.CommandIndex(rm), "command index")
 }
 
 // TestCommandIndex: the tree manifest's per-rock command index is derived from
 // the rock_manifest's bin section, keyed and valued by the path under the bin
-// dir, as upstream repos.package_commands does — so a build.install.bin entry
-// is not valued by its source path.
+// dir, as upstream repos.package_commands does — so a command a make rock
+// installed into $(BINDIR) is indexed, and a build.install.bin entry is not
+// valued by its source path.
 func TestCommandIndex(t *testing.T) {
 	t.Parallel()
 
@@ -1049,15 +1217,10 @@ func TestCommandIndex(t *testing.T) {
 			rm:   &rocks.RockManifest{Bin: map[string]string{"demo-cli": "d1", "tools/demo": "d2"}},
 			want: map[string]string{"demo-cli": "demo-cli", "tools/demo": "tools/demo"},
 		},
-		{
-			name: "munged key skipped",
-			rm:   &rocks.RockManifest{Bin: map[string]string{"demo-cli": "d1", "demo_1_0_0_1-old-cli": "d2"}},
-			want: map[string]string{"demo-cli": "demo-cli"},
-		},
 	}
 
 	for _, c := range cases {
-		assert.Equal(t, c.want, tree.CommandIndex(c.rm, demoPkg, "1.0.0-1"), c.name)
+		assert.Equal(t, c.want, tree.CommandIndex(c.rm), c.name)
 	}
 }
 

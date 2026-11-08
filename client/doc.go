@@ -25,6 +25,17 @@
 // operational Rocks struct + methods live here in the client package.
 // Callers spell it `client.New(cfg)`.
 //
+// Backend semantics: where upstream LuaRocks, which the lua backend runs,
+// differs from go-luarocks' own semantics, the native backend keeps the
+// latter, which tt relies on. It consults Config.Tree alone and a command
+// wrapper lists it alone; Install resolves and installs dependencies as
+// InstallOpts.Deps (a DepsPolicy) says, and Build and Make install none; no
+// operation removes the other installed versions of a rock; Remove does not
+// check the rock's dependents; a rock's resolved dependencies are recorded
+// in the tree manifest when it is deployed; and Which looks a module up by
+// its plain paths in Config.Tree. The README's "Backend Parity" lists the
+// differences.
+//
 // Subsystem references:
 //
 //   - rockspec.Eval / MergePlatforms / RuntimePlatforms / Validate
