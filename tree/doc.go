@@ -17,6 +17,15 @@
 //	<tree>/lib/tarantool/                         — deploy_lib_dir
 //	<tree>/bin/                                   — bin scripts
 //
+// Deploy and DeleteVersion keep every file they write, rename or remove inside
+// the tree, a deliberate strictness beyond upstream, which joins the names a
+// rockspec or a rock_manifest gives as they come: a build.install key, a
+// copy_directories entry, a rock_manifest entry, or a rock name or version
+// that leaves its directory, absolute, through "..", or through a symlink
+// pointing out, fails the operation with an error wrapping
+// rocks.ErrUnsafePath, and the sources are read only inside srcDir and
+// buildDir. Names that stay inside behave as upstream's do.
+//
 // This package uses forward-slash Unix paths exclusively via
 // path/filepath; no Windows-specific handling.
 package tree

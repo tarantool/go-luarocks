@@ -460,8 +460,9 @@ func TestResolveModule(t *testing.T) {
 	t.Run("lua path", func(t *testing.T) {
 		t.Parallel()
 
-		src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.lua"}, p)
+		srcRoot, src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.lua"}, p)
 		require.NoError(t, err)
+		assert.Equal(t, "/src", srcRoot)
 		assert.Equal(t, filepath.Join("/src", "foo/bar.lua"), src)
 		assert.Equal(t, filepath.Join(p.DeployLuaDir(), "foo", "bar.lua"), dst)
 		assert.Equal(t, kindLua, kind)
@@ -470,8 +471,9 @@ func TestResolveModule(t *testing.T) {
 	t.Run("dylib path", func(t *testing.T) {
 		t.Parallel()
 
-		src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.dylib"}, p)
+		srcRoot, src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.dylib"}, p)
 		require.NoError(t, err)
+		assert.Equal(t, "/src", srcRoot)
 		assert.Equal(t, filepath.Join("/src", "foo/bar.dylib"), src)
 		assert.Equal(t, filepath.Join(p.DeployLibDir(), "foo", "bar.so"), dst)
 		assert.Equal(t, kindLib, kind)
@@ -480,8 +482,9 @@ func TestResolveModule(t *testing.T) {
 	t.Run("c source path", func(t *testing.T) {
 		t.Parallel()
 
-		src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.c"}, p)
+		srcRoot, src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.c"}, p)
 		require.NoError(t, err)
+		assert.Equal(t, "/build", srcRoot)
 		assert.Equal(t, filepath.Join("/build", "lib", "foo", "bar.so"), src)
 		assert.Equal(t, filepath.Join(p.DeployLibDir(), "foo", "bar.so"), dst)
 		assert.Equal(t, kindLib, kind)
@@ -490,8 +493,9 @@ func TestResolveModule(t *testing.T) {
 	t.Run("table form sources", func(t *testing.T) {
 		t.Parallel()
 
-		src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Sources: []string{"a.c"}}, p)
+		srcRoot, src, dst, kind, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Sources: []string{"a.c"}}, p)
 		require.NoError(t, err)
+		assert.Equal(t, "/build", srcRoot)
 		assert.Equal(t, filepath.Join("/build", "lib", "foo", "bar.so"), src)
 		assert.Equal(t, filepath.Join(p.DeployLibDir(), "foo", "bar.so"), dst)
 		assert.Equal(t, kindLib, kind)
@@ -500,7 +504,7 @@ func TestResolveModule(t *testing.T) {
 	t.Run("unsupported extension", func(t *testing.T) {
 		t.Parallel()
 
-		_, _, _, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.xyz"}, p)
+		_, _, _, _, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{Path: "foo/bar.xyz"}, p)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported source extension")
 	})
@@ -508,7 +512,7 @@ func TestResolveModule(t *testing.T) {
 	t.Run("neither path nor sources", func(t *testing.T) {
 		t.Parallel()
 
-		_, _, _, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{}, p)
+		_, _, _, _, err := resolveModule("/src", "/build", "foo.bar", rocks.Module{}, p)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "neither Path nor Sources set")
 	})
@@ -521,7 +525,7 @@ func TestCopyFile_Errors(t *testing.T) {
 		t.Parallel()
 
 		dir := t.TempDir()
-		_, err := copyFile(filepath.Join(dir, "nope"), filepath.Join(dir, "out"), filePerm)
+		_, err := copyFile(dir, filepath.Join(dir, "nope"), dir, filepath.Join(dir, "out"), filePerm)
 		require.Error(t, err)
 	})
 
@@ -535,7 +539,7 @@ func TestCopyFile_Errors(t *testing.T) {
 		blocker := filepath.Join(dir, "blocker")
 		writeInternal(t, blocker, "not a dir")
 
-		_, err := copyFile(src, filepath.Join(blocker, "sub", "out"), filePerm)
+		_, err := copyFile(dir, src, dir, filepath.Join(blocker, "sub", "out"), filePerm)
 		require.Error(t, err)
 	})
 
@@ -549,7 +553,7 @@ func TestCopyFile_Errors(t *testing.T) {
 		dstDir := filepath.Join(dir, "out")
 		require.NoError(t, os.MkdirAll(dstDir, dirPerm))
 
-		_, err := copyFile(src, dstDir, filePerm)
+		_, err := copyFile(dir, src, dir, dstDir, filePerm)
 		require.Error(t, err)
 	})
 
@@ -560,7 +564,7 @@ func TestCopyFile_Errors(t *testing.T) {
 		srcDir := filepath.Join(dir, "srcdir")
 		require.NoError(t, os.MkdirAll(srcDir, dirPerm))
 
-		_, err := copyFile(srcDir, filepath.Join(dir, "out"), filePerm)
+		_, err := copyFile(dir, srcDir, dir, filepath.Join(dir, "out"), filePerm)
 		require.Error(t, err)
 	})
 }
@@ -572,7 +576,7 @@ func TestCopyTree_Errors(t *testing.T) {
 		t.Parallel()
 
 		dir := t.TempDir()
-		err := copyTree(filepath.Join(dir, "nope"), filepath.Join(dir, "out"))
+		err := copyTree(dir, filepath.Join(dir, "nope"), dir, filepath.Join(dir, "out"))
 		require.Error(t, err)
 	})
 
@@ -583,7 +587,7 @@ func TestCopyTree_Errors(t *testing.T) {
 		src := filepath.Join(dir, "notadir")
 		writeInternal(t, src, "hi")
 
-		err := copyTree(src, filepath.Join(dir, "out"))
+		err := copyTree(dir, src, dir, filepath.Join(dir, "out"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a directory")
 	})
@@ -811,7 +815,7 @@ func TestDeploy_InstallBinWrappedResolveSpotError(t *testing.T) {
 }
 
 // TestDeploy_InstallBinWrapperMkdirError forces the wrapped-bin branch's
-// wrapper MkdirAll to fail: BinDir is read-only so the new subdirectory the
+// wrapper write to fail: BinDir is read-only so the new subdirectory the
 // wrapper needs cannot be created.
 func TestDeploy_InstallBinWrapperMkdirError(t *testing.T) {
 	t.Parallel()
@@ -837,7 +841,7 @@ func TestDeploy_InstallBinWrapperMkdirError(t *testing.T) {
 	}
 	_, err = tr.Deploy(spec, src, src)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mkdir bin")
+	assert.Contains(t, err.Error(), "write bin wrapper")
 }
 
 // TestDeploy_CopyDirectoriesError propagates copyTree's stat error through

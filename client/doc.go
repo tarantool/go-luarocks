@@ -25,6 +25,16 @@
 // operational Rocks struct + methods live here in the client package.
 // Callers spell it `client.New(cfg)`.
 //
+// Path containment: the native backend never reads, writes, renames or
+// removes a file outside the directory a name belongs to, which upstream
+// LuaRocks, and so the lua backend, does not check. A rockspec whose path
+// fields are absolute or contain ".." fails rockspec.Validate, and a name
+// that gets past it — from a planted rock_manifest, an archive entry, a tree
+// manifest or a server — fails the operation at the site that would have
+// followed it, with an error wrapping rocks.ErrUnsafePath: source.dir and
+// source.file stay inside the fetched sources, Unpack's entries inside
+// destDir, and Pack's files inside the tree and the pack dir.
+//
 // Backend semantics: where upstream LuaRocks, which the lua backend runs,
 // differs from go-luarocks' own semantics, the native backend keeps the
 // latter, which tt relies on. It consults Config.Tree alone and a command

@@ -11,6 +11,7 @@ import (
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 // Files can be deployed under their plain (non-versioned) name or under a
@@ -251,10 +252,10 @@ func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]b
 	}
 
 	if curName != newName || curVer != newVer {
-		if err := backupExisting(target); err != nil {
+		if err := backupExisting(deployDir, target); err != nil {
 			return "", err
 		}
-	} else if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	} else if err := safepath.Remove(deployDir, target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("remove %q: %w", target, err)
 	}
 
@@ -262,23 +263,28 @@ func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]b
 }
 
 // backupExisting mirrors upstream backup_existing (repos.lua:270-288): a file
-// already at target is renamed to target with "~" appended — as many times as
-// it takes to reach a free name, so an earlier backup is never overwritten.
-func backupExisting(target string) error {
-	if _, err := os.Lstat(target); err != nil {
+// already at target, inside root, is renamed to target with "~" appended — as
+// many times as it takes to reach a free name, so an earlier backup is never
+// overwritten.
+func backupExisting(root, target string) error {
+	if _, err := safepath.Rel(root, target); err != nil {
+		return err
+	}
+
+	if _, err := safepath.Lstat(root, target); err != nil {
 		return nil //nolint:nilerr // nothing at target: nothing to back up
 	}
 
 	backup := target + "~"
 	for {
-		if _, err := os.Lstat(backup); err != nil {
+		if _, err := safepath.Lstat(root, backup); err != nil {
 			break
 		}
 
 		backup += "~"
 	}
 
-	if err := os.Rename(target, backup); err != nil {
+	if err := safepath.Rename(root, target, backup); err != nil {
 		return fmt.Errorf("backup %q: %w", target, err)
 	}
 
@@ -287,21 +293,28 @@ func backupExisting(target string) error {
 
 // renameIfExists mirrors upstream op_rename (repos.lua:347-363): when src
 // exists it replaces dst, whose directory is created as needed, and the
-// directories src leaves empty are pruned up to, not including, stop.
+// directories src leaves empty are pruned up to, not including, stop. Both
+// paths must be inside stop.
 func renameIfExists(src, dst, stop string) error {
-	if _, err := os.Lstat(src); err != nil {
+	for _, p := range []string{src, dst} {
+		if _, err := safepath.Rel(stop, p); err != nil {
+			return err
+		}
+	}
+
+	if _, err := safepath.Lstat(stop, src); err != nil {
 		return nil //nolint:nilerr // a missing source is a no-op, as upstream's fs.exists gate
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+	if err := safepath.MkdirAll(stop, filepath.Dir(dst), dirPerm); err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(dst); err != nil {
+	if err := safepath.RemoveAll(stop, dst); err != nil {
 		return err
 	}
 
-	if err := os.Rename(src, dst); err != nil {
+	if err := safepath.Rename(stop, src, dst); err != nil {
 		return err
 	}
 
@@ -317,7 +330,7 @@ func pruneEmptyParents(dir, stop string) {
 	stop = filepath.Clean(stop)
 
 	for d := filepath.Clean(dir); d != stop && strings.HasPrefix(d, stop+string(filepath.Separator)); d = filepath.Dir(d) {
-		if err := os.Remove(d); err != nil {
+		if err := safepath.Remove(stop, d); err != nil {
 			return
 		}
 	}
@@ -350,8 +363,15 @@ func newSpots() *spots {
 // and whether this is the first time the Deploy call reaches it. The first
 // claim resolves the spot (resolveSpot); a repeat returns the recorded final
 // path without consulting the tree again.
+//
+// rel must name an entry of the deploy dir: one that leaves it, or names the
+// dir itself, fails with an error wrapping rocks.ErrUnsafePath.
 func (s *spots) claim(t *Tree, dt, rel, newName, newVer string) (string, bool, error) {
-	plain := filepath.Join(t.deployDirOf(dt), rel)
+	plain, err := safepath.JoinEntry(t.deployDirOf(dt), rel)
+	if err != nil {
+		return "", false, err
+	}
+
 	if final, ok := s.final[plain]; ok {
 		return final, false, nil
 	}
@@ -387,7 +407,16 @@ func (s *spots) seen(t *Tree, dt, rel string) bool {
 // t.Providers must still list the version being deleted: removing it from the
 // tree manifest is the caller's job, after DeleteVersion. A missing or
 // unreadable rock_manifest still lets the install dir be removed.
+//
+// Unlike upstream it removes nothing outside the tree: a name or version that
+// is not a single directory, or a rock_manifest entry that leaves its deploy
+// dir, fails it with an error wrapping rocks.ErrUnsafePath before anything is
+// removed.
 func (t *Tree) DeleteVersion(name, version string) error {
+	if err := checkNameVersion(name, version); err != nil {
+		return fmt.Errorf("tree.DeleteVersion: %w", err)
+	}
+
 	installDir := t.InstallDir(name, version)
 
 	if rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest")); err == nil && rm != nil {
@@ -396,7 +425,7 @@ func (t *Tree) DeleteVersion(name, version string) error {
 		}
 	}
 
-	if err := os.RemoveAll(installDir); err != nil {
+	if err := safepath.RemoveAll(t.RocksDir(), installDir); err != nil {
 		return fmt.Errorf("tree.DeleteVersion: remove install dir: %w", err)
 	}
 
@@ -409,8 +438,23 @@ func (t *Tree) DeleteVersion(name, version string) error {
 	return nil
 }
 
+// checkNameVersion checks that a rock's name and version are one directory
+// each, so <rocks-dir>/<name>/<version> stays an install dir of the tree.
+func checkNameVersion(name, version string) error {
+	if err := safepath.Name(name); err != nil {
+		return fmt.Errorf("rock name: %w", err)
+	}
+
+	if err := safepath.Name(version); err != nil {
+		return fmt.Errorf("rock version: %w", err)
+	}
+
+	return nil
+}
+
 // undeployFiles deletes the deployed files of name/version listed in rm and
-// promotes the next providers, all deletions first, as upstream does.
+// promotes the next providers, all deletions first, as upstream does. An entry
+// of rm that leaves its deploy dir fails it before anything is removed.
 func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error {
 	type rename struct{ src, dst, stop string }
 
@@ -428,6 +472,10 @@ func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error
 		{deployLib, rm.Lib},
 	} {
 		for _, rel := range sortedKeys(sec.files) {
+			if _, err := safepath.JoinEntry(t.deployDirOf(sec.dt), filepath.FromSlash(rel)); err != nil {
+				return fmt.Errorf("rock_manifest %s entry: %w", sec.dt, err)
+			}
+
 			if plain, _, _ := t.takesPlainPath(sec.dt, rel, name, version); !plain {
 				deletes = append(deletes, counterpart{sec.dt, mungedRel(rel, name, version)})
 
@@ -453,7 +501,7 @@ func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error
 		dir := t.deployDirOf(d.dt)
 		p := filepath.Join(dir, filepath.FromSlash(d.rel))
 
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := safepath.Remove(dir, p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove %q: %w", p, err)
 		}
 

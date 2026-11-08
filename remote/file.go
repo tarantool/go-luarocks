@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 // fileURLPrefix is the scheme separator of a file URL. It is trimmed rather
@@ -140,6 +141,10 @@ func (f *FileRemoteIndex) Query(
 
 	for verStr, arches := range mf.repository[name] {
 		for _, a := range acceptedArches(arches, f.Arch) {
+			if !localNames(name, verStr, a.arch) {
+				continue
+			}
+
 			merged[verStr] = append(merged[verStr], mergedItem{server: f.Server, arch: a.arch})
 		}
 	}
@@ -180,6 +185,12 @@ func (f *FileRemoteIndex) load(dir, namespace string) (*remoteManifest, error) {
 		f.cache[namespace] = m
 
 		return m, nil
+	}
+
+	if namespace != "" {
+		if err := safepath.Name(namespace); err != nil {
+			return nil, fmt.Errorf("namespace: %w", err)
+		}
 	}
 
 	base := dir
@@ -258,6 +269,22 @@ func filePrefixOf(server string) string {
 	}
 
 	return ""
+}
+
+// localNames reports whether a rock's name, version and arch keep the
+// artifact path localRockURL joins from them in the server directory: none
+// holds a separator or is "." or "..". An empty one is left to the version
+// parser to report. Upstream joins whatever the manifest lists; a row that
+// would leave the directory is dropped here instead, a deliberate strictness
+// the native backend applies to every path a server names.
+func localNames(parts ...string) bool {
+	for _, p := range parts {
+		if p != "" && safepath.Name(p) != nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 // localRockURL is makeRockURL for a local directory: the same

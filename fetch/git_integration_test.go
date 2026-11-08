@@ -356,3 +356,30 @@ func TestGitBackend_ChecksIsSourceRoot(t *testing.T) {
 	require.NoError(t, statErr, "checks/checks must exist for this regression to be meaningful")
 	assert.True(t, fi.IsDir(), "checks/checks is the module directory")
 }
+
+// TestGitBackend_URLNamingParentStaysInDestDir: the clone dir is named after
+// the URL's last element, so a URL ending in ".." cloned into the parent of
+// the destination — the working directory, say — and then removed the .git
+// there. The repository is still the one the URL names; the clone lands in
+// the destination.
+func TestGitBackend_URLNamingParentStaysInDestDir(t *testing.T) {
+	t.Parallel()
+
+	b := newRepoBuilder(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(b.dir, "sub"), 0o750))
+	b.commit("sub/README", "hi", "init")
+
+	work := t.TempDir()
+	mustWrite(t, filepath.Join(work, "keep"), "keep")
+
+	dst := filepath.Join(work, "dest")
+	out, err := fetch.FetchWith(context.Background(), b.url()+"/sub/..", dst, fetch.Options{})
+	require.NoError(t, err, "Fetch")
+
+	assert.Equal(t, filepath.Join(dst, "repo"), out)
+	assert.FileExists(t, filepath.Join(out, "sub", "README"))
+
+	entries, err := os.ReadDir(work)
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "the clone must not land in %s", work)
+}

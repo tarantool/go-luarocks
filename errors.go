@@ -31,6 +31,16 @@ var (
 	// block we don't recognize). Fail loud rather than silently skip.
 	ErrUnsupportedRockspecFeature = errors.New("rocks: unsupported rockspec feature")
 
+	// ErrUnsafePath signals that a name from a rockspec, a rock_manifest, a
+	// manifest, an archive or a server response would make the native
+	// backend read, write, rename or remove a file outside the directory it
+	// belongs to: an absolute path, one reaching above its directory through
+	// "..", one passing through a symlink that points out, or a name that
+	// must be a single directory and is not. Upstream LuaRocks follows such
+	// names; the native backend refuses them, before anything is written
+	// there.
+	ErrUnsafePath = errors.New("rocks: path escapes its directory")
+
 	// ErrNotImplemented signals that the active backend (Engine) has no
 	// implementation for the invoked method. It is the SOLE error a method
 	// returns in that case — no silent no-op, no zero-value success.

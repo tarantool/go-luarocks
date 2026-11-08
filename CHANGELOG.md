@@ -16,7 +16,11 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
 - deps: Version parsing, dependency constraint matching, and a transitive
   dependency resolver.
 - rockspec: A sandboxed `gopher-lua`-based evaluator for `.rockspec` files,
-  including conditional (platform-guarded) rockspecs.
+  including conditional (platform-guarded) rockspecs. `Validate` rejects a
+  path-valued field that is absolute or holds a `..` element — `source.file`,
+  `source.dir`, the `build.install` keys and values, `build.modules` paths
+  and sources, `copy_directories` — with an error wrapping the new
+  `rocks.ErrUnsafePath`, a deliberate strictness beyond upstream.
 - manif: A manifest reader and writer compatible with the upstream LuaRocks
   manifest format. A `rock_manifest` entry outside its `lua`, `lib`, `bin`,
   `conf` and `doc` sections is kept in `RockManifest.Other`.
@@ -27,6 +31,11 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
 - fetch, remote: HTTP requests share process-wide transports, cloned from
   `http.DefaultTransport`, so connections are reused and `HTTP_PROXY`,
   `HTTPS_PROXY` and `NO_PROXY` are honoured.
+- fetch: Everything a fetch writes stays inside its destination: a
+  `source.file`, a URL file name or a clone directory that leaves it fails
+  with `rocks.ErrUnsafePath`, and so does an archive entry reaching above it
+  or beneath a symlink pointing out of it. Extraction creates no symlinks and
+  keeps only permission bits, never setuid, setgid or sticky.
 - tree: On-disk rock tree layout, deployment, conflict detection, and
   `which`-style lookup. A `lua`/`lib`/`bin` subtree installed by any build
   backend is deployed like the rockspec's own sections, `build.modules` is
@@ -41,21 +50,30 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   another rock or version owns, or none does, without overwriting earlier
   backups — and `DeleteVersion` passes it on to the next provider. A
   command wrapper puts the module directories of the tree it is deployed to
-  on `package.path` and `package.cpath`.
+  on `package.path` and `package.cpath`. `Deploy` and
+  `DeleteVersion` read only the rock's sources and write, rename and remove
+  only inside the tree, through `os.Root`, so a `build.install` key, a
+  `copy_directories` entry, a `rock_manifest` entry or a rock name that
+  leaves, by `..` or through a symlink pointing out, fails with
+  `rocks.ErrUnsafePath` instead of reaching outside, where upstream follows
+  it.
 - build: Build backends — `builtin`, `cmake`, `make`, and `command`.
   `LUA_BINDIR` is derived from `Tarantool.Executable` when it has a
   directory component, so a flat Tarantool SDK with no `bin/` works. The
   `make` and `cmake` backends install into the rock's install dir, as
   upstream's `$(PREFIX)`, `$(LUADIR)`, … name it; `cmake` builds out of tree
   in `build.luarocks` and installs under the rock's `$(PREFIX)` when the
-  rockspec sets no `CMAKE_INSTALL_PREFIX`.
+  rockspec sets no `CMAKE_INSTALL_PREFIX`. The `builtin` backend reads only
+  inside the sources and writes only inside its build dir.
 - remote: Indexes for rock servers that are HTTP(S) endpoints or local
   directories (`/srv/rocks` or `file:///srv/rocks`) — the offline case
   upstream serves with `luarocks --only-server=/path/to/repo`. `NewIndex`
   picks the index a server's form implies, `NewIndexes` does it for a whole
   server list, and `OrderedIndex` queries any mix of the two in order,
   first-found-wins. A `ManifestCache`, set through `IndexOptions.Cache`,
-  shares fetched manifests between indexes.
+  shares fetched manifests between indexes. A local server's row whose name,
+  version or arch would lead its artifact path out of the directory is
+  dropped.
 - remote: `Search`, a port of upstream `search.search_repos` over the same
   manifest loaders the indexes use — substring or exact name matching,
   version constraints, the arch filter, a cross-server merge, the
@@ -116,4 +134,10 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   with `--source` / `--rockspec` / `--arch` / `--all` and the same files,
   bytes and returned paths as the lua backend. The three arch flags are
   mutually exclusive, as upstream's parser makes them.
+- client: The native backend keeps every path a rock names inside its
+  directory, a deliberate strictness beyond upstream and the lua backend:
+  `source.dir` and `source.file` stay inside the fetched sources, `Unpack`
+  extracts inside its destination, keeping permission bits only, and `Pack`
+  copies only inside the tree and its staging dir; anything else fails with
+  `rocks.ErrUnsafePath`.
 - Runnable, godoc-rendered examples across all public packages.

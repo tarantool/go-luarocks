@@ -18,6 +18,7 @@ import (
 	"github.com/tarantool/go-luarocks/build"
 	"github.com/tarantool/go-luarocks/deps"
 	"github.com/tarantool/go-luarocks/fetch"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 	"github.com/tarantool/go-luarocks/remote"
 	"github.com/tarantool/go-luarocks/rockspec"
 	"github.com/tarantool/go-luarocks/tree"
@@ -304,6 +305,13 @@ func (e *nativeEngine) Pack(ctx context.Context, target string, opts PackOpts) (
 
 	picked := newestVersion(versions)
 
+	// The archive is named after both, in e.cfg.WorkingDir.
+	for _, part := range []string{target, picked} {
+		if err := safepath.Name(part); err != nil {
+			return "", fmt.Errorf("rocks.Pack: %w", err)
+		}
+	}
+
 	if !opts.SrcOnly {
 		return e.packInstalled(t, target, picked)
 	}
@@ -395,15 +403,27 @@ const (
 // demotes it to <name>_<version>-foo/bar.lua — and packs the plain foo/bar.lua,
 // another rock's file, instead. The versioned name is formed here the way the
 // deploy formed it.
+//
+// A rock_manifest entry that leaves deployDir or packDir fails it with an
+// error wrapping rocks.ErrUnsafePath, and the copy reads inside deployDir and
+// writes inside packDir only.
 func copyBackFiles(files map[string]string, deployDir, packDir, name, version string, mode os.FileMode) error {
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
-		source := filepath.Join(deployDir, filepath.FromSlash(rel))
+		source, err := safepath.JoinEntry(deployDir, filepath.FromSlash(rel))
+		if err != nil {
+			return err
+		}
+
+		target, err := safepath.JoinEntry(packDir, filepath.FromSlash(rel))
+		if err != nil {
+			return err
+		}
 
 		if versioned := tree.MungedPath(deployDir, source, name, version); fileExists(versioned) {
 			source = versioned
 		}
 
-		if err := copyFileMode(source, filepath.Join(packDir, filepath.FromSlash(rel)), mode); err != nil {
+		if err := copyFileMode(deployDir, source, packDir, target, mode); err != nil {
 			return err
 		}
 	}
@@ -457,21 +477,21 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// copyFileMode copies the file src to dst, creating dst's directory, with
-// mode as dst's permissions.
-func copyFileMode(src, dst string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), unpackDirMode); err != nil {
-		return err
-	}
-
-	in, err := os.Open(src)
+// copyFileMode copies the file src, inside srcRoot, to dst, inside dstRoot,
+// creating dst's directory, with mode as dst's permissions.
+func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode) error {
+	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return err
 	}
 
 	defer func() { _ = in.Close() }()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err := safepath.MkdirAll(dstRoot, filepath.Dir(dst), unpackDirMode); err != nil {
+		return err
+	}
+
+	out, err := safepath.Create(dstRoot, dst, mode)
 	if err != nil {
 		return err
 	}
@@ -486,7 +506,7 @@ func copyFileMode(src, dst string, mode os.FileMode) error {
 		return err
 	}
 
-	return os.Chmod(dst, mode)
+	return safepath.Chmod(dstRoot, dst, mode)
 }
 
 // copyDirContents copies every file under src to the same path under dst,
@@ -503,14 +523,19 @@ func copyDirContents(src, dst string) error {
 		}
 
 		if fi.IsDir() {
-			return os.MkdirAll(filepath.Join(dst, rel), unpackDirMode)
+			return safepath.MkdirAll(dst, filepath.Join(dst, rel), unpackDirMode)
 		}
 
-		return copyFileMode(p, filepath.Join(dst, rel), fi.Mode().Perm())
+		return copyFileMode(src, p, dst, filepath.Join(dst, rel), fi.Mode().Perm())
 	})
 }
 
-// Unpack extracts `archive` (a .rock or .src.rock zip) into destDir.
+// Unpack extracts `archive` (a .rock or .src.rock zip) into destDir. Every
+// entry stays inside destDir, a deliberate strictness beyond upstream: an
+// entry reaching above it, or beneath a symlink pointing out of it, fails the
+// unpack with an error wrapping rocks.ErrUnsafePath, an absolute entry name is
+// extracted inside it, as unzip does, and only an entry's permission bits are
+// kept, never setuid, setgid or sticky.
 func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) error {
 	_ = ctx
 
@@ -525,16 +550,14 @@ func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) erro
 
 	defer func() { _ = zr.Close() }()
 
-	cleanDest := filepath.Clean(destDir)
-
 	for _, f := range zr.File {
-		target := filepath.Join(destDir, f.Name)
-		if !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) && target != cleanDest {
-			return fmt.Errorf("rocks.Unpack: entry %q escapes destDir", f.Name)
+		target, err := safepath.Join(destDir, strings.TrimLeft(filepath.FromSlash(f.Name), string(filepath.Separator)))
+		if err != nil {
+			return fmt.Errorf("rocks.Unpack: entry: %w", err)
 		}
 
 		if f.FileInfo().IsDir() {
-			err := os.MkdirAll(target, unpackDirMode)
+			err := safepath.MkdirAll(destDir, target, unpackDirMode)
 			if err != nil {
 				return err
 			}
@@ -542,7 +565,7 @@ func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) erro
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(target), unpackDirMode); err != nil {
+		if err := safepath.MkdirAll(destDir, filepath.Dir(target), unpackDirMode); err != nil {
 			return err
 		}
 
@@ -551,7 +574,7 @@ func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) erro
 			return err
 		}
 
-		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		out, err := safepath.Create(destDir, target, f.Mode().Perm())
 		if err != nil {
 			_ = rc.Close()
 
@@ -734,7 +757,10 @@ func bundledSource(ctx context.Context, spec *rocks.Rockspec, dir string) (strin
 	}
 
 	if file != "" {
-		archive := filepath.Join(dir, file)
+		archive, err := safepath.JoinEntry(dir, file)
+		if err != nil {
+			return "", fmt.Errorf("source.file: %w", err)
+		}
 
 		if fi, err := os.Stat(archive); err == nil && fi.Mode().IsRegular() {
 			res, err := fetch.Sources(ctx, "file://"+archive, filepath.Join(dir, "sources"), fetch.Options{
@@ -818,9 +844,14 @@ func (e *nativeEngine) fetchSource(ctx context.Context, spec *rocks.Rockspec, tm
 //   - Else, use dir as-is (flat layout: a bare module file, or a git/file
 //     checkout whose files already sit at the top level).
 func findSourceBaseDir(dir string, spec *rocks.Rockspec) (string, error) {
-	// (1) explicit source.dir wins when it names an existing subdir.
+	// (1) explicit source.dir wins when it names an existing subdir. Unlike
+	// upstream, it must stay inside dir.
 	if spec.Source.Dir != "" {
-		cand := filepath.Join(dir, spec.Source.Dir)
+		cand, err := safepath.Join(dir, spec.Source.Dir)
+		if err != nil {
+			return "", fmt.Errorf("source.dir: %w", err)
+		}
+
 		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
 			return cand, nil
 		}
@@ -835,8 +866,8 @@ func findSourceBaseDir(dir string, spec *rocks.Rockspec) (string, error) {
 			src = spec.Source.URL
 		}
 
-		if inferred := deduceBaseDir(src); inferred != "" {
-			cand := filepath.Join(dir, inferred)
+		// A guess that is not an entry of dir — "..", say — is no guess.
+		if cand, err := safepath.JoinEntry(dir, deduceBaseDir(src)); err == nil {
 			if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
 				return cand, nil
 			}

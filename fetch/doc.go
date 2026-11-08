@@ -15,6 +15,16 @@
 // Unknown schemes return ErrUnsupportedRockspecFeature wrapped with the
 // scheme name.
 //
+// Everything a fetch writes stays inside destDir, a deliberate strictness
+// beyond upstream: a source.file, a file name from the URL, or a clone
+// directory name that leaves it — absolute, "..", or "." where a file is
+// meant — fails the fetch with an error wrapping rocks.ErrUnsafePath (a
+// clone named ".." is cloned as "repo" instead), and so does an archive
+// entry reaching above destDir or beneath a symlink pointing out of it. An
+// entry with an absolute name is extracted inside destDir, as tar and unzip
+// do. Extraction creates no symlinks and keeps only the permission bits of
+// an entry, never setuid, setgid or sticky.
+//
 // All backends honor ctx for cancellation at the network/transport level
 // — the HTTP request and the go-git clone are ctx-bound. Note that
 // local archive extraction after an HTTP fetch is not interrupted mid-unpack.

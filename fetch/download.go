@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 // File retrieves the single file at rawURL into destDir under the basename
@@ -92,7 +93,10 @@ func copyFileInto(src, destDir string) (string, error) {
 		return "", fmt.Errorf("fetch.File: %q is a directory, not a file", src)
 	}
 
-	dst := filepath.Join(destDir, filepath.Base(src))
+	dst, err := safepath.JoinEntry(destDir, filepath.Base(src))
+	if err != nil {
+		return "", fmt.Errorf("fetch.File: %w", err)
+	}
 
 	// Upstream refuses this outright rather than truncating the file it is
 	// about to read (fs/lua.lua:427). Copying a file onto itself would empty
@@ -124,7 +128,11 @@ func downloadFileInto(ctx context.Context, rawURL, destDir string, opts Options)
 		return "", fmt.Errorf("fetch.File: URL %q names no file", rawURL)
 	}
 
-	dst := filepath.Join(destDir, base)
+	dst, err := safepath.JoinEntry(destDir, base)
+	if err != nil {
+		return "", fmt.Errorf("fetch.File: URL %q: %w", rawURL, err)
+	}
+
 	if err := httpDownload(ctx, rawURL, dst, opts); err != nil {
 		return "", err
 	}

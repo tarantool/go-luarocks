@@ -803,8 +803,7 @@ func TestNativeUnpack_Errors(t *testing.T) {
 	writeZip(t, evil, map[string]string{"../escape.txt": "x"})
 
 	err = r.Unpack(context.Background(), evil, filepath.Join(dest, "out"))
-	require.Error(t, err, "Unpack must reject entries escaping destDir")
-	assert.Contains(t, err.Error(), "escapes destDir", "error text")
+	require.ErrorIs(t, err, rocks.ErrUnsafePath, "Unpack must reject entries escaping destDir")
 }
 
 func TestNativeUnpack_DirectoryEntries(t *testing.T) {

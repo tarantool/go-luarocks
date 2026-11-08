@@ -251,3 +251,9 @@ func DeduceBaseDir(url string) string { return deduceBaseDir(url) }
 
 // SplitNamespacedName exposes splitNamespacedName for the differential tests.
 func SplitNamespacedName(arg string) (string, string) { return splitNamespacedName(arg) }
+
+// BundledSource exposes bundledSource for the containment tests.
+var BundledSource = bundledSource
+
+// CopyBackFiles exposes copyBackFiles for the containment tests.
+var CopyBackFiles = copyBackFiles
