@@ -412,12 +412,13 @@ func unzipManifest(body []byte, inner string) ([]byte, error) {
 // error. (Redirects are followed by the underlying http.Client, so 3xx
 // responses are not normally seen here.)
 func (h *HTTPRemoteIndex) get(ctx context.Context, rawURL string) ([]byte, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	if _, err := url.Parse(rawURL); err != nil {
 		return nil, fmt.Errorf("parse url: %w", err)
 	}
 
-	client := &http.Client{Transport: transport.For(u.Host, h.InsecureServers), Timeout: httpClientTimeout}
+	// Each redirect hop is verified unless its own host is insecure, and
+	// none goes from https to http (transport.NewClient).
+	client := transport.NewClient(h.InsecureServers, httpClientTimeout, 0)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {

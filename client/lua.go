@@ -142,12 +142,6 @@ type luaEngine struct {
 	// VM the old reuse model did.
 	pool chan *lua.LState
 
-	// warming tracks the background warm-up started by acquire. release waits
-	// on it, so no warm-up outlives the dispatch that triggered it: warming
-	// shells out (cfg.init runs uname and friends), and a library must not
-	// leave processes starting after the call it was asked to make returned.
-	warming sync.WaitGroup
-
 	// callImpl, when non-nil, replaces callViaState as the dispatch backend.
 	// It exists solely as a test seam so dispatch tests can assert the exact
 	// argv a method builds (and feed a canned stdout to data-returning
@@ -761,8 +755,9 @@ func (e *luaEngine) warmVM() (*lua.LState, error) {
 // pool has it and warming inline otherwise (a burst of concurrent calls, or the
 // very first call on a cold engine). It then starts warming the NEXT one in the
 // background, so that cost overlaps the dispatch about to run instead of
-// landing on the following call.
-func (e *luaEngine) acquire() (*lua.LState, error) {
+// landing on the following call. warmed is closed once that warm-up is done;
+// the caller hands it to release.
+func (e *luaEngine) acquire() (*lua.LState, <-chan struct{}, error) {
 	var (
 		L   *lua.LState
 		err error
@@ -773,20 +768,23 @@ func (e *luaEngine) acquire() (*lua.LState, error) {
 	default:
 		L, err = e.warmVM()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	e.startWarming()
-
-	return L, nil
+	return L, e.startWarming(), nil
 }
 
 // startWarming prepares a replacement VM concurrently with the dispatch that is
-// about to run. Failures are dropped: nothing is lost, because the next acquire
-// warms inline and reports the error to whoever actually asked for work.
-func (e *luaEngine) startWarming() {
-	e.warming.Go(func() {
+// about to run, and returns a channel closed once it is done. Failures are
+// dropped: nothing is lost, because the next acquire warms inline and reports
+// the error to whoever actually asked for work.
+func (e *luaEngine) startWarming() <-chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
 		warm, err := e.warmVM()
 		if err != nil {
 			// Nothing is lost: the next acquire warms inline and reports the
@@ -799,16 +797,22 @@ func (e *luaEngine) startWarming() {
 		default:
 			warm.Close()
 		}
-	})
+	}()
+
+	return done
 }
 
 // release retires the VM a dispatch ran on. The VM is closed rather than
 // returned to the pool: whatever state the command left in it is exactly what
-// must not reach the next caller. It then waits for the background warm-up, so
-// a returned call leaves no work of ours still running — see the warming field.
-func (e *luaEngine) release(L *lua.LState) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
+// must not reach the next caller. It then waits for the background warm-up its
+// acquire started, warmed, so a returned call leaves no work of ours still
+// running. Each call waits for its own warm-up only: the calls of one client
+// may run concurrently, and a WaitGroup shared by them was waited on by one
+// while another added to it from zero, which the WaitGroup contract forbids
+// and which panicked.
+func (e *luaEngine) release(L *lua.LState, warmed <-chan struct{}) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
 	L.Close()
-	e.warming.Wait()
+	<-warmed
 }
 
 // shellSingleQuote wraps s in single quotes for the POSIX shell. A single
@@ -857,12 +861,12 @@ func (e *luaEngine) call(argv []string) error {
 // captured stdout string is returned so data-returning methods (e.g. Pack) can
 // parse it.
 func (e *luaEngine) callViaState(argv []string) (string, error) {
-	L, err := e.acquire()
+	L, warmed, err := e.acquire()
 	if err != nil {
 		return "", err
 	}
 
-	defer e.release(L)
+	defer e.release(L, warmed)
 
 	var stdout, stderr bytes.Buffer
 
@@ -967,12 +971,12 @@ func quoteLua(s string) string {
 // Exit-code handling matches callViaState: os.exit(0) and a clean return
 // are success, any other code is surfaced as an error.
 func (e *luaEngine) callRaw(progname string, argv []string) error {
-	L, err := e.acquire()
+	L, warmed, err := e.acquire()
 	if err != nil {
 		return err
 	}
 
-	defer e.release(L)
+	defer e.release(L, warmed)
 
 	doErr := L.DoString(dispatchString(wrapperExec, progname, argv))
 	if doErr == nil {

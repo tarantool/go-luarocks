@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	rocks "github.com/tarantool/go-luarocks"
 )
@@ -16,6 +17,10 @@ import (
 // are embedded in the returned error.
 const stderrTailLimit = 4096
 
+// waitDelay bounds how long runCmd waits, once its context is cancelled and
+// the child killed, for the child's output pipes to close.
+const waitDelay = time.Second
+
 // runCmd shells out to `name args...` with the given working directory and
 // extra environment overlay. extraEnv overrides any matching key in
 // os.Environ(). Stdout/stderr are captured; on non-zero exit the returned
@@ -23,14 +28,19 @@ const stderrTailLimit = 4096
 //
 // This is the ONLY entry point in the build/ package that
 // constructs an exec.Cmd, and the entire env path goes through extraEnv —
-// we never os.Setenv. The context is passed via
-// exec.CommandContext so cancellation propagates to the child process
-// group.
+// we never os.Setenv. On unix the child runs in a process group of its own,
+// and cancelling ctx kills that whole group, the compilers a make or cmake
+// started included (killGroupOnCancel); once the child is gone, runCmd
+// waits at most waitDelay for its output to close, so a process that left
+// the group and still holds the pipes cannot keep the call from returning.
 func runCmd(ctx context.Context, name string, args []string, cwd string, extraEnv map[string]string) error {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // name/args are rockspec-derived build tooling, internally controlled
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+
+	killGroupOnCancel(cmd)
+	cmd.WaitDelay = waitDelay
 
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)
 

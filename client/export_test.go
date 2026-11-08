@@ -129,12 +129,12 @@ func (e *LuaEngine) Call(argv []string) error { return e.call(argv) }
 // which is what the config tests read. It is retired afterwards like any other
 // dispatch, so a probe cannot leak state into a later call.
 func (e *LuaEngine) Probe(expr string) (string, error) {
-	L, err := e.acquire()
+	L, warmed, err := e.acquire()
 	if err != nil {
 		return "", err
 	}
 
-	defer e.release(L)
+	defer e.release(L, warmed)
 
 	if err := L.DoString("return " + expr); err != nil {
 		return "", err
@@ -156,12 +156,12 @@ func (e *LuaEngine) Probe(expr string) (string, error) {
 // isolation comes from retiring the VM, so a test that could only pass by
 // clearing state would be testing a mechanism the engine does not have.
 func (e *LuaEngine) Contaminate(stmt string) error {
-	L, err := e.acquire()
+	L, warmed, err := e.acquire()
 	if err != nil {
 		return err
 	}
 
-	defer e.release(L)
+	defer e.release(L, warmed)
 
 	return L.DoString(stmt)
 }

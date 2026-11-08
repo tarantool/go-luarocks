@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tarantool/go-luarocks/fetch"
+	"github.com/tarantool/go-luarocks/internal/transport"
 )
 
 func TestHTTPBackend_DownloadsRaw(t *testing.T) {
@@ -212,6 +213,101 @@ func TestHTTPBackend_UserAgentOverride(t *testing.T) {
 	_, err := fetch.FetchHTTP(context.Background(), srv.URL+"/x", t.TempDir(), fetch.Options{UserAgent: "custom/9"})
 	require.NoError(t, err, "Fetch")
 	assert.Equal(t, "custom/9", seen, "UA")
+}
+
+// redirectingTLSServer is a TLS server, with a certificate no system root
+// signs, that redirects every request to target.
+func redirectingTLSServer(t *testing.T, target string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// bodyServer serves body for every request, over TLS when tls is set.
+func bodyServer(t *testing.T, tls bool, body string) *httptest.Server {
+	t.Helper()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) })
+
+	srv := httptest.NewUnstartedServer(h)
+	if tls {
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
+
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// hostOf is the host:port of a server URL.
+func hostOf(t *testing.T, raw string) string {
+	t.Helper()
+
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+
+	return u.Host
+}
+
+// TestHTTPBackend_InsecureServersPerHop — the transport was picked by the
+// host of the URL asked for, so a host listed in InsecureServers that
+// redirected to another host had that host's certificate go unchecked too,
+// and a redirect from https to plain http was followed. Each hop must be
+// judged by its own host, and the downgrade refused.
+func TestHTTPBackend_InsecureServersPerHop(t *testing.T) {
+	t.Parallel()
+
+	t.Run("redirect to another host is verified", func(t *testing.T) {
+		t.Parallel()
+
+		other := bodyServer(t, true, "unverified")
+		listed := redirectingTLSServer(t, other.URL)
+
+		_, err := fetch.FetchHTTP(context.Background(), listed.URL+"/x.bin", t.TempDir(), fetch.Options{
+			InsecureServers: []string{hostOf(t, listed.URL)},
+		})
+		require.ErrorContains(t, err, "certificate", "the other host's certificate must be verified")
+	})
+
+	t.Run("redirect from https to http is refused", func(t *testing.T) {
+		t.Parallel()
+
+		plain := bodyServer(t, false, "in the clear")
+		listed := redirectingTLSServer(t, plain.URL)
+
+		_, err := fetch.FetchHTTP(context.Background(), listed.URL+"/x.bin", t.TempDir(), fetch.Options{
+			InsecureServers: []string{hostOf(t, listed.URL), hostOf(t, plain.URL)},
+		})
+		require.ErrorIs(t, err, transport.ErrDowngrade)
+	})
+
+	t.Run("redirect from http to a listed https host is followed", func(t *testing.T) {
+		t.Parallel()
+
+		target := bodyServer(t, true, "upgraded")
+
+		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+		}))
+		t.Cleanup(plain.Close)
+
+		dst := t.TempDir()
+		_, err := fetch.FetchHTTP(context.Background(), plain.URL+"/x.bin", dst, fetch.Options{
+			InsecureServers: []string{hostOf(t, plain.URL), hostOf(t, target.URL)},
+		})
+		require.NoError(t, err)
+
+		b, err := os.ReadFile(filepath.Join(dst, "x.bin")) //nolint:gosec // test temp path
+		require.NoError(t, err)
+		assert.Equal(t, "upgraded", string(b))
+	})
 }
 
 func TestHTTPBackend_InsecureServers(t *testing.T) {

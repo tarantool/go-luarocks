@@ -25,9 +25,12 @@ type Config struct {
 	Logger *slog.Logger
 
 	// InsecureServers lists URL hosts (no scheme) for which TLS certificate
-	// verification is skipped by the http fetcher. Escape hatch: upstream
-	// luarocks disables certs for `rocks.tarantool.org`; we ALLOW that opt-in
-	// via this field but default to verifying.
+	// verification is skipped by the native backend's HTTP requests. Escape
+	// hatch: upstream luarocks disables certs for `rocks.tarantool.org`; we
+	// ALLOW that opt-in via this field but default to verifying. It applies
+	// to each request by the request's own host, every redirect hop
+	// included, so a listed host redirecting elsewhere does not lift the
+	// check there; a redirect from https to http is refused.
 	InsecureServers []string
 }
 
