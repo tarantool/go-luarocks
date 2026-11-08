@@ -399,9 +399,9 @@ func compileModule(ctx context.Context, srcDir, destDir, name string, m rocks.Mo
 // <last-dotted-segment>.lua. A shared library keeps its own basename (no
 // forced .so, no rename).
 //
-// tree.Deploy may later re-copy these into the deploy tree; that
-// duplication is acceptable for now and the install dirs win since deploy
-// runs after build.
+// tree.Deploy also reads build.install.lua/lib from the source tree; it
+// deploys each target once whichever of the two copies it reaches first, and
+// the bytes are the same.
 func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 	type sub struct {
 		name     string

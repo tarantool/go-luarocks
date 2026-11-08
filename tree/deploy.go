@@ -1,6 +1,7 @@
 package tree
 
 import (
+	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -15,9 +16,15 @@ import (
 )
 
 // isLua reports whether the file at path parses as Lua source, mirroring
-// upstream fs.is_lua (which probes the file with the interpreter's loadfile).
-// A compiled binary or a shell script fails to parse and is deployed verbatim
-// rather than wrapped in a Lua-interpreter launcher.
+// upstream fs.is_lua (fs/lua.lua:1179), which probes the file with the
+// configured interpreter's loadfile. A compiled binary or a shell script fails
+// to parse and is deployed verbatim rather than wrapped in a Lua-interpreter
+// launcher.
+//
+// loadfile skips a first line that starts with '#' (luaL_loadfile; LuaJIT's
+// lexer, which Tarantool's loadfile uses, skips the "#!" line the same way), so
+// a "#!/usr/bin/env tarantool" script is Lua and upstream wraps it. The parser
+// here sees the same chunk, as gopher-lua's own LoadFile does.
 func isLua(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -26,7 +33,26 @@ func isLua(path string) bool {
 
 	defer func() { _ = f.Close() }()
 
-	_, err = parse.Parse(f, path)
+	r := bufio.NewReader(f)
+
+	if first, err := r.Peek(1); err == nil && first[0] == '#' {
+		// Drop the line up to, not including, its newline, so the parser keeps
+		// the line count loadfile reports.
+		for {
+			b, err := r.ReadByte()
+			if err != nil {
+				break // the whole file was the '#' line: an empty chunk
+			}
+
+			if b == '\n' {
+				_ = r.UnreadByte()
+
+				break
+			}
+		}
+	}
+
+	_, err = parse.Parse(r, path)
 
 	return err == nil
 }
@@ -74,7 +100,11 @@ const (
 //     in the rock_manifest; see copyTree).
 //
 // Collisions with previously-deployed versions are handled via munged
-// filenames; see conflicts.go.
+// filenames; see conflicts.go. A file more than one stage reaches — a
+// build.modules entry the builtin backend also staged under buildDir/lua — is
+// deployed once, by the first stage to reach it (see spots), except that
+// build.install.lua/lib overwrites a build.modules file at the same path, as
+// upstream's install_files overwrites the backend's.
 //
 // Deploy is a linear pipeline: each numbered stage below handles one rock
 // artifact section (rockspec, build.modules, build.install.*, copy_directories,
@@ -106,11 +136,15 @@ func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.Roc
 		return nil, err
 	}
 
-	if err := t.deployModules(spec, srcDir, buildDir, rm); err != nil {
+	// Every lua/lib target is resolved once per Deploy, however many stages
+	// reach it (see spots).
+	claimed := spots{}
+
+	if err := t.deployModules(spec, srcDir, buildDir, rm, claimed); err != nil {
 		return nil, err
 	}
 
-	if err := t.deployInstallModulePaths(spec, srcDir, rm); err != nil {
+	if err := t.deployInstallModulePaths(spec, srcDir, rm, claimed); err != nil {
 		return nil, err
 	}
 
@@ -126,7 +160,7 @@ func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.Roc
 		return nil, err
 	}
 
-	if err := t.deployInstalledSubtrees(spec, buildDir, rm); err != nil {
+	if err := t.deployInstalledSubtrees(spec, buildDir, rm, claimed); err != nil {
 		return nil, err
 	}
 
@@ -163,7 +197,7 @@ func (t *Tree) deployRockspec(spec *rocks.Rockspec, rm *rocks.RockManifest) erro
 
 // deployModules (stage 1) copies each build.modules entry into the shared
 // lua/lib deploy dirs, resolving collisions and recording each md5 in rm.
-func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *rocks.RockManifest) error {
+func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *rocks.RockManifest, claimed spots) error {
 	for modName, mod := range spec.Build.Modules {
 		srcPath, dstPath, kind, err := resolveModule(srcDir, buildDir, modName, mod, t.Paths)
 		if err != nil {
@@ -179,7 +213,7 @@ func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *
 
 		item := pathToModule(filepath.ToSlash(plainRel))
 
-		finalPath, err := t.resolveSpot(deployDir, dstPath, item, spec.Package, spec.Version)
+		finalPath, _, err := claimed.claim(t, deployDir, dstPath, item, spec.Package, spec.Version)
 		if err != nil {
 			return err
 		}
@@ -228,7 +262,7 @@ func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *
 //   - bin, conf → is_module_path=false: the key is a literal slash path; the
 //     destination is dir_name(key)/base_name(key), which filepath.Join
 //     reproduces directly (see deployInstallConf / deployInstallBin).
-func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest) error {
+func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest, claimed spots) error {
 	type instGroup struct {
 		entries      map[string]string
 		dir          string
@@ -253,7 +287,9 @@ func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm 
 
 			item := pathToModule(filepath.ToSlash(plainRel))
 
-			dst, err = t.resolveSpot(g.dir, dst, item, spec.Package, spec.Version)
+			// A target stage 1 already deployed is overwritten in place: upstream
+			// install_files runs after the backend and wins (build.lua:412-423).
+			dst, _, err = claimed.claim(t, g.dir, dst, item, spec.Package, spec.Version)
 			if err != nil {
 				return err
 			}
@@ -420,6 +456,7 @@ func (t *Tree) deployInstalledSubtrees(
 	spec *rocks.Rockspec,
 	buildDir string,
 	rm *rocks.RockManifest,
+	claimed spots,
 ) error {
 	roots := []struct {
 		dir  string
@@ -449,7 +486,7 @@ func (t *Tree) deployInstalledSubtrees(
 		} {
 			src := filepath.Join(root.dir, sub.kind)
 
-			err := t.deployInstalledSubtree(src, sub.deployDir, sub.mode, sub.rmMap, spec, root.disp)
+			err := t.deployInstalledSubtree(src, sub.deployDir, sub.mode, sub.rmMap, spec, root.disp, claimed)
 			if err != nil {
 				return fmt.Errorf("tree.Deploy: scan installed %s subtree: %w", sub.kind, err)
 			}
@@ -524,6 +561,7 @@ func (t *Tree) deployInstalledSubtree(
 	rmMap map[string]string,
 	spec *rocks.Rockspec,
 	disp srcDisposition,
+	claimed spots,
 ) error {
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
@@ -546,22 +584,28 @@ func (t *Tree) deployInstalledSubtree(
 
 		item := pathToModule(filepath.ToSlash(rel))
 
-		dst, err := t.resolveSpot(deployDir, filepath.Join(deployDir, rel), item, spec.Package, spec.Version)
+		dst, first, err := claimed.claim(t, deployDir, filepath.Join(deployDir, rel), item, spec.Package, spec.Version)
 		if err != nil {
 			return err
 		}
 
-		sum, err := copyFile(p, dst, mode)
-		if err != nil {
-			return err
-		}
+		// A target an earlier stage deployed is that stage's: the builtin
+		// backend staged the very file stage 1 or 2 deployed from the source
+		// tree, and upstream's install_files overwrites the backend's copy
+		// before the single deploy pass (build.lua:412-423, repos.lua:488-541).
+		if first {
+			sum, err := copyFile(p, dst, mode)
+			if err != nil {
+				return err
+			}
 
-		r, err := filepath.Rel(deployDir, dst)
-		if err != nil {
-			return err
-		}
+			r, err := filepath.Rel(deployDir, dst)
+			if err != nil {
+				return err
+			}
 
-		rmMap[filepath.ToSlash(r)] = sum
+			rmMap[filepath.ToSlash(r)] = sum
+		}
 
 		if disp == moveSource {
 			if err := os.Remove(p); err != nil {
@@ -625,8 +669,18 @@ func resolveModule(srcDir, buildDir, modName string, mod rocks.Module, p Paths) 
 		ext := strings.ToLower(filepath.Ext(mod.Path))
 		switch ext {
 		case ".lua":
+			// An init.lua source keeps its name under the module's directory
+			// unless the module name already ends in ".init" (builtin.lua:298-
+			// 306): ["foo"] = "src/foo/init.lua" deploys foo/init.lua, not
+			// foo.lua. The builtin backend stages it there too (build/builtin.go
+			// installLuaModule), so both copies resolve to the same target.
 			src = filepath.Join(srcDir, mod.Path)
 			dst = filepath.Join(p.DeployLuaDir(), slashName+".lua")
+
+			if filepath.Base(mod.Path) == "init.lua" && !strings.HasSuffix(modName, ".init") {
+				dst = filepath.Join(p.DeployLuaDir(), slashName, "init.lua")
+			}
+
 			kind = kindLua
 		case ".so", ".dylib":
 			// Tarantool/upstream luarocks deploy compiled modules with the

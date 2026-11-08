@@ -10,9 +10,11 @@ package client_test
 // The parity claim is about DEPLOYED ARTIFACTS, not manifest
 // byte-formatting: native writes its own manifest, lua writes upstream's, and
 // those `manifest` files legitimately differ in formatting/ordering. So the
-// hard assertions are scoped to the deployed Lua module files and the read-path
+// hard assertions are scoped to the deployed artifacts (every file outside
+// share/tarantool/rocks/, as in parity_extra_test.go) and the read-path
 // projections (List/Which); manifest-formatting and engine-specific extra files
-// (e.g. upstream's rock_manifest) are logged as documented differences.
+// under share/tarantool/rocks/ (e.g. upstream's rock_manifest) are logged as
+// documented differences.
 //
 // Build-tagged off by default; run with `-tags integration_luaengine`.
 
@@ -131,27 +133,28 @@ build = {
 	mapA := treeDigest(t, treeA)
 	mapB := treeDigest(t, treeB)
 
-	// (a) Deployed Lua module files under share/tarantool/ must be byte-equal.
-	// These are the artifacts the parity claim is about. We assert on every
-	// share/tarantool/*.lua present in EITHER tree: missing-in-one is a failure,
-	// and a content mismatch is the real-finding case.
+	// (a) Deployed artifacts must be byte-equal. These are the files the parity
+	// claim is about. We assert on every file outside share/tarantool/rocks/
+	// present in EITHER tree — not only the *.lua modules, so a stray file such
+	// as a <module>.lua~ backup counts: missing-in-one is a failure, and a
+	// content mismatch is the real-finding case.
 	deployed := map[string]struct{}{}
-	collectDeployedModules(mapA, deployed)
-	collectDeployedModules(mapB, deployed)
-	require.NotEmpty(t, deployed, "no deployed share/tarantool/*.lua module artifacts found in either tree; native=%v lua=%v",
+	collectDeployedArtifacts(mapA, deployed)
+	collectDeployedArtifacts(mapB, deployed)
+	require.NotEmpty(t, deployed, "no deployed artifacts found in either tree; native=%v lua=%v",
 		sortedKeys(setOf(mapA)), sortedKeys(setOf(mapB)))
 	for rel := range deployed {
 		dA, inA := mapA[rel]
 		dB, inB := mapB[rel]
 		switch {
 		case !inA:
-			t.Errorf("deployed module %q present in lua tree but missing in native tree", rel)
+			t.Errorf("deployed artifact %q present in lua tree but missing in native tree", rel)
 		case !inB:
-			t.Errorf("deployed module %q present in native tree but missing in lua tree", rel)
+			t.Errorf("deployed artifact %q present in native tree but missing in lua tree", rel)
 		case dA != dB:
 			// Genuine artifact-level divergence — the artifact-divergence case. Surface the
 			// digests so the dispatcher can decide fix-native vs revise-scope.
-			t.Errorf("ARTIFACT DIVERGENCE: deployed module %q differs between backends: native md5=%s lua md5=%s", rel, dA, dB)
+			t.Errorf("ARTIFACT DIVERGENCE: deployed artifact %q differs between backends: native md5=%s lua md5=%s", rel, dA, dB)
 		}
 	}
 
@@ -251,18 +254,12 @@ func treeDigest(t *testing.T, root string) map[string]string {
 	return out
 }
 
-// collectDeployedModules adds every share/tarantool/*.lua entry (the deployed
-// Lua modules, excluding the rocks/ bookkeeping subtree) into dst.
-func collectDeployedModules(m map[string]string, dst map[string]struct{}) {
+// collectDeployedArtifacts adds every deployed artifact — any entry outside
+// the share/tarantool/rocks/ bookkeeping subtree — into dst.
+func collectDeployedArtifacts(m map[string]string, dst map[string]struct{}) {
 	for rel := range m {
-		if !strings.HasSuffix(rel, ".lua") {
-			continue
-		}
-		if !strings.HasPrefix(rel, "share/tarantool/") {
-			continue
-		}
 		if strings.HasPrefix(rel, "share/tarantool/rocks/") {
-			continue // bookkeeping subtree, not a deployed module
+			continue // bookkeeping subtree, not a deployed artifact
 		}
 		dst[rel] = struct{}{}
 	}
