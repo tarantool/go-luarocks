@@ -4,9 +4,12 @@ package transport
 
 import (
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // maxDrain bounds how much of an unwanted response body Drain reads to hand
@@ -38,6 +41,52 @@ func For(host string, insecure []string) *http.Transport {
 	}
 
 	return verifying
+}
+
+// defaultMaxRedirects is how many redirects net/http follows by default.
+const defaultMaxRedirects = 10
+
+// ErrDowngrade is the error a redirect from https to plain http fails with.
+var ErrDowngrade = errors.New("refusing to follow a redirect from https to http")
+
+// NewClient returns the HTTP client of a request to a rock server or a
+// source URL. Every request it sends, each hop of a redirect included, goes
+// through the transport For picks for that request's own host, so a host
+// listed in insecure skips certificate verification for its own requests
+// only: a redirect from it to another host is verified. It refuses a
+// redirect from https to plain http, which would send in the clear what was
+// asked for over TLS, follows at most maxRedirects redirects (net/http's 10
+// for 0), and gives up on a request after timeout.
+func NewClient(insecure []string, timeout time.Duration, maxRedirects int) *http.Client {
+	if maxRedirects <= 0 {
+		maxRedirects = defaultMaxRedirects
+	}
+
+	return &http.Client{
+		Transport: hops(insecure),
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxRedirects)
+			}
+
+			from := via[len(via)-1].URL
+			if strings.EqualFold(from.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return fmt.Errorf("%w: %s to %s", ErrDowngrade, from.Redacted(), req.URL.Redacted())
+			}
+
+			return nil
+		},
+	}
+}
+
+// hops is the round tripper of NewClient: it sends each request through the
+// transport For picks for the request's own host.
+type hops []string
+
+// RoundTrip implements http.RoundTripper.
+func (insecure hops) RoundTrip(req *http.Request) (*http.Response, error) {
+	return For(req.URL.Host, insecure).RoundTrip(req)
 }
 
 // Drain reads what is left of a response body, up to maxDrain, so that

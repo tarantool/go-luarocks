@@ -30,7 +30,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   directory without unpacking it (upstream `download.lua`'s `get_file`).
 - fetch, remote: HTTP requests share process-wide transports, cloned from
   `http.DefaultTransport`, so connections are reused and `HTTP_PROXY`,
-  `HTTPS_PROXY` and `NO_PROXY` are honoured.
+  `HTTPS_PROXY` and `NO_PROXY` are honoured. A host in `InsecureServers`
+  skips certificate verification for its own requests only, each redirect
+  hop judged by its own host, and a redirect from https to http fails.
 - fetch: Everything a fetch writes stays inside its destination: a
   `source.file`, a URL file name or a clone directory that leaves it fails
   with `rocks.ErrUnsafePath`, and so does an archive entry reaching above it
@@ -65,25 +67,27 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `make` and `cmake` backends install into the rock's install dir, as
   upstream's `$(PREFIX)`, `$(LUADIR)`, … name it; `cmake` builds out of tree
   in `build.luarocks` and installs under the rock's `$(PREFIX)` when the
-  rockspec sets no `CMAKE_INSTALL_PREFIX`. The `builtin` backend reads only
-  inside the sources and writes only inside its build dir. Before any
-  backend runs, a rockspec's `build.extra_files` are written into the
-  sources and its `build.patches` applied, by a port of upstream's
+  rockspec sets no `CMAKE_INSTALL_PREFIX`. On unix every build tool runs in
+  a process group of its own, which cancelling the build's context kills
+  whole, the compilers a `make` started included. The `builtin` backend
+  reads only inside the sources and writes only inside its build dir.
+  Before any backend runs, a rockspec's `build.extra_files` are written
+  into the sources and its `build.patches` applied, by a port of upstream's
   `luarocks/tools/patch.lua` checked against it, letting a patch create and
-  delete files for `rockspec_format` 3.0, and the sources are marked so that
-  a second build of them applies nothing again; a name that leaves the
-  sources fails with `rocks.ErrUnsafePath`. The
-  `cfg.variables` upstream sets on unix expand to their values: `$(LD)`
-  (the compiler), `$(AR)`, `$(RANLIB)`, `$(LDFLAGS)`, `$(LIB_EXTENSION)`
-  (`so`), `$(OBJ_EXTENSION)` (`o`), `$(TEST)` and the tool names
-  (`$(CP)`, `$(MKDIR)`, …), and `$(LUA)` without a configured executable
-  to `tarantool` in `LUA_BINDIR`. Each of a
-  rockspec's `external_dependencies` is looked up as upstream's
-  `check_external_deps` does, under `/usr/local`, `/usr`, `/` and the
-  Tarantool prefix, and its `$(<NAME>_DIR)`, `$(<NAME>_INCDIR)`,
-  `$(<NAME>_LIBDIR)` and `$(<NAME>_BINDIR)` name where it was found; one
-  found nowhere does not fail the build, unlike upstream, and gets the
-  directories under `/usr/local`.
+  delete files for `rockspec_format` 3.0, and the sources are marked so
+  that a second build of them applies nothing again; a name that leaves
+  the sources fails with `rocks.ErrUnsafePath`. The `cfg.variables`
+  upstream sets on unix expand to their values: `$(LD)` (the compiler),
+  `$(AR)`, `$(RANLIB)`, `$(LDFLAGS)`, `$(LIB_EXTENSION)` (`so`),
+  `$(OBJ_EXTENSION)` (`o`), `$(TEST)` and the tool names (`$(CP)`,
+  `$(MKDIR)`, …), and `$(LUA)` without a configured executable to
+  `tarantool` in `LUA_BINDIR`. Each of a rockspec's `external_dependencies`
+  is looked up as upstream's `check_external_deps` does, under
+  `/usr/local`, `/usr`, `/` and the Tarantool prefix, and its
+  `$(<NAME>_DIR)`, `$(<NAME>_INCDIR)`, `$(<NAME>_LIBDIR)` and
+  `$(<NAME>_BINDIR)` name where it was found; one found nowhere does not
+  fail the build, unlike upstream, and gets the directories under
+  `/usr/local`.
 - remote: Indexes for rock servers that are HTTP(S) endpoints or local
   directories (`/srv/rocks` or `file:///srv/rocks`) — the offline case
   upstream serves with `luarocks --only-server=/path/to/repo`. `NewIndex`
@@ -144,9 +148,11 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `rock_manifest`, so they list the modules and commands of `cmake`, `make`
   and `command` rocks too, and their provider lists keep upstream's order.
   Each rock's resolved `dependencies` are recorded when it is deployed, from
-  its direct dependencies.
+  its direct dependencies, each at the newest installed version its
+  constraints accept.
 - client: The lua backend runs each operation in its own VM, so no state
-  carries over between calls. It honours `Config.Servers`, reads
+  carries over between calls, and one client may be used from several
+  goroutines at once. It honours `Config.Servers`, reads
   `/etc/luarocks/config-5.1.lua` (`LUAROCKS_SYSCONFDIR` overrides it), and
   loads Lua modules only from its embedded copy and the rock trees, never
   from the current directory, `$LUA_PATH` or system directories. The error

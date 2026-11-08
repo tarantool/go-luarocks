@@ -1,6 +1,8 @@
 package client_test
 
 import (
+	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -25,6 +27,52 @@ func luaTestCfg(t *testing.T) rocks.Config {
 	return rocks.Config{
 		Tree:       dir,
 		WorkingDir: dir,
+	}
+}
+
+// TestLuaEngine_ConcurrentCalls — one client used from many goroutines: each
+// call takes a VM and starts warming the next one in the background, and
+// waits for that warm-up when it returns. The calls shared one WaitGroup for
+// those warm-ups, so one call's Wait ran while another's acquire added to it
+// from zero, which the WaitGroup contract forbids and which panics with
+// "WaitGroup is reused before previous Wait has returned". Every call must
+// return its own result, and none may panic.
+func TestLuaEngine_ConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
+	const (
+		goroutines = 16
+		calls      = 50
+	)
+
+	e := client.NewLuaEngine(luaTestCfg(t), manif.FileStore{}, nil)
+
+	var wg sync.WaitGroup
+
+	errs := make(chan error, goroutines*calls)
+
+	for g := range goroutines {
+		wg.Go(func() {
+			for i := range calls {
+				want := g*calls + i
+
+				got, err := e.Probe(strconv.Itoa(want))
+				if err == nil && got != strconv.Itoa(want) {
+					err = fmt.Errorf("probe %d returned %s", want, got)
+				}
+
+				if err != nil {
+					errs <- err
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

@@ -527,10 +527,13 @@ func compareProviders(a, b string) int {
 
 // resolveInstalledDeps builds the per-entry repo.dependencies map (name →
 // installed version) for a rock, mirroring upstream scan_deps' observable
-// output: each of the rock's declared dependencies is resolved to a version
-// already present in the tree manifest's repository. Dependencies not (yet)
-// installed are omitted; the self-entry never appears. Always returns a
-// non-nil map so the manifest carries `dependencies = {}` for a dep-less rock.
+// output: each of the rock's declared dependencies is resolved to the newest
+// version present in the tree manifest's repository that satisfies its
+// constraints, in deps version order, as upstream match_dep picks it.
+// Dependencies with no such version (not yet installed, or installed at
+// versions the constraints exclude) are omitted; the self-entry never
+// appears. Always returns a non-nil map so the manifest carries
+// `dependencies = {}` for a dep-less rock.
 //
 // It is computed once, when the rock is deployed, and the entries of the
 // other rocks are left as they are, where upstream recomputes every entry,
@@ -543,21 +546,25 @@ func resolveInstalledDeps(spec *rocks.Rockspec, m *rocks.Manifest) map[string]st
 			continue
 		}
 
-		versions, ok := m.Repository[d.Name]
-		if !ok || len(versions) == 0 {
-			continue
-		}
+		var (
+			best rocks.Version
+			have bool
+		)
 
-		// Pick a deterministic installed version (highest by string order is a
-		// reasonable stand-in; the resolver has already ensured one satisfies).
-		best := ""
-		for ver := range versions {
-			if ver > best {
-				best = ver
+		for ver := range m.Repository[d.Name] {
+			v, err := deps.ParseVersion(ver)
+			if err != nil || !deps.Match(v, d.Constraints) {
+				continue
+			}
+
+			if !have || deps.Compare(v, best) > 0 {
+				best, have = v, true
 			}
 		}
 
-		out[d.Name] = best
+		if have {
+			out[d.Name] = best.Raw
+		}
 	}
 
 	return out

@@ -52,10 +52,10 @@ type httpBackend struct{}
 // Fetch performs the GET, writes the body to a temp file under destDir,
 // then unpacks if the URL's file extension indicates a supported archive.
 //
-// TLS verification is enabled by default. If the host appears in
-// opts.InsecureServers, a Transport with InsecureSkipVerify=true is used
-// instead — opt-in for tarantool's rocks server which historically
-// served over HTTP without TLS.
+// TLS certificates are verified, except for a request — each redirect hop
+// judged by its own host — to a host opts.InsecureServers lists: the opt-in
+// for tarantool's rocks server, whose certificate upstream distrusts too. A
+// redirect from https to http fails.
 func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Options) (Result, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -111,12 +111,11 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 // place only once it is complete, so an interrupted transfer never leaves a
 // truncated artifact under a name a later run would trust.
 func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
-	u, err := url.Parse(rawURL)
-	if err != nil {
+	if _, err := url.Parse(rawURL); err != nil {
 		return fmt.Errorf("fetch.http: parse %q: %w", rawURL, err)
 	}
 
-	client := buildHTTPClient(u.Host, opts)
+	client := buildHTTPClient(opts)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -214,18 +213,11 @@ func unpackArchive(path, destDir string) error {
 	return nil
 }
 
-func buildHTTPClient(host string, opts Options) *http.Client {
-	return &http.Client{
-		Transport: transport.For(host, opts.InsecureServers),
-		Timeout:   httpClientTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
-				return fmt.Errorf("stopped after %d redirects", maxRedirects)
-			}
-
-			return nil
-		},
-	}
+// buildHTTPClient returns the client of a download: each request, every
+// redirect hop included, is verified unless its own host is one of
+// opts.InsecureServers, and a redirect from https to http fails.
+func buildHTTPClient(opts Options) *http.Client {
+	return transport.NewClient(opts.InsecureServers, httpClientTimeout, maxRedirects)
 }
 
 // entryPath is the path the archive entry name extracts to under dst: inside

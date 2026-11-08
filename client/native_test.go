@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/deps"
 	"github.com/tarantool/go-luarocks/tree"
 )
 
@@ -166,28 +167,41 @@ func TestManifestProviders_KeepsModulesAndCommandsApart(t *testing.T) {
 }
 
 // TestResolveInstalledDeps pins go-luarocks' own per-entry repo.dependencies:
-// the rock's direct dependencies, each at the installed version with the
-// greatest string (not the newest version its constraint accepts, as upstream
-// scan_deps picks it), without the rock itself or what is not installed.
+// the rock's direct dependencies, each at the newest installed version its
+// constraints accept, without the rock itself or what is not installed. It
+// picked the installed version with the greatest string instead, so "1.6-1"
+// beat "1.10-1", and a version the constraint excludes was recorded.
 func TestResolveInstalledDeps(t *testing.T) {
 	t.Parallel()
 
 	m := &rocks.Manifest{
 		Repository: map[string]map[string]rocks.RepoEntry{
-			"lib":  {"1.5-1": {Arch: "installed"}, "1.6-1": {Arch: "installed"}},
-			"self": {"2.0-1": {Arch: "installed"}},
+			"lib":     {"1.5-1": {Arch: "installed"}, "1.6-1": {Arch: "installed"}, "1.10-1": {Arch: "installed"}},
+			"pinned":  {"1.5-1": {Arch: "installed"}, "2.0-1": {Arch: "installed"}, "bad": {Arch: "installed"}},
+			"toonew":  {"3.0-1": {Arch: "installed"}},
+			"self":    {"2.0-1": {Arch: "installed"}},
+			"bounded": {"1.9-1": {Arch: "installed"}, "1.10-1": {Arch: "installed"}, "2.0-1": {Arch: "installed"}},
 		},
+	}
+	constraints := func(s string) []rocks.VersionConstraint {
+		cs, err := deps.ParseConstraints(s)
+		require.NoError(t, err)
+
+		return cs
 	}
 	spec := &rocks.Rockspec{
 		Package: "self",
 		Dependencies: []rocks.Dep{
-			{Name: "lib"},          // installed → resolves to highest (1.6-1)
+			{Name: "lib"}, // newest by version order: 1.10-1
+			{Name: "pinned", Constraints: constraints("< 2.0")},        // 2.0-1 is excluded
+			{Name: "toonew", Constraints: constraints("~> 2")},         // nothing satisfies → omitted
+			{Name: "bounded", Constraints: constraints(">= 1.9, < 2")}, // 1.10-1
 			{Name: "self"},         // self → excluded
 			{Name: "notinstalled"}, // absent → omitted
 		},
 	}
 	got := client.ResolveInstalledDeps(spec, m)
-	assert.Equal(t, map[string]string{"lib": "1.6-1"}, got)
+	assert.Equal(t, map[string]string{"lib": "1.10-1", "pinned": "1.5-1", "bounded": "1.10-1"}, got)
 }
 
 func TestRemoveProvider(t *testing.T) {
