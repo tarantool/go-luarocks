@@ -61,6 +61,8 @@ import (
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/build"
 	luarocksembed "github.com/tarantool/go-luarocks/internal/luarocks"
+	"github.com/tarantool/go-luarocks/internal/treelock"
+	"github.com/tarantool/go-luarocks/tree"
 	lua "github.com/yuin/gopher-lua"
 	"github.com/yuin/gopher-lua/parse"
 )
@@ -1228,6 +1230,43 @@ func (e *luaEngine) globalArgs(servers []string) []string {
 	return argv
 }
 
+// dispatchLocked runs argv as dispatch does, holding the exclusive lock of
+// e.cfg.Tree that the native backend and tree.Tree.Update take (see package
+// internal/treelock), so a typed write of the lua backend and a change to the
+// tree through them never run at once. It waits for the lock until ctx ends,
+// and fails then with an error wrapping tree.ErrLocked.
+//
+// When create is set and the tree's root exists, its rocks dir is created
+// first, as the write would. A tree whose rocks dir does not exist then, or
+// whose lock cannot be taken for another reason, such as a read-only file
+// system, is written unlocked: upstream reports what the write cannot do.
+func (e *luaEngine) dispatchLocked(ctx context.Context, create bool, argv []string) error {
+	dir := tree.Paths{Tree: e.cfg.Tree}.RocksDir()
+
+	if _, err := os.Stat(e.cfg.Tree); err == nil && create {
+		_ = os.MkdirAll(dir, luaTreeDirMode)
+	}
+
+	if _, err := os.Stat(dir); err == nil {
+		lock, err := treelock.Exclusive(ctx, dir)
+
+		switch {
+		case err == nil:
+			defer lock.Unlock()
+		case errors.Is(err, treelock.ErrBusy):
+			return fmt.Errorf("luaEngine: %w: %w", tree.ErrLocked, err)
+		}
+	}
+
+	_, err := e.dispatch(argv)
+
+	return err
+}
+
+// luaTreeDirMode is the mode dispatchLocked creates a missing rocks dir with,
+// the one the native backend gives the directories of a tree.
+const luaTreeDirMode = 0o750
+
 // depsModeArg maps a DepsPolicy to upstream's --deps-mode choices
 // {all, one, order, none}. DepsAll→"all", DepsNone→"none". DepsOnlyNew has no
 // exact upstream equivalent; "order" (use the current tree plus those below it
@@ -1258,9 +1297,8 @@ func (e *luaEngine) Install(ctx context.Context, name string, opts InstallOpts) 
 	}
 
 	argv = append(argv, "--deps-mode", depsModeArg(opts.Deps))
-	_, err := e.dispatch(argv)
 
-	return err
+	return e.dispatchLocked(ctx, true, argv)
 }
 
 // Build runs `luarocks build`. BuildOpts.Keep is passed as --keep, which
@@ -1275,9 +1313,7 @@ func (e *luaEngine) Build(ctx context.Context, specPath string, opts BuildOpts) 
 		argv = append(argv, "--keep")
 	}
 
-	_, err := e.dispatch(argv)
-
-	return err
+	return e.dispatchLocked(ctx, true, argv)
 }
 
 func (e *luaEngine) Make(ctx context.Context, opts MakeOpts) error {
@@ -1289,9 +1325,7 @@ func (e *luaEngine) Make(ctx context.Context, opts MakeOpts) error {
 		argv = append(argv, opts.RockspecPath)
 	}
 
-	_, err := e.dispatch(argv)
-
-	return err
+	return e.dispatchLocked(ctx, true, argv)
 }
 
 func (e *luaEngine) Pack(ctx context.Context, target string, opts PackOpts) (string, error) {
@@ -1354,9 +1388,8 @@ func (e *luaEngine) Remove(ctx context.Context, name string, opts RemoveOpts) er
 	}
 
 	argv = append(argv, "--deps-mode", depsModeArg(opts.Deps))
-	_, err := e.dispatch(argv)
 
-	return err
+	return e.dispatchLocked(ctx, false, argv)
 }
 
 // Purge runs `luarocks purge` against the engine's tree (the mandatory --tree
@@ -1378,9 +1411,7 @@ func (e *luaEngine) Purge(ctx context.Context, opts PurgeOpts) error {
 		argv = append(argv, "--force-fast")
 	}
 
-	_, err := e.dispatch(argv)
-
-	return err
+	return e.dispatchLocked(ctx, false, argv)
 }
 
 // Search runs `luarocks search --porcelain` and parses the tab-separated

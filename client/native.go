@@ -222,7 +222,7 @@ func (e *nativeEngine) resolvePlan(
 
 	// Only Config.Tree is consulted: a rock installed in another rock tree
 	// does not satisfy a dependency, whatever opts.Deps says.
-	if lookup, lerr := e.installedLookup(); lerr == nil {
+	if lookup, lerr := e.installedLookup(ctx); lerr == nil {
 		resolveOpts = append(resolveOpts, deps.WithInstalled(lookup))
 	}
 
@@ -801,7 +801,7 @@ func (e *nativeEngine) installArtifact(ctx context.Context, fetched *artifacts, 
 			return err
 		}
 
-		return e.deployBinary(step.Rockspec, dir)
+		return e.deployBinary(ctx, step.Rockspec, dir)
 	case sourceRockArtifact:
 		dir, err := e.fetchArtifact(ctx, fetched, step.URL)
 		if err != nil {
@@ -1049,13 +1049,13 @@ func wrapBinScripts(spec *rocks.Rockspec) bool {
 // installedLookup returns a deps.InstalledLookup over the current tree
 // manifest's repository — the installed versions of a rock name — so the
 // resolver can skip dependencies already satisfied by an installed rock.
-func (e *nativeEngine) installedLookup() (deps.InstalledLookup, error) {
-	t, err := tree.Open(e.cfg)
+func (e *nativeEngine) installedLookup(ctx context.Context) (deps.InstalledLookup, error) {
+	t, err := e.openTree()
 	if err != nil {
 		return nil, err
 	}
 
-	m, err := e.readTreeManifest(t)
+	v, err := t.View(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1063,9 +1063,9 @@ func (e *nativeEngine) installedLookup() (deps.InstalledLookup, error) {
 	return func(name string) []rocks.Version {
 		var out []rocks.Version
 
-		for verStr := range m.Repository[name] {
-			if v, verr := deps.ParseVersion(verStr); verr == nil {
-				out = append(out, v)
+		for _, verStr := range v.Versions(name) {
+			if ver, verr := deps.ParseVersion(verStr); verr == nil {
+				out = append(out, ver)
 			}
 		}
 
@@ -1073,41 +1073,10 @@ func (e *nativeEngine) installedLookup() (deps.InstalledLookup, error) {
 	}, nil
 }
 
-// readTreeManifest loads the tree-level manifest, returning a fresh (empty)
-// one with initialized maps when none exists yet.
-func (e *nativeEngine) readTreeManifest(t *tree.Tree) (*rocks.Manifest, error) {
-	m, err := e.store.ReadTree(t.RocksDir())
-	if err != nil {
-		if !os.IsNotExist(unwrapPathErr(err)) {
-			return nil, fmt.Errorf("read tree manifest: %w", err)
-		}
-
-		m = &rocks.Manifest{}
-	}
-
-	if m.Repository == nil {
-		m.Repository = map[string]map[string]rocks.RepoEntry{}
-	}
-
-	if m.Modules == nil {
-		m.Modules = map[string][]string{}
-	}
-
-	if m.Commands == nil {
-		m.Commands = map[string][]string{}
-	}
-
-	if m.Dependencies == nil {
-		m.Dependencies = map[string]map[string][]rocks.Dep{}
-	}
-
-	return m, nil
-}
-
 // deployFromSource builds spec from the sources in srcDir and deploys the
 // result.
 func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspec, srcDir string) error {
-	return e.deployRock(spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
+	return e.deployRock(ctx, spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
 		destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
 		if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
 			return nil, fmt.Errorf("mkdir destDir: %w", err)
@@ -1129,13 +1098,13 @@ func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspe
 
 // deployBinary deploys the binary rock of spec unpacked into rockDir without
 // building it, as upstream install_binary_rock does.
-func (e *nativeEngine) deployBinary(spec *rocks.Rockspec, rockDir string) error {
+func (e *nativeEngine) deployBinary(ctx context.Context, spec *rocks.Rockspec, rockDir string) error {
 	deploySpec, err := binarySpec(spec, rockDir)
 	if err != nil {
 		return err
 	}
 
-	return e.deployRock(deploySpec, func(t *tree.Tree) (*rocks.RockManifest, error) {
+	return e.deployRock(ctx, deploySpec, func(t *tree.Tree) (*rocks.RockManifest, error) {
 		// The lua/ and lib/ trees of the rock are what tree.Deploy relocates
 		// from a build directory, so the rock directory serves as both.
 		rm, err := t.Deploy(deploySpec, rockDir, rockDir)
@@ -1191,9 +1160,9 @@ func binarySpec(spec *rocks.Rockspec, rockDir string) (*rocks.Rockspec, error) {
 }
 
 // deployRock deploys one rock into the tree through deploy and records it in
-// the tree manifest.
+// the tree manifest, through tree.Tx.Deploy.
 func (e *nativeEngine) deployRock(
-	spec *rocks.Rockspec, deploy func(t *tree.Tree) (*rocks.RockManifest, error),
+	ctx context.Context, spec *rocks.Rockspec, deploy func(t *tree.Tree) (*rocks.RockManifest, error),
 ) error {
 	// Abort before build/deploy when the rockspec excludes the current platform
 	// (upstream deps.check_supported_platforms, deps.lua:247-273).
@@ -1201,34 +1170,9 @@ func (e *nativeEngine) deployRock(
 		return err
 	}
 
-	t, err := tree.Open(e.cfg)
+	t, err := e.openTree()
 	if err != nil {
 		return err
-	}
-
-	// Read the current tree manifest BEFORE deploying so Deploy can consult the
-	// providers of each module/command (check_spot_if_available) — this drives
-	// version promotion on reinstall/upgrade (glr-5e9).
-	m, err := e.readTreeManifest(t)
-	if err != nil {
-		return err
-	}
-
-	t.Providers = manifestProviders(m)
-
-	// A version already installed is deleted first, as upstream build_rockspec
-	// and install_binary_rock do (build.lua:393-395, install.lua:86-88): the
-	// rebuilt rock starts from a tree without it, so a file the new build no
-	// longer ships does not linger, and the old copy is not mistaken for another
-	// provider of the new one's files.
-	if _, err := os.Stat(t.InstallDir(spec.Package, spec.Version)); err == nil {
-		if err := e.deleteVersion(t, m, spec.Package, spec.Version); err != nil {
-			return err
-		}
-
-		if err := e.store.WriteTree(t.RocksDir(), m); err != nil {
-			return fmt.Errorf("write tree manifest: %w", err)
-		}
 	}
 
 	// Match upstream's command-wrapper deploy (repos.deploy_files →
@@ -1247,92 +1191,30 @@ func (e *nativeEngine) deployRock(
 		}
 	}
 
-	rm, err := deploy(t)
-	if err != nil {
-		return err
-	}
-
-	rockManifestPath := filepath.Join(t.InstallDir(spec.Package, spec.Version), "rock_manifest")
-	if err := e.store.WriteRock(rockManifestPath, rm); err != nil {
-		return fmt.Errorf("write rock_manifest: %w", err)
-	}
-
-	if m.Repository[spec.Package] == nil {
-		m.Repository[spec.Package] = map[string]rocks.RepoEntry{}
-	}
-	// Build the per-arch entry's modules/commands index from what tree.Deploy
-	// actually wrote (rm.Lua, rm.Lib, rm.Bin) — NOT from spec.Build.Modules,
-	// which only the builtin backend populates: a cmake, make or command rock
-	// declares no modules, so a rockspec-keyed loop indexed nothing for it and
-	// left `modules = {}` in the tree manifest. tree.ModuleIndex is the same
-	// inversion upstream's repos.package_modules performs over the rock_manifest,
-	// and it subsumes the rockspec loop on builtin rocks (Deploy writes each
-	// declared module at exactly the slashed path the module name maps to).
-	//
-	// Every provider is listed, whether it holds an item's plain path or a
-	// versioned one, in upstream's order (addProvider), which is the order of
-	// the spots Deploy gave them.
-	entry := rocks.RepoEntry{Arch: "installed"}
-	pkgVer := spec.Package + "/" + spec.Version
-
-	if mods := tree.ModuleIndex(rm); len(mods) > 0 {
-		entry.Modules = mods
-		for modName := range mods {
-			m.Modules[modName] = addProvider(m.Modules[modName], pkgVer)
-		}
-	}
-
-	// The commands index likewise comes from what Deploy wrote (rm.Bin), as
-	// upstream repos.package_commands reads it: keyed and valued by the path
-	// under the bin dir, not by the rockspec's build.install.bin source paths.
-	if cmds := tree.CommandIndex(rm); len(cmds) > 0 {
-		entry.Commands = cmds
-		for cmd := range cmds {
-			m.Commands[cmd] = addProvider(m.Commands[cmd], pkgVer)
-		}
-	}
-
-	// Dependencies (glr-6y6): upstream update_dependencies records both the
-	// rock's own declared dependency list (top-level manifest.dependencies) and
-	// the resolved name→version map of its installed deps (per-entry
-	// repo.dependencies). Both are always present — {} for a dep-less rock.
-	if m.Dependencies[spec.Package] == nil {
-		m.Dependencies[spec.Package] = map[string][]rocks.Dep{}
-	}
-
-	m.Dependencies[spec.Package][spec.Version] = spec.Dependencies
-
-	entry.Dependencies = resolveInstalledDeps(spec, m)
-
-	m.Repository[spec.Package][spec.Version] = entry
-	if err := e.store.WriteTree(t.RocksDir(), m); err != nil {
-		return fmt.Errorf("write tree manifest: %w", err)
-	}
-
-	return nil
+	// The Tx reads the tree manifest BEFORE deploying so Deploy can consult the
+	// providers of each module/command (check_spot_if_available) — this drives
+	// version promotion on reinstall/upgrade (glr-5e9).
+	return t.Update(ctx, func(tx *tree.Tx) error {
+		return tx.Deploy(spec, deploy)
+	})
 }
 
-// deleteVersion undeploys name/version from the tree and drops it from m, as
-// upstream repos.delete_version does: tree.DeleteVersion consults m, which
-// still lists the version, to tell which of its files hold plain paths and
-// which provider takes each over, and the version leaves m afterwards. The
-// caller writes m.
-func (e *nativeEngine) deleteVersion(t *tree.Tree, m *rocks.Manifest, name, version string) error {
-	t.Providers = manifestProviders(m)
-
-	if err := t.DeleteVersion(name, version); err != nil {
-		return err
+// openTree opens e.cfg.Tree with the engine's manifest store.
+func (e *nativeEngine) openTree() (*tree.Tree, error) {
+	t, err := tree.Open(e.cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	removeFromManifest(m, name, version)
+	t.Store = e.store
 
-	return nil
+	return t, nil
 }
 
 // Remove deletes the requested version (or every installed version when
 // opts.Version is empty) from the on-disk tree, drops its module/command
 // providers from the manifest, and rewrites the tree manifest. Each version
-// goes through deleteVersion, so the plain paths it held pass to the next
+// goes through tree.Tx.Remove, so the plain paths it held pass to the next
 // provider.
 //
 // It removes what it is asked to without checking whether another installed
@@ -1340,47 +1222,41 @@ func (e *nativeEngine) deleteVersion(t *tree.Tree, m *rocks.Manifest, name, vers
 // they reach upstream `luarocks remove` on the lua backend, which refuses to
 // break a dependent without them. The caller owns the dependency graph, as
 // tt, which prunes a tree it resolved itself, does.
-func (e *nativeEngine) Remove(_ context.Context, name string, opts RemoveOpts) error {
-	t, err := tree.Open(e.cfg)
+func (e *nativeEngine) Remove(ctx context.Context, name string, opts RemoveOpts) error {
+	t, err := e.openTree()
 	if err != nil {
 		return err
 	}
 
-	m, err := e.readTreeManifest(t)
-	if err != nil {
-		return err
-	}
-
-	versions := m.Repository[name]
-	if len(versions) == 0 {
-		return fmt.Errorf("rocks.Remove: %s is not installed", name)
-	}
-
-	// Determine which versions to remove: a specific one, or all.
-	var toRemove []string
-
-	if opts.Version != "" {
-		if _, ok := versions[opts.Version]; !ok {
-			return fmt.Errorf("rocks.Remove: %s %s is not installed", name, opts.Version)
+	err = t.Update(ctx, func(tx *tree.Tx) error {
+		versions := tx.View().Versions(name)
+		if len(versions) == 0 {
+			return fmt.Errorf("%s is not installed", name)
 		}
 
-		toRemove = []string{opts.Version}
-	} else {
-		for v := range versions {
-			toRemove = append(toRemove, v)
+		// Determine which versions to remove: a specific one, or all.
+		toRemove := versions
+
+		if opts.Version != "" {
+			if !slices.Contains(versions, opts.Version) {
+				return fmt.Errorf("%s %s is not installed", name, opts.Version)
+			}
+
+			toRemove = []string{opts.Version}
 		}
 
 		slices.Sort(toRemove)
-	}
 
-	for _, v := range toRemove {
-		if err := e.deleteVersion(t, m, name, v); err != nil {
-			return fmt.Errorf("rocks.Remove: %s %s: %w", name, v, err)
+		for _, v := range toRemove {
+			if err := tx.Remove(tree.RockRef{Name: name, Version: v}); err != nil {
+				return fmt.Errorf("%s %s: %w", name, v, err)
+			}
 		}
-	}
 
-	if err := e.store.WriteTree(t.RocksDir(), m); err != nil {
-		return fmt.Errorf("rocks.Remove: write tree manifest: %w", err)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("rocks.Remove: %w", err)
 	}
 
 	return nil

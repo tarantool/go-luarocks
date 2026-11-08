@@ -26,6 +26,18 @@
 // rocks.ErrUnsafePath, and the sources are read only inside srcDir and
 // buildDir. Names that stay inside behave as upstream's do.
 //
+// Deploy and DeleteVersion change the files of a tree only; the tree manifest,
+// <tree>/share/tarantool/rocks/manifest, which lists the installed rocks and
+// the providers of each module and command, is kept in step with them by
+// Update: it runs a change as a transaction, a Tx, under the tree's lock,
+// whose Deploy, Remove and Prune change the files and the manifest together.
+// Inspect, which creates nothing, and Tree.View read a tree into a View, a
+// snapshot of its manifests that answers what is installed, which rock owns
+// a deployed file and where each of a rock's files is, and checks the files
+// against their rock_manifest. Which of a module's or command's providers
+// holds its plain path follows the manifest's provider lists, as Deploy and
+// DeleteVersion decide it.
+//
 // This package uses forward-slash Unix paths exclusively via
 // path/filepath; no Windows-specific handling.
 package tree

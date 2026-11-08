@@ -29,6 +29,11 @@ import (
 // time per r.backend and is final for the lifetime of the facade.
 // Read operations (List, Show, Which, ReadTreeManifest) are served directly
 // from r.store regardless of backend.
+//
+// The writes to r.cfg.Tree — every one of the native backend, and Install,
+// Build, Make, Remove and Purge of the lua backend — hold the tree's lock
+// while they change it, as tree.Tree.Update does, waiting for it until their
+// context ends and failing then with an error wrapping tree.ErrLocked.
 type Rocks struct {
 	cfg     rocks.Config
 	store   rocks.ManifestStore
@@ -201,6 +206,9 @@ func serverIndex(servers, insecure []string, manifests *remote.ManifestCache) ro
 //
 // Exec requires BackendLua: the native engine cannot run the full CLI, so on
 // any other backend Exec returns rocks.ErrNotImplemented.
+//
+// Unlike the typed writes, Exec does not take the tree's lock (see
+// tree.Tree.Update): it cannot tell which trees the command changes.
 func (r *Rocks) Exec(ctx context.Context, progname string, argv []string) error {
 	le, ok := r.engine.(*luaEngine)
 	if !ok {
@@ -483,149 +491,6 @@ func (r *Rocks) Admin(ctx context.Context, subCmd string, args []string, opts Ad
 }
 
 // --- internal helpers ---
-
-// addProvider records provider (a "name/version" token) in a module or command
-// provider list and keeps the list in upstream's order (manif/writer.lua
-// sort_package_matching_table): by rock name, then newest version first, with
-// no duplicates. Index 0 is then the provider holding the item's plain path,
-// the one tree.Deploy gives it (repos.lua check_spot_if_available), and index 1
-// the one that takes it over when index 0 is removed.
-func addProvider(list []string, provider string) []string {
-	out := make([]string, 0, len(list)+1)
-	for _, x := range list {
-		if x != provider {
-			out = append(out, x)
-		}
-	}
-
-	out = append(out, provider)
-	slices.SortStableFunc(out, compareProviders)
-
-	return out
-}
-
-// compareProviders orders provider tokens as upstream sort_pkgs does
-// (manif/writer.lua:116-127): rocks by name, and versions of one rock newest
-// first. Versions that do not parse compare as strings.
-func compareProviders(a, b string) int {
-	na, va, _ := strings.Cut(a, "/")
-	nb, vb, _ := strings.Cut(b, "/")
-
-	if na != nb {
-		return strings.Compare(na, nb)
-	}
-
-	pa, errA := deps.ParseVersion(va)
-	pb, errB := deps.ParseVersion(vb)
-
-	if errA != nil || errB != nil {
-		return strings.Compare(vb, va)
-	}
-
-	return deps.Compare(pb, pa)
-}
-
-// resolveInstalledDeps builds the per-entry repo.dependencies map (name →
-// installed version) for a rock, mirroring upstream scan_deps' observable
-// output: each of the rock's declared dependencies is resolved to the newest
-// version present in the tree manifest's repository that satisfies its
-// constraints, in deps version order, as upstream match_dep picks it.
-// Dependencies with no such version (not yet installed, or installed at
-// versions the constraints exclude) are omitted; the self-entry never
-// appears. Always returns a non-nil map so the manifest carries
-// `dependencies = {}` for a dep-less rock.
-//
-// It is computed once, when the rock is deployed, and the entries of the
-// other rocks are left as they are, where upstream recomputes every entry,
-// transitively, on each write of the manifest.
-func resolveInstalledDeps(spec *rocks.Rockspec, m *rocks.Manifest) map[string]string {
-	out := map[string]string{}
-
-	for _, d := range spec.Dependencies {
-		if d.Name == spec.Package {
-			continue
-		}
-
-		var (
-			best rocks.Version
-			have bool
-		)
-
-		for ver := range m.Repository[d.Name] {
-			v, err := deps.ParseVersion(ver)
-			if err != nil || !deps.Match(v, d.Constraints) {
-				continue
-			}
-
-			if !have || deps.Compare(v, best) > 0 {
-				best, have = v, true
-			}
-		}
-
-		if have {
-			out[d.Name] = best.Raw
-		}
-	}
-
-	return out
-}
-
-// removeProvider drops the "name/version" provider from every list in a
-// module/command index, deleting a list that becomes empty. The first surviving
-// provider (if any) remains the active one at index 0.
-func removeProvider(index map[string][]string, provider string) {
-	for item, list := range index {
-		out := list[:0]
-
-		for _, x := range list {
-			if x != provider {
-				out = append(out, x)
-			}
-		}
-
-		if len(out) == 0 {
-			delete(index, item)
-		} else {
-			index[item] = out
-		}
-	}
-}
-
-// manifestProviders builds the tree.Tree provider lookup over the manifest's
-// module and command indexes, as upstream manif.get_providers reads them: a
-// module is looked up in m.Modules and a command in m.Commands, never one in
-// the other's index, since a rock may well ship a module and a command of the
-// same name. The lookup reads m as it is when called, so it follows the
-// manifest's updates.
-func manifestProviders(m *rocks.Manifest) func(kind tree.ItemKind, item string) []string {
-	return func(kind tree.ItemKind, item string) []string {
-		if kind == tree.CommandItem {
-			return m.Commands[item]
-		}
-
-		return m.Modules[item]
-	}
-}
-
-// removeFromManifest drops name/version from the tree manifest: its
-// repository entry, its place in the module and command provider lists, and
-// its dependency list (upstream writer.remove_from_manifest).
-func removeFromManifest(m *rocks.Manifest, name, version string) {
-	pkgVer := name + "/" + version
-
-	delete(m.Repository[name], version)
-	removeProvider(m.Modules, pkgVer)
-	removeProvider(m.Commands, pkgVer)
-
-	if vers, ok := m.Dependencies[name]; ok {
-		delete(vers, version)
-	}
-
-	if len(m.Repository[name]) == 0 {
-		delete(m.Repository, name)
-		delete(m.Dependencies, name)
-	}
-}
 
 func evalAndPrepare(specPath string, cfg rocks.Config) (*rocks.Rockspec, error) {
 	spec, err := rockspec.Eval(specPath, cfg.Rockspec)

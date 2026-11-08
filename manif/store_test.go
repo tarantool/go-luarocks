@@ -1,8 +1,10 @@
 package manif_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -331,4 +333,95 @@ repository = {
 	assert.Equal(t, "installed", m.Repository["metrics"]["1.0.0-1"].Arch, "arch")
 	require.Len(t, m.Modules["metrics"], 1, "modules")
 	assert.Equal(t, "metrics/1.0.0-1", m.Modules["metrics"][0], "modules")
+}
+
+// TestFileStoreWriteTree_ConcurrentWriters: writers of the same manifest at
+// once each write a temp file of their own, so every write succeeds and the
+// manifest left is one of them whole, with no temp file behind. With the one
+// fixed "manifest.tmp" they shared, one writer's rename moved another's file
+// away under it, failing that writer, or put a file the other was still
+// writing in place.
+func TestFileStoreWriteTree_ConcurrentWriters(t *testing.T) {
+	t.Parallel()
+
+	const (
+		writers = 8
+		rounds  = 25
+	)
+
+	dir := t.TempDir()
+	store := manif.FileStore{}
+
+	manifestOf := func(w int) *rocks.Manifest {
+		name := fmt.Sprintf("rock%d", w)
+		modules := map[string][]string{}
+
+		// Enough modules that a write takes more than one syscall.
+		for i := range 200 {
+			modules[fmt.Sprintf("%s.module%d", name, i)] = []string{name + "/1.0-1"}
+		}
+
+		return &rocks.Manifest{
+			Repository:   map[string]map[string]rocks.RepoEntry{name: {"1.0-1": {Arch: "installed"}}},
+			Modules:      modules,
+			Commands:     map[string][]string{},
+			Dependencies: map[string]map[string][]rocks.Dep{},
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	errs := make(chan error, writers*rounds)
+
+	for w := range writers {
+		wg.Go(func() {
+			m := manifestOf(w)
+			for range rounds {
+				errs <- store.WriteTree(dir, m)
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err, "WriteTree")
+	}
+
+	got, err := store.ReadTree(dir)
+	require.NoError(t, err, "the manifest left parses")
+	require.Len(t, got.Repository, 1, "the manifest left is one writer's")
+
+	for name := range got.Repository {
+		var w int
+
+		_, err := fmt.Sscanf(name, "rock%d", &w)
+		require.NoError(t, err)
+		assert.Equal(t, manifestOf(w).Modules, got.Modules, "the manifest left is %s's, whole", name)
+	}
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temp file is left: %v", entries)
+}
+
+// TestFileStoreWriteTree_Mode: a new manifest gets the mode os.Create gives a
+// file, as it always has, not the 0600 of os.CreateTemp.
+func TestFileStoreWriteTree_Mode(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, manif.FileStore{}.WriteTree(dir, &rocks.Manifest{}), "WriteTree")
+
+	ref, err := os.Create(filepath.Join(dir, "reference"))
+	require.NoError(t, err)
+	require.NoError(t, ref.Close())
+
+	want, err := os.Stat(ref.Name())
+	require.NoError(t, err)
+
+	got, err := os.Stat(filepath.Join(dir, "manifest"))
+	require.NoError(t, err)
+	assert.Equal(t, want.Mode().Perm(), got.Mode().Perm(), "the manifest's mode")
 }

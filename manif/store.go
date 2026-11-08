@@ -3,8 +3,12 @@ package manif
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path"
+	"runtime"
+	"strconv"
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -143,26 +147,37 @@ func (FileStore) WriteRock(filePath string, rm *rocks.RockManifest) error {
 	return writeAtomic(filePath, tbl)
 }
 
-// writeAtomic serializes tbl, writes it to filePath.tmp, and renames into
-// place. Matches upstream `save_table`'s tmp+rename atomicity.
+// writeAtomic serializes tbl and puts it at filePath atomically: it writes a
+// temp file of its own in the same directory, flushes it to stable storage,
+// renames it into place, and flushes the directory, so a reader sees the old
+// file or the new one, never a part, and a crash leaves one of the two. Two
+// writers never share the temp file, so neither clobbers the other's write
+// half-way: the last rename wins whole.
 func writeAtomic(filePath string, tbl any) error {
 	dir := path.Dir(filePath)
 	if err := os.MkdirAll(dir, manifestDirMode); err != nil {
 		return fmt.Errorf("manif: mkdir %q: %w", dir, err)
 	}
 
-	tmp := filePath + ".tmp"
-
-	f, err := os.Create(tmp)
+	f, err := createTemp(dir, path.Base(filePath))
 	if err != nil {
-		return fmt.Errorf("manif: create %q: %w", tmp, err)
+		return fmt.Errorf("manif: create a temp file for %q: %w", filePath, err)
 	}
+
+	tmp := f.Name()
 
 	if err := Write(f, tbl); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 
 		return err
+	}
+
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+
+		return fmt.Errorf("manif: sync %q: %w", tmp, err)
 	}
 
 	if err := f.Close(); err != nil {
@@ -177,7 +192,57 @@ func writeAtomic(filePath string, tbl any) error {
 		return fmt.Errorf("manif: rename %q -> %q: %w", tmp, filePath, err)
 	}
 
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("manif: sync %q: %w", dir, err)
+	}
+
 	return nil
+}
+
+// createMode is the mode os.Create opens a new file with, before the umask.
+const createMode = 0o666
+
+// tempAttempts bounds the names createTemp tries before it gives up.
+const tempAttempts = 10000
+
+// createTemp creates a new file for writing in dir, named after base with a
+// leading dot and a random part, as os.CreateTemp does, but with the mode
+// os.Create gives a file — 0666 less the umask — so the file renamed into
+// place keeps the permissions a manifest has always had, where os.CreateTemp
+// would make it 0600.
+func createTemp(dir, base string) (*os.File, error) {
+	for range tempAttempts {
+		name := path.Join(dir, "."+base+"."+strconv.FormatUint(rand.Uint64(), 36)+".tmp")
+
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, createMode)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+
+		return f, err
+	}
+
+	return nil, fmt.Errorf("no free temp file name in %q", dir)
+}
+
+// syncDir flushes the directory dir, so a rename into it survives a crash.
+// Windows cannot flush a directory and needs none: there it is a no-op.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+
+	return err
 }
 
 // manifestToTable projects a *rocks.Manifest into the table shape persist

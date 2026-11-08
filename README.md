@@ -281,13 +281,49 @@ before it fails in `index.html`), and rewrites a stale
 `manifest-<version>.zip`, which clients read before `manifest-<version>`.
 `MakeManifestOpts.Zip` writes the zips `luarocks-admin add` does.
 
+### Rock Trees
+
+The `tree` package owns a tree's files and its manifest together, so a
+tool that manages a tree itself, as `tt` does, need not edit it behind the
+library's back:
+
+```go
+v, err := tree.Inspect(ctx, root) // read-only; creates nothing
+ref, ok := v.Installed("luatest", "1.3.1-1")
+script, entry, ok := v.Command("luatest")
+
+t, err := tree.Open(rocks.Config{Tree: root})
+err = t.Update(ctx, func(tx *tree.Tx) error {
+    _, err := tx.Prune(tree.KeepVersions(pins), tree.PruneOpts{Orphans: true})
+    return err
+})
+```
+
+A `View` tells which rock versions are installed, which provider of a
+module or command holds its plain path, who owns a deployed file, where
+each file of a rock is and whether it matches the rock's `rock_manifest`.
+`Tx.Remove` and `Tx.Prune` undeploy rocks as the native `Remove` does —
+without a dependents check, a plain path passing to the next provider — and
+update the tree manifest in the same transaction.
+
+A change to a tree takes the tree's lock: an advisory `flock(2)` on
+`share/tarantool/rocks/.lock` (Linux, macOS and the BSDs; elsewhere the lock
+guards nothing). `tree.Tree.Update`, every write of the native backend, and
+the typed writes of the lua backend (`Install`, `Build`, `Make`, `Remove`,
+`Purge`) take it exclusive and wait for it until their context ends, failing
+then with `tree.ErrLocked`, so two processes changing one tree run one
+after the other instead of losing each other's manifest entries. An external
+`luarocks` and `Exec` do not take it. The manifests themselves are written
+through a temp file of each writer's own, flushed and renamed into place.
+
 ### Packages
 
 - `deps` — version parsing, dependency constraints, transitive resolver
 - `rockspec` — sandboxed `gopher-lua` rockspec evaluator
 - `manif` — upstream-compatible manifest reader/writer
 - `fetch` — source fetch backends (`http(s)`, `git`/`git+https`/`git+ssh`, `file://`)
-- `tree` — on-disk tree layout, deploy, conflicts, `which`
+- `tree` — on-disk tree layout, deploy, conflicts, `which`, and the tree
+  manifest kept in step through `Update` transactions and read through `Inspect`
 - `build` — build backends (`builtin`, `cmake`, `make`, `command`)
 - `remote` — rock server indexes (HTTP and local directories), search, and
   `MakeManifest`, the native `luarocks-admin make_manifest`

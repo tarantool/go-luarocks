@@ -49,7 +49,7 @@ func LuaEngineCleanup(e *LuaEngine) { e.cleanup() }
 
 // NativeInstalledLookup exposes nativeEngine.installedLookup for unit tests.
 func NativeInstalledLookup(e *NativeEngine) (deps.InstalledLookup, error) {
-	return e.installedLookup()
+	return e.installedLookup(context.Background())
 }
 
 // NativeInstallStep exposes nativeEngine.installStep so the nil-Rockspec

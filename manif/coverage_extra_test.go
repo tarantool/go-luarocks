@@ -468,14 +468,15 @@ func TestFileStoreWriteTree_MkdirFailure(t *testing.T) {
 	require.Error(t, err, "mkdir under a regular file must fail")
 }
 
-// TestFileStoreWriteTree_CreateFailure — the atomic-write helper must
-// surface an error when the ".tmp" path it needs to create is already
-// occupied by a directory.
-func TestFileStoreWriteTree_CreateFailure(t *testing.T) {
+// TestFileStoreWriteTree_RenameFailure — the atomic-write helper must
+// surface an error when its temp file cannot replace the manifest (here,
+// because a directory that is not empty occupies the manifest's path), and
+// leave no temp file behind.
+func TestFileStoreWriteTree_RenameFailure(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "manifest.tmp"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "manifest", "x"), 0o750))
 
 	store := manif.FileStore{}
 	in := &rocks.Manifest{
@@ -485,7 +486,11 @@ func TestFileStoreWriteTree_CreateFailure(t *testing.T) {
 		Dependencies: map[string]map[string][]rocks.Dep{},
 	}
 	err := store.WriteTree(dir, in)
-	require.Error(t, err, "create over an existing directory must fail")
+	require.Error(t, err, "rename over a directory must fail")
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "only the manifest directory is left: %v", entries)
 }
 
 // TestConstraintVersionFromValue_StringMapForm covers the map[string]any

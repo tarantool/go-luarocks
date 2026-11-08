@@ -8,7 +8,6 @@ import (
 	"time"
 
 	rocks "github.com/tarantool/go-luarocks"
-	"github.com/tarantool/go-luarocks/tree"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -210,26 +209,8 @@ func CheckSupportedPlatforms(spec *rocks.Rockspec, plats []string) error {
 	return checkSupportedPlatforms(spec, plats)
 }
 
-// AddProvider exposes the provider-list ordering helper for unit tests.
-func AddProvider(list []string, provider string) []string {
-	return addProvider(list, provider)
-}
-
-// ManifestProviders exposes the manifest provider-lookup builder for unit tests.
-func ManifestProviders(m *rocks.Manifest) func(kind tree.ItemKind, item string) []string {
-	return manifestProviders(m)
-}
-
-// ResolveInstalledDeps exposes the per-entry dependency resolver for unit tests.
-func ResolveInstalledDeps(spec *rocks.Rockspec, m *rocks.Manifest) map[string]string {
-	return resolveInstalledDeps(spec, m)
-}
-
 // RocksTrees exposes the rock-tree list of a Config for unit tests.
 func RocksTrees(cfg rocks.Config) []string { return rocksTrees(cfg) }
-
-// RemoveProvider exposes the provider-removal helper for unit tests.
-func RemoveProvider(index map[string][]string, provider string) { removeProvider(index, provider) }
 
 // PreloadPaths returns the embedded-FS path of every module the engine
 // preloads.
