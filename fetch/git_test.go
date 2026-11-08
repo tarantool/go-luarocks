@@ -44,6 +44,15 @@ func TestRepoNameFromURL(t *testing.T) {
 		"git://example.com/baz":           "baz",
 		"git@github.com:user/proj.git":    "proj",
 		"":                                "repo",
+		// A name of ".." or "." put the clone, and the .git it then removes,
+		// in the parent of the destination or the destination itself.
+		"https://example.com/foo/..":    "repo",
+		"https://example.com/foo/../":   "repo",
+		"file:///srv/repo/sub/..":       "repo",
+		"https://example.com/.":         "repo",
+		"git@host:..":                   "repo",
+		"git@host:foo/..":               "repo",
+		"https://example.com/foo/..git": "repo",
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, fetch.RepoNameFromURL(in), "repoNameFromURL(%q)", in)

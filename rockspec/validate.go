@@ -113,7 +113,12 @@ func checkPackageName(name string) error {
 }
 
 // Validate performs presence and feature-allowlist checks on a harvested
-// Rockspec. It deliberately does NOT re-do every type assertion the upstream
+// Rockspec. It also rejects, with an error wrapping rocks.ErrUnsafePath, a
+// path-valued field that would leave the directory it is joined under —
+// absolute, holding a ".." element, empty, or "." where a file is meant — in
+// source.file and source.dir, build.install keys and values, build.modules
+// paths and sources, copy_directories and their platform overrides, which
+// upstream accepts. It deliberately does NOT re-do every type assertion the upstream
 // `type_check.lua` schema enforces — the harvest in Eval already routes each
 // field through a typed path. Fail loud on unknown build types.
 func Validate(spec *rocks.Rockspec) error {
@@ -140,6 +145,14 @@ func Validate(spec *rocks.Rockspec) error {
 
 	if spec.Source.URL == "" {
 		return errors.New("rockspec: missing required field 'source.url'")
+	}
+
+	if err := checkSourcePaths("source", spec.Source); err != nil {
+		return err
+	}
+
+	if err := checkBuildPaths("build", spec.Build); err != nil {
+		return err
 	}
 
 	// Reject a future/unknown rockspec format before feature gating, mirroring

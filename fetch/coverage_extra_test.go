@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/fetch"
 )
 
@@ -416,8 +417,7 @@ func TestHTTPFetch_TarPathTraversal(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "sub")
 
 	_, err = fetch.FetchHTTP(context.Background(), srv.URL+"/evil.tar", dst, fetch.Options{})
-	require.Error(t, err, "traversal entry must error")
-	assert.Contains(t, err.Error(), "escapes dst", "error should flag the traversal")
+	require.ErrorIs(t, err, rocks.ErrUnsafePath, "traversal entry must error")
 
 	_, err = os.Stat(filepath.Join(filepath.Dir(dst), "evil.txt"))
 	assert.True(t, os.IsNotExist(err), "traversal file must not be created")
@@ -445,8 +445,7 @@ func TestHTTPFetch_ZipPathTraversal(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "sub")
 
 	_, err = fetch.FetchHTTP(context.Background(), srv.URL+"/evil.zip", dst, fetch.Options{})
-	require.Error(t, err, "traversal entry must error")
-	assert.Contains(t, err.Error(), "escapes dst", "error should flag the traversal")
+	require.ErrorIs(t, err, rocks.ErrUnsafePath, "traversal entry must error")
 }
 
 func TestHTTPFetch_ZipWithDirectoryEntry(t *testing.T) {

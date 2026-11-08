@@ -12,6 +12,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 // scpStyleRe matches an scp-style ssh URL — "ssh://" then a host authority
@@ -87,7 +89,10 @@ func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Option
 		cloneURL = stripSCPScheme(cloneURL)
 	}
 
-	repoDir := filepath.Join(destDir, repoNameFromURL(cloneURL))
+	repoDir, err := safepath.JoinEntry(destDir, repoNameFromURL(cloneURL))
+	if err != nil {
+		return Result{}, fmt.Errorf("fetch.git: clone dir: %w", err)
+	}
 
 	co := &git.CloneOptions{
 		URL: cloneURL,
@@ -223,25 +228,24 @@ func refOpt(opts Options) string {
 
 // repoNameFromURL extracts the directory name git would default to (the
 // last path segment with a trailing `.git` stripped). Falls back to
-// "repo" if extraction fails.
+// "repo" if extraction fails, or yields a name that is not a single
+// directory: upstream clones into a last segment of "..", which puts the
+// clone, and the .git it removes afterwards, in the parent of the
+// destination.
 func repoNameFromURL(rawURL string) string {
 	// Try net/url first.
 	if u, err := url.Parse(rawURL); err == nil && u.Path != "" {
-		base := filepath.Base(u.Path)
+		base := strings.TrimSuffix(filepath.Base(u.Path), ".git")
 
-		base = strings.TrimSuffix(base, ".git")
-
-		if base != "" && base != "/" && base != "." {
+		if safepath.Name(base) == nil {
 			return base
 		}
 	}
 	// SCP-form fallback: user@host:path/to/repo.git
 	if i := strings.LastIndex(rawURL, "/"); i >= 0 && i < len(rawURL)-1 {
-		base := rawURL[i+1:]
+		base := strings.TrimSuffix(rawURL[i+1:], ".git")
 
-		base = strings.TrimSuffix(base, ".git")
-
-		if base != "" {
+		if safepath.Name(base) == nil {
 			return base
 		}
 	}

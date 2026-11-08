@@ -247,7 +247,7 @@ func matchManifest(
 			}
 
 			for _, entry := range versions[version] {
-				if !accepted[entry.arch] {
+				if !accepted[entry.arch] || (isLocal && !localNames(name, version, entry.arch)) {
 					continue
 				}
 

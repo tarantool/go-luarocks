@@ -6,6 +6,7 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tarantool/go-luarocks/internal/safepath"
 	"github.com/tarantool/go-luarocks/internal/transport"
 )
 
@@ -73,11 +75,17 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 		base = filepath.Base(u.Path)
 	}
 
-	if base == "" || base == "/" || base == "." {
+	if opts.File == "" && (base == "" || base == "/" || base == ".") {
 		base = "download"
 	}
 
-	dst := filepath.Join(destDir, base)
+	// Upstream writes the download wherever source.file points; here it
+	// stays an entry of destDir.
+	dst, err := safepath.JoinEntry(destDir, base)
+	if err != nil {
+		return Result{}, fmt.Errorf("fetch.http: source file: %w", err)
+	}
+
 	if err := httpDownload(ctx, rawURL, dst, opts); err != nil {
 		return Result{}, err
 	}
@@ -201,7 +209,7 @@ func unpackArchive(path, destDir string) error {
 		return err
 	}
 
-	_ = os.Remove(path)
+	_ = safepath.Remove(destDir, path)
 
 	return nil
 }
@@ -220,6 +228,24 @@ func buildHTTPClient(host string, opts Options) *http.Client {
 	}
 }
 
+// entryPath is the path the archive entry name extracts to under dst: inside
+// it, with a leading "/" dropped as tar and unzip drop it, and an error
+// wrapping rocks.ErrUnsafePath for a name that reaches above dst.
+func entryPath(dst, name string) (string, error) {
+	p, err := safepath.Join(dst, strings.TrimLeft(filepath.FromSlash(name), string(filepath.Separator)))
+	if err != nil {
+		return "", fmt.Errorf("archive entry: %w", err)
+	}
+
+	return p, nil
+}
+
+// The extractors below create every directory and file through safepath, so
+// an entry beneath a symlink pointing out of dst — one dst already held, since
+// they extract no symlink themselves — fails instead of writing outside, and
+// they keep only the permission bits of an entry, never setuid, setgid or
+// sticky.
+
 func unzip(archive, dst string) error {
 	r, err := zip.OpenReader(archive)
 	if err != nil {
@@ -229,14 +255,13 @@ func unzip(archive, dst string) error {
 	defer func() { _ = r.Close() }()
 
 	for _, f := range r.File {
-		// target is validated against dst below to reject path traversal.
-		target := filepath.Join(dst, f.Name)
-		if !strings.HasPrefix(target, filepath.Clean(dst)+string(os.PathSeparator)) && target != filepath.Clean(dst) {
-			return fmt.Errorf("zip entry %q escapes dst", f.Name)
+		target, err := entryPath(dst, f.Name)
+		if err != nil {
+			return err
 		}
 
 		if f.FileInfo().IsDir() {
-			err := os.MkdirAll(target, dirPerm)
+			err := safepath.MkdirAll(dst, target, dirPerm)
 			if err != nil {
 				return err
 			}
@@ -244,7 +269,7 @@ func unzip(archive, dst string) error {
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(target), dirPerm); err != nil {
+		if err := safepath.MkdirAll(dst, filepath.Dir(target), dirPerm); err != nil {
 			return err
 		}
 
@@ -253,7 +278,8 @@ func unzip(archive, dst string) error {
 			return err
 		}
 
-		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		// A symlink entry is extracted as a regular file holding its target.
+		out, err := safepath.Create(dst, target, f.Mode().Perm())
 		if err != nil {
 			_ = rc.Close()
 
@@ -322,11 +348,9 @@ func untar(archive, dst string) error {
 }
 
 func extractTar(tr *tar.Reader, dst string) error {
-	cleanDst := filepath.Clean(dst)
-
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 
@@ -334,26 +358,26 @@ func extractTar(tr *tar.Reader, dst string) error {
 			return err
 		}
 
-		// target is validated against cleanDst below to reject path traversal.
-		target := filepath.Join(dst, hdr.Name)
-		if !strings.HasPrefix(target, cleanDst+string(os.PathSeparator)) && target != cleanDst {
-			return fmt.Errorf("tar entry %q escapes dst", hdr.Name)
+		target, err := entryPath(dst, hdr.Name)
+		if err != nil {
+			return err
 		}
+
+		// hdr.Mode is a tar mode word; only its permission bits are kept.
+		perm := os.FileMode(uint32(hdr.Mode)).Perm()
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			// hdr.Mode is a tar permission word; the low bits are the only
-			// meaningful ones and always fit in a FileMode.
-			err := os.MkdirAll(target, os.FileMode(uint32(hdr.Mode))|ownerSearchBit)
+			err := safepath.MkdirAll(dst, target, perm|ownerSearchBit)
 			if err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), dirPerm); err != nil {
+			if err := safepath.MkdirAll(dst, filepath.Dir(target), dirPerm); err != nil {
 				return err
 			}
 
-			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(uint32(hdr.Mode)))
+			out, err := safepath.Create(dst, target, perm)
 			if err != nil {
 				return err
 			}

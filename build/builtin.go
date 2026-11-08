@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 // autodetectSkiplist is the set of top-level path segments upstream's
@@ -181,6 +182,12 @@ const (
 // spec.Build.CopyDirectories entries are copied recursively from srcDir
 // to destDir/<dir> verbatim.
 //
+// Every source path is read inside srcDir and every file is written inside
+// destDir, which upstream does not check: a path that leaves them —
+// absolute, through "..", or through a symlink pointing out — fails the build
+// with an error wrapping rocks.ErrUnsafePath, and a C source that does before
+// the compiler runs.
+//
 // If ANY module needs a C compile and cfg.Tarantool.IncludeDir is empty,
 // the function returns ErrMissingTarantoolHeaders before invoking cc.
 //
@@ -256,7 +263,7 @@ func runBuiltin(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir strin
 	}
 
 	for _, d := range spec.Build.CopyDirectories {
-		err := copyDir(filepath.Join(srcDir, d), filepath.Join(destDir, d))
+		err := copyDirectory(srcDir, destDir, d)
 		if err != nil {
 			return fmt.Errorf("build: copy_directories %q: %w", d, err)
 		}
@@ -311,6 +318,11 @@ func moduleLastSegment(name string) string {
 // i.e. <slashed-name>/init.lua — preserving the package layout rather than
 // collapsing it into a single <name>.lua file.
 func installLuaModule(srcDir, destDir, name, path string) error {
+	src, err := safepath.JoinEntry(srcDir, path)
+	if err != nil {
+		return err
+	}
+
 	var dst string
 	if filepath.Base(path) == "init.lua" && !strings.HasSuffix(name, ".init") {
 		dst = filepath.Join(destDir, "lua", moduleSlashPath(name), "init.lua")
@@ -318,7 +330,7 @@ func installLuaModule(srcDir, destDir, name, path string) error {
 		dst = filepath.Join(destDir, "lua", moduleSlashPath(name)+".lua")
 	}
 
-	return copyFile(filepath.Join(srcDir, path), dst)
+	return copyFile(srcDir, src, destDir, dst)
 }
 
 // compileModule builds a single .so via one cc invocation:
@@ -332,7 +344,20 @@ func installLuaModule(srcDir, destDir, name, path string) error {
 func compileModule(ctx context.Context, srcDir, destDir, name string, m rocks.Module, flags Flags, cfg rocks.Config, vars map[string]string) error {
 	out := filepath.Join(destDir, "lib", moduleSlashPath(name)+flags.Ext)
 
-	err := os.MkdirAll(filepath.Dir(out), dirPerm)
+	// The compiler reads every source and writes out itself, so each is
+	// checked here, before it runs.
+	sources := make([]string, 0, len(m.Sources))
+
+	for _, s := range m.Sources {
+		p, err := safepath.JoinEntry(srcDir, s)
+		if err != nil {
+			return err
+		}
+
+		sources = append(sources, p)
+	}
+
+	err := safepath.MkdirAll(destDir, filepath.Dir(out), dirPerm)
 	if err != nil {
 		return err
 	}
@@ -361,9 +386,7 @@ func compileModule(ctx context.Context, srcDir, destDir, name string, m rocks.Mo
 
 	args = append(args, "-o", out)
 
-	for _, s := range m.Sources {
-		args = append(args, filepath.Join(srcDir, s))
-	}
+	args = append(args, sources...)
 
 	for _, l := range libdirs {
 		args = append(args, "-L"+l)
@@ -426,7 +449,10 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 		sort.Strings(keys)
 
 		for _, k := range keys {
-			src := filepath.Join(srcDir, s.entries[k])
+			src, err := safepath.JoinEntry(srcDir, s.entries[k])
+			if err != nil {
+				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
+			}
 
 			var rel string
 
@@ -441,15 +467,18 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 				rel = k
 			}
 
-			dst := filepath.Join(destDir, s.subdir, rel)
+			dst, err := safepath.JoinEntry(filepath.Join(destDir, s.subdir), rel)
+			if err != nil {
+				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
+			}
 
-			err := copyFile(src, dst)
+			err = copyFile(srcDir, src, destDir, dst)
 			if err != nil {
 				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
 			}
 
 			if s.isExe {
-				err := os.Chmod(dst, exePerm) //nolint:gosec // installed binaries/libraries must be executable
+				err := safepath.Chmod(destDir, dst, exePerm)
 				if err != nil {
 					return fmt.Errorf("%s[%q]: chmod: %w", s.name, k, err)
 				}
@@ -460,15 +489,12 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 	return nil
 }
 
-// copyFile copies a file preserving the source file's regular-file mode
-// bits (lower 9 bits). Parent directories of dst are created with dirPerm
-// (0o750).
-func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
-		return err
-	}
-
-	in, err := os.Open(src) //nolint:gosec // src is a rockspec-derived build path, internally controlled
+// copyFile copies src, read inside srcRoot, to dst, inside dstRoot,
+// preserving the source file's regular-file mode bits (lower 9 bits). Parent
+// directories of dst are created with dirPerm (0o750). A symlink on the way
+// that leaves its root fails the copy (see safepath).
+func copyFile(srcRoot, src, dstRoot, dst string) error {
+	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return err
 	}
@@ -485,7 +511,11 @@ func copyFile(src, dst string) error {
 		mode = 0o644
 	}
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode) //nolint:gosec // dst is a rockspec-derived build path, internally controlled
+	if err := safepath.MkdirAll(dstRoot, filepath.Dir(dst), dirPerm); err != nil {
+		return err
+	}
+
+	out, err := safepath.Create(dstRoot, dst, mode)
 	if err != nil {
 		return err
 	}
@@ -499,10 +529,26 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// copyDir recursively copies src into dst. Symlinks are not specially
-// handled — they are dereferenced (matches upstream luarocks behavior for
-// copy_directories on unix).
-func copyDir(src, dst string) error {
+// copyDirectory copies the copy_directories entry dir from srcDir to destDir.
+func copyDirectory(srcDir, destDir, dir string) error {
+	src, err := safepath.Join(srcDir, dir)
+	if err != nil {
+		return err
+	}
+
+	dst, err := safepath.Join(destDir, dir)
+	if err != nil {
+		return err
+	}
+
+	return copyDir(srcDir, src, destDir, dst)
+}
+
+// copyDir recursively copies src, inside srcRoot, into dst, inside dstRoot.
+// Symlinks are not specially handled — they are dereferenced (matches
+// upstream luarocks behavior for copy_directories on unix) — as long as they
+// stay inside srcRoot.
+func copyDir(srcRoot, src, dstRoot, dst string) error {
 	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -515,14 +561,10 @@ func copyDir(src, dst string) error {
 
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode().Perm()|dirOwnerRWX)
+			return safepath.MkdirAll(dstRoot, target, info.Mode().Perm()|dirOwnerRWX)
 		}
 
-		if info.Mode()&os.ModeSymlink != 0 {
-			// Resolve to real file and copy its contents.
-			return copyFile(p, target)
-		}
-
-		return copyFile(p, target)
+		// A symlink is resolved, inside srcRoot, and its contents copied.
+		return copyFile(srcRoot, p, dstRoot, target)
 	})
 }

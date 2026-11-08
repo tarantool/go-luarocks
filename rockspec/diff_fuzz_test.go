@@ -167,6 +167,12 @@ func FuzzDepString(f *testing.F) {
 //   - R6: the package names "." and "..", and names with "\". Validate
 //     rejects them, as names that would install into or above the rocks dir;
 //     upstream's path.install_dir asserts against "/" only.
+//   - R7: a path-valued field — source.file, source.dir, a build.install key
+//     or value, a build.modules path or source, a copy_directories entry —
+//     that is empty, absolute, holds a ".." element, or is "." where a file
+//     is meant. Validate rejects it with rocks.ErrUnsafePath, as a path that
+//     would read or write outside the sources or the tree; upstream joins it
+//     as it comes.
 
 // badConstraintVersion reports V4 or V6 for an input upstream accepted and Go
 // did not: upstream warned that it could not parse a version, or the input
@@ -203,6 +209,8 @@ func acceptedDivergence(vm *luaref.VM, src string, gerr error, lok bool, msg str
 
 	switch {
 	case errors.Is(gerr, rockspec.ErrPackageNotPathComponent): // R6
+		return true
+	case errors.Is(gerr, rocks.ErrUnsafePath): // R7
 		return true
 	case strings.Contains(gerr.Error(), "missing required field 'package'"), // R1
 		strings.Contains(gerr.Error(), "missing required field 'source.url'"): // R2

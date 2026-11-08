@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tarantool/go-luarocks/internal/safepath"
 )
 
 const (
@@ -60,28 +62,8 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 	}
 
 	if !st.IsDir() {
-		// Single file (e.g. a rockspec or archive). Copy into destDir under its
-		// basename — or source.file when set (upstream fetch.fetch_local names it
-		// rockspec.source.file or dir.base_name) — then extract if it is a
-		// recognized archive (fetch.fetch_local → fs.unpack_archive).
-		base := opts.File
-		if base == "" {
-			base = filepath.Base(src)
-		}
-
-		dst := filepath.Join(destDir, base)
-
-		err := copyOneFile(src, dst, st.Mode().Perm())
-		if err != nil {
+		if err := fetchOneFile(src, st.Mode().Perm(), destDir, opts); err != nil {
 			return Result{}, err
-		}
-
-		if err := checkMD5(dst, opts.MD5); err != nil {
-			return Result{}, err
-		}
-
-		if err := unpackArchive(dst, destDir); err != nil {
-			return Result{}, fmt.Errorf("fetch.file: unpack: %w", err)
 		}
 
 		return Result{Path: destDir, SourceRoot: false}, nil
@@ -92,6 +74,39 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 	}
 
 	return Result{Path: destDir, SourceRoot: true}, nil
+}
+
+// fetchOneFile is Fetch for a single file (e.g. a rockspec or archive): it
+// copies src into destDir under its basename — or source.file when set
+// (upstream fetch.fetch_local names it rockspec.source.file or
+// dir.base_name) — then extracts it if it is a recognized archive
+// (fetch.fetch_local → fs.unpack_archive).
+func fetchOneFile(src string, perm os.FileMode, destDir string, opts Options) error {
+	base := opts.File
+	if base == "" {
+		base = filepath.Base(src)
+	}
+
+	// Upstream copies the file wherever source.file points; here it stays an
+	// entry of destDir.
+	dst, err := safepath.JoinEntry(destDir, base)
+	if err != nil {
+		return fmt.Errorf("fetch.file: source file: %w", err)
+	}
+
+	if err := copyOneFile(src, dst, perm); err != nil {
+		return err
+	}
+
+	if err := checkMD5(dst, opts.MD5); err != nil {
+		return err
+	}
+
+	if err := unpackArchive(dst, destDir); err != nil {
+		return fmt.Errorf("fetch.file: unpack: %w", err)
+	}
+
+	return nil
 }
 
 func copyDir(ctx context.Context, src, dst string) error {

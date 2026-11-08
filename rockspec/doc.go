@@ -11,7 +11,11 @@
 // the schemas upstream declares, none newer than
 // SupportedRockspecFormat) and the build-type allowlist, surfacing
 // rocks.ErrUnsupportedRockspecFeature for anything outside the implemented
-// subset.
+// subset. It also refuses, with rocks.ErrUnsafePath, a path-valued field that
+// is absolute or holds a ".." element — source.file, source.dir, the
+// build.install keys and values, build.modules paths and sources,
+// copy_directories — a deliberate strictness beyond upstream, which joins
+// them onto the sources and the tree as they come.
 //
 // Sandbox:
 //

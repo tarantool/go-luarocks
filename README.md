@@ -200,6 +200,34 @@ file in a subdirectory back from the versioned name the deploy gave it, where
 upstream looks for one the deploy never writes and packs another rock's file
 (`client/native.go` `copyBackFiles`).
 
+The native backend also keeps every file it reads, writes, renames, chmods or
+removes inside the directory the name belongs to, where upstream LuaRocks —
+and so the lua backend — follows any name it is given. It is checked in two
+layers, and a name that would leave fails with an error wrapping
+`rocks.ErrUnsafePath`:
+
+- `rockspec.Validate` rejects a path-valued field that is absolute or holds a
+  `..` element, or that names a file and is empty or `.`: `source.file`,
+  `source.dir`, the `build.install` keys and values, `build.modules` paths and
+  sources, `copy_directories`, and their platform overrides
+  (`rockspec/paths.go`). A rock or rockspec from a server could otherwise
+  write or delete outside the tree without running any build code.
+- Every site that joins such a name checks it again, for the names that never
+  pass Validate — a planted `rock_manifest`, an archive entry, the tree
+  manifest, a server's manifest or URL: `tree.Deploy` and `DeleteVersion`
+  stay in the tree and read only the sources, the builtin backend stays in its
+  sources and build dir, a fetch and an archive extraction stay in their
+  destination, the source root stays in the fetched sources, `Pack` in the
+  tree and the pack dir, and a local server's artifacts in its directory. The
+  file operations go through `os.Root` (`internal/safepath`), so a symlink on
+  the way that points out fails them too; one that stays inside is followed.
+  Archive extraction creates no symlinks, keeps only permission bits (never
+  setuid, setgid or sticky), and extracts an absolute entry name inside the
+  destination, as `tar` and `unzip` do.
+
+Legitimate rockspecs are unaffected; the parity harness and the rock corpus
+install the same trees as before.
+
 #### Backend Interoperability
 
 The parity harness compares two trees; a second one,
