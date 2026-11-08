@@ -156,6 +156,8 @@ outcome in these areas:
 | `Remove` of a rock another depends on | removed; `Force` and `ForceFast` change nothing | refused unless forced, or another version in the rock trees satisfies the dependent |
 | Rock trees consulted, and listed by a command wrapper | `Config.Tree` alone | `Config.Tree`, then `Config.Tarantool.Prefix`, as the deps mode selects them |
 | Resolved dependencies in the tree manifest | a rock's direct ones, recorded at its deploy (the installed version with the greatest string); the other entries are left as they are | every rock's, transitively, recomputed on each write |
+| An `external_dependencies` entry found on no search path | the build runs, its `$(<NAME>_INCDIR)`, … naming the directories under `/usr/local` | the build fails before it starts |
+| `tarantool` rock the VM provides | the part of `Config.Tarantool.Version` before its first dash, at revision 1, so a bare `3.9.0` provides `3.9.0-1`; a part that does not parse is logged and provides none | the part before the first dash, at revision 1, and none for a version with no dash, such as a bare `3.9.0` |
 | `Which` | plain paths in `Config.Tree` | (`Exec` `which`) the loader, over every rock tree's manifest |
 
 A differential harness verifies the parity: it builds the same fixture

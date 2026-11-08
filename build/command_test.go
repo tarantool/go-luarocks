@@ -2,6 +2,7 @@ package build_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -57,6 +58,36 @@ func TestRunCommand_ExportsCC(t *testing.T) {
 
 	data, _ := build.ReadFile(logFile)
 	assert.Equal(t, "cc=cc\n", string(data))
+}
+
+// TestRunCommand_ToolchainVariables is the shape of luaposix 36.3-1, whose
+// build_command hands luke LD="$(LD)", LIB_EXTENSION="$(LIB_EXTENSION)" and
+// OBJ_EXTENSION="$(OBJ_EXTENSION)". The native backend expanded those, like
+// every cfg.variables entry it did not set, to "", so luke failed with "no
+// rule to make target 'LD='". Each must carry upstream's value on unix.
+func TestRunCommand_ToolchainVariables(t *testing.T) {
+	t.Setenv("CC", "")
+	t.Setenv("AR", "")
+	os.Unsetenv("AR") //nolint:errcheck,gosec // restored by the Setenv above
+	t.Setenv("RANLIB", "my-ranlib")
+
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "log")
+	spec := &rocks.Rockspec{
+		Package: "luaposix", Version: "36.3-1",
+		Build: rocks.Build{
+			Type: "command",
+			BuildCommand: `printf '%s\n' "LD=$(LD)" "LIB_EXTENSION=$(LIB_EXTENSION)" "OBJ_EXTENSION=$(OBJ_EXTENSION)" ` +
+				`"AR=$(AR)" "RANLIB=$(RANLIB)" "CP=$(CP)" "MKDIR=$(MKDIR)" "LUA=$(LUA)" > ` + logFile,
+		},
+	}
+	cfg := rocks.Config{Tree: t.TempDir(), Tarantool: rocks.TarantoolConfig{Prefix: "/opt/tt"}}
+	require.NoError(t, build.RunBackend(context.Background(), spec, dir, t.TempDir(), cfg), "command backend failed")
+
+	data, err := build.ReadFile(logFile)
+	require.NoError(t, err, "missing log")
+	assert.Equal(t, "LD=cc\nLIB_EXTENSION=so\nOBJ_EXTENSION=o\nAR=ar\nRANLIB=my-ranlib\nCP=cp\nMKDIR=mkdir\n"+
+		"LUA=/opt/tt/bin/tarantool\n", string(data))
 }
 
 func TestRunCommand_SubstitutesVars(t *testing.T) {

@@ -590,9 +590,13 @@ func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string) error 
 var defaultDocPatterns = []string{"readme", "license", "copying"}
 
 // installDefaultDocs mirrors upstream install_default_docs (build.lua:271-287):
-// every regular file at the top of srcDir whose lowercased name matches one of
-// its patterns is copied, read-only, into docDir. Upstream hands a matching
-// directory to fs.copy too, which copies no tree; it is skipped here.
+// every file at the top of srcDir whose lowercased name matches one of its
+// patterns is copied, read-only, into docDir. A symlink is copied as the file
+// it points to when that stays inside srcDir, and fails with
+// rocks.ErrUnsafePath when it leads out; a dangling one is skipped, as
+// upstream's failed fs.copy is. Upstream hands a matching directory to
+// fs.copy too, which copies no tree; it is skipped here, and so is a link to
+// one.
 func installDefaultDocs(srcDir, docDir string) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
@@ -600,7 +604,17 @@ func installDefaultDocs(srcDir, docDir string) error {
 	}
 
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !isDefaultDoc(e.Name()) {
+		if !isDefaultDoc(e.Name()) {
+			continue
+		}
+
+		switch {
+		case e.Type().IsRegular():
+		case e.Type()&os.ModeSymlink != 0:
+			if st, err := os.Stat(filepath.Join(srcDir, e.Name())); err != nil || !st.Mode().IsRegular() {
+				continue
+			}
+		default:
 			continue
 		}
 

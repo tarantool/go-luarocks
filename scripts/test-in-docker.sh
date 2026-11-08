@@ -66,8 +66,10 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
+# The client package alone runs its parity and interop suites for about seven
+# minutes, close to go test's 10m default, and longer on a loaded machine.
 if [ "$#" -eq 0 ]; then
-	set -- go test -count=1 -tags "$TAGS" "${PKGS[@]}"
+	set -- go test -count=1 -timeout 45m -tags "$TAGS" "${PKGS[@]}"
 fi
 
 repo=$(cd "$(dirname "$0")/.." && pwd -P)

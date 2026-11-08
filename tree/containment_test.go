@@ -205,6 +205,51 @@ func TestDeploy_CopyDirectoriesSymlinkOut(t *testing.T) {
 	assert.FileExists(t, filepath.Join(l.tree.InstallDir(demoPkg, containVer), "doc", "inside"))
 }
 
+// TestDeploy_DefaultDocsFollowLinksInside: vshard's sources hold GEMINI.md as
+// a symlink to AGENTS.md, and the default docs copied regular files only, so
+// the rock lacked GEMINI.md where upstream copies it. A link that stays
+// inside the sources is copied as the file it points to; one to a directory
+// or to nothing is skipped; one leading out of the sources fails.
+func TestDeploy_DefaultDocsFollowLinksInside(t *testing.T) {
+	t.Parallel()
+
+	l := newContainLayout(t)
+
+	writeFile(t, filepath.Join(l.src, "AGENTS.md"), "agents")
+	writeFile(t, filepath.Join(l.src, "docs.md", "x"), "a directory named like a doc")
+	require.NoError(t, os.Symlink("AGENTS.md", filepath.Join(l.src, "GEMINI.md")))
+	require.NoError(t, os.Symlink(filepath.Join(l.src, "AGENTS.md"), filepath.Join(l.src, "CLAUDE.md")))
+	require.NoError(t, os.Symlink("docs.md", filepath.Join(l.src, "dir.md")))
+	require.NoError(t, os.Symlink("no-such-file", filepath.Join(l.src, "dangling.md")))
+
+	spec := l.spec(rocks.Build{Type: "none"})
+
+	_, err := l.tree.Deploy(spec, l.src, l.src)
+	require.NoError(t, err)
+
+	docDir := l.tree.DocDir(demoPkg, containVer)
+	for _, name := range []string{"AGENTS.md", "GEMINI.md", "CLAUDE.md"} {
+		got, err := os.ReadFile(filepath.Join(docDir, name)) //nolint:gosec // test temp path
+		require.NoError(t, err, "%s must be copied", name)
+		assert.Equal(t, "agents", string(got), name)
+
+		fi, err := os.Lstat(filepath.Join(docDir, name))
+		require.NoError(t, err)
+		assert.True(t, fi.Mode().IsRegular(), "%s is copied as a file", name)
+	}
+
+	assert.NoFileExists(t, filepath.Join(docDir, "dir.md"))
+	assert.NoFileExists(t, filepath.Join(docDir, "dangling.md"))
+
+	l = newContainLayout(t)
+	require.NoError(t, os.Symlink(filepath.Join(l.outside, "victim"), filepath.Join(l.src, "README")))
+
+	_, err = l.tree.Deploy(l.spec(rocks.Build{Type: "none"}), l.src, l.src)
+	require.ErrorIs(t, err, rocks.ErrUnsafePath)
+	assert.NoFileExists(t, filepath.Join(l.tree.DocDir(demoPkg, containVer), "README"))
+	l.assertOutsideIntact(t)
+}
+
 // TestDeploy_RejectsNameEscapingRocksDir: Deploy builds the install dir from
 // the rock's name and version, so a hand-built spec named ".." wrote above
 // the rocks dir: its default docs went to <install-dir>/doc.

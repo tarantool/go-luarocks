@@ -173,3 +173,40 @@ func TestValueRoundTrip(t *testing.T) {
 		"mixed": map[any]any{1.0: "one", "k": "v"},
 	}, out)
 }
+
+func TestWritableFiles(t *testing.T) {
+	t.Parallel()
+
+	vm := newVM(t)
+	vm.AddFile("a.txt", "one\ntwo\n")
+	vm.AddFile("sub/b.txt", "b")
+	require.NoError(t, vm.WritableFiles("/src"))
+
+	chunk, err := vm.L.LoadString(`
+		local out = {}
+		local f = io.open("a.txt")
+		out[#out+1] = f:read(4)
+		out[#out+1] = f:read(100)
+		out[#out+1] = tostring(f:read(1))
+		f:close()
+		out[#out+1] = tostring(io.open("missing"))
+		out[#out+1] = tostring(io.open("nodir/x", "w"))
+		local d = io.open("sub")
+		out[#out+1] = tostring(d:read(1))
+		local w = io.open("sub/new.txt", "wb")
+		w:write("x", "y")
+		out[#out+1] = tostring(os.rename("/src/a.txt", "sub/../moved.txt"))
+		out[#out+1] = tostring(os.remove("sub"))
+		out[#out+1] = tostring(os.remove("sub/b.txt"))
+		out[#out+1] = require("luarocks.fs").absolute_name("c/../d")
+		io.stderr:write("warned", "\n")
+		return table.concat(out, "|")
+	`)
+	require.NoError(t, err)
+
+	res, err := vm.CallValue(chunk)
+	require.NoError(t, err)
+	assert.Equal(t, "one\n|two\n|nil|nil|nil|nil|true|nil|true|/src/d", res[0].String())
+	assert.Equal(t, map[string]string{"/src/moved.txt": "one\ntwo\n", "/src/sub/new.txt": "xy"}, vm.Files())
+	assert.Equal(t, "warned\n", vm.Stderr())
+}

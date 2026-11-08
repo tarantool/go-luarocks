@@ -258,6 +258,17 @@ build = {
 func stageInstallSections(t *testing.T) (*client.Rocks, string, string) {
 	t.Helper()
 
+	return stageInstallSectionsFor(t, rocks.TarantoolConfig{
+		Prefix:     "/opt/test",
+		IncludeDir: "/opt/test/include",
+	})
+}
+
+// stageInstallSectionsFor is stageInstallSections with the given Tarantool
+// configuration.
+func stageInstallSectionsFor(t *testing.T, tnt rocks.TarantoolConfig) (*client.Rocks, string, string) {
+	t.Helper()
+
 	src := t.TempDir()
 	treeDir := t.TempDir()
 
@@ -292,10 +303,7 @@ build = {
 	r, err := client.New(rocks.Config{
 		Tree:       treeDir,
 		WorkingDir: src,
-		Tarantool: rocks.TarantoolConfig{
-			Prefix:     "/opt/test",
-			IncludeDir: "/opt/test/include",
-		},
+		Tarantool:  tnt,
 	})
 	require.NoError(t, err, "New")
 
@@ -379,6 +387,54 @@ func TestMake_WrapsShebangBinScript(t *testing.T) {
 		"the launcher must exec the configured Tarantool")
 	assert.True(t, strings.HasSuffix(string(wrapper), " '"+realScript+"' \"$@\"\n"),
 		"the launcher must exec the real script, got:\n%s", wrapper)
+}
+
+// TestMake_WrapperExecsConfiguredExecutable — a native Make hard-wired the
+// launcher's interpreter to <Prefix>/bin/tarantool, which does not exist in
+// a flat Tarantool SDK (<sdk>/tarantool, no bin/) nor when the executable
+// lives outside the prefix, so every wrapper it deployed there exec'd a
+// missing file. The launcher must exec Tarantool.Executable when it names a
+// file, and fall back to the prefix only for a bare command name.
+func TestMake_WrapperExecsConfiguredExecutable(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		tnt  rocks.TarantoolConfig
+		want string
+	}{
+		{
+			name: "flat SDK",
+			tnt:  rocks.TarantoolConfig{Executable: "/sdk/tarantool", Prefix: "/sdk", IncludeDir: "/sdk/include/tarantool"},
+			want: "/sdk/tarantool",
+		},
+		{
+			name: "executable outside the prefix",
+			tnt:  rocks.TarantoolConfig{Executable: "/opt/tt/bin/tarantool", Prefix: "/usr", IncludeDir: "/usr/include/tarantool"},
+			want: "/opt/tt/bin/tarantool",
+		},
+		{
+			name: "bare executable name",
+			tnt:  rocks.TarantoolConfig{Executable: "tarantool", Prefix: "/opt/test", IncludeDir: "/opt/test/include"},
+			want: "/opt/test/bin/tarantool",
+		},
+		{
+			name: "nothing configured",
+			want: "/usr/bin/tarantool",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, treeDir, specPath := stageInstallSectionsFor(t, tc.tnt)
+			require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}), "Make")
+
+			wrapper, err := os.ReadFile(filepath.Join(treeDir, "bin", "wi-cli")) //nolint:gosec // test temp path
+			require.NoError(t, err, "read bin/wi-cli")
+			assert.Contains(t, string(wrapper), " exec '"+tc.want+"' -e ",
+				"the launcher must exec the configured Tarantool, got:\n%s", wrapper)
+		})
+	}
 }
 
 // TestMake_NonBuiltinBackendIndexesModules — TNTP-9962: a rock built by any

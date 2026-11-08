@@ -40,7 +40,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `which`-style lookup. A `lua`/`lib`/`bin` subtree installed by any build
   backend is deployed like the rockspec's own sections, `build.modules` is
   read for `builtin` rocks only, and the default `copy_directories` and docs
-  of upstream's `install_files` apply. A rock's `rock_manifest` lists every
+  of upstream's `install_files` apply, a default doc that is a symlink
+  staying inside the sources copied as the file it points to. A rock's
+  `rock_manifest` lists every
   file of its install dir under its plain path, and `ModuleIndex` and
   `CommandIndex` derive its modules and commands from it, as upstream
   `repos.package_modules` and `package_commands` do. When several rocks
@@ -64,7 +66,24 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   upstream's `$(PREFIX)`, `$(LUADIR)`, … name it; `cmake` builds out of tree
   in `build.luarocks` and installs under the rock's `$(PREFIX)` when the
   rockspec sets no `CMAKE_INSTALL_PREFIX`. The `builtin` backend reads only
-  inside the sources and writes only inside its build dir.
+  inside the sources and writes only inside its build dir. Before any
+  backend runs, a rockspec's `build.extra_files` are written into the
+  sources and its `build.patches` applied, by a port of upstream's
+  `luarocks/tools/patch.lua` checked against it, letting a patch create and
+  delete files for `rockspec_format` 3.0, and the sources are marked so that
+  a second build of them applies nothing again; a name that leaves the
+  sources fails with `rocks.ErrUnsafePath`. The
+  `cfg.variables` upstream sets on unix expand to their values: `$(LD)`
+  (the compiler), `$(AR)`, `$(RANLIB)`, `$(LDFLAGS)`, `$(LIB_EXTENSION)`
+  (`so`), `$(OBJ_EXTENSION)` (`o`), `$(TEST)` and the tool names
+  (`$(CP)`, `$(MKDIR)`, …), and `$(LUA)` without a configured executable
+  to `tarantool` in `LUA_BINDIR`. Each of a
+  rockspec's `external_dependencies` is looked up as upstream's
+  `check_external_deps` does, under `/usr/local`, `/usr`, `/` and the
+  Tarantool prefix, and its `$(<NAME>_DIR)`, `$(<NAME>_INCDIR)`,
+  `$(<NAME>_LIBDIR)` and `$(<NAME>_BINDIR)` name where it was found; one
+  found nowhere does not fail the build, unlike upstream, and gets the
+  directories under `/usr/local`.
 - remote: Indexes for rock servers that are HTTP(S) endpoints or local
   directories (`/srv/rocks` or `file:///srv/rocks`) — the offline case
   upstream serves with `luarocks --only-server=/path/to/repo`. `NewIndex`
@@ -144,6 +163,17 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   with `--source` / `--rockspec` / `--arch` / `--all` and the same files,
   bytes and returned paths as the lua backend. The three arch flags are
   mutually exclusive, as upstream's parser makes them.
+- client: The native backend runs `Tarantool.Executable`, in the command
+  wrappers it deploys and in the LuaJIT probe of `Search`, when it names a
+  file, else `<Tarantool.Prefix>/bin/tarantool`, so both work in a flat
+  Tarantool SDK and with an executable outside the prefix.
+- client: On the native backend the VM provides a `tarantool` rock at the
+  x.y.z part of `Tarantool.Version`, everything before its first dash, at
+  revision 1, alike to the dependency resolution of `Install`, to `Search`
+  and to `Download`, so every form tt passes provides it: `3.9.0-0-g1a2b3c4`,
+  `3.9.0` and `3.9.0-1` as `3.9.0-1`, `2.11.1-0-g57f5f6e-r579` as
+  `2.11.1-1`, `3.3.0-entrypoint-31-g9eb3974` as `3.3.0-1`. A version whose
+  part does not parse provides none and is logged as a warning.
 - client: The native backend keeps every path a rock names inside its
   directory, a deliberate strictness beyond upstream and the lua backend:
   `source.dir` and `source.file` stay inside the fetched sources, `Unpack`

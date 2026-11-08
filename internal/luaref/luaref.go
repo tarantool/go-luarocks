@@ -26,6 +26,9 @@
 //     instead of writing to stderr. os.getenv finds no variable.
 //     io.popen, os.execute, os.remove, os.rename, os.exit, os.tmpname,
 //     loadfile and dofile raise. The reference never touches the host.
+//     WritableFiles turns the in-memory files into a writable file system,
+//     with os.rename and os.remove working on it, for the reference
+//     functions that patch files.
 //   - util.warning (luarocks.core.util) records the warning instead of
 //     printing it; Warnings returns the record. vers.parse_version reports an
 //     unparsable version only this way.
@@ -159,6 +162,12 @@ type VM struct {
 	repo    *Repo
 	written map[string]string
 	stderr  []string
+
+	// cwd, dirs and fileStderr are the state of WritableFiles: the current
+	// directory, the set of directories, and what io.stderr was given.
+	cwd        string
+	dirs       map[string]bool
+	fileStderr strings.Builder
 }
 
 // New boots a VM whose stub cfg.each_platform yields platforms, or

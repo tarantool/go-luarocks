@@ -825,6 +825,8 @@ func harvestBuild(tbl *lua.LTable, overlay bool) (rocks.Build, error) {
 		CopyDirectories:  stringArray(tbl.RawGetString("copy_directories")),
 		BuildPass:        optBool(tbl.RawGetString("build_pass")),
 		InstallPass:      optBool(tbl.RawGetString("install_pass")),
+		ExtraFiles:       stringMap(tbl.RawGetString("extra_files")),
+		Patches:          stringMap(tbl.RawGetString("patches")),
 	}
 
 	if !allowedBuildTypes[b.Type] {

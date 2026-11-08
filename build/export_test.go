@@ -50,6 +50,30 @@ func RunCmd(ctx context.Context, name string, args []string, cwd string, extraEn
 // SubstituteVars exposes substituteVars for external tests.
 func SubstituteVars(s string, vars map[string]string) string { return substituteVars(s, vars) }
 
+// ExternalDepVars returns the variables addExternalDepVars adds for spec on
+// goos, with multiarch as `gcc -print-multiarch` and the dependencies looked
+// up under prefixes.
+func ExternalDepVars(spec *rocks.Rockspec, goos, multiarch string, prefixes []string) map[string]string {
+	vars := map[string]string{}
+	extDepPlatformFor(goos, multiarch).addVars(spec, prefixes, vars)
+
+	return vars
+}
+
+// ExternalDepsPrefixes exposes the external_deps_dirs of goos for cfg.
+func ExternalDepsPrefixes(cfg rocks.Config, goos string) []string {
+	return extDepPlatformFor(goos, "").externalDepsPrefixes(cfg)
+}
+
+// ApplyPatch exposes applyPatch, upstream fs.apply_patch, for external tests.
+func ApplyPatch(srcDir, name, data string, createDelete bool) error {
+	return applyPatch(srcDir, name, data, createDelete)
+}
+
+// ErrPatchCrash exposes errPatchCrash: the condition under which upstream's
+// patch tool raises a Lua error.
+var ErrPatchCrash = errPatchCrash
+
 // BuildVars exposes buildVars for external tests.
 func BuildVars(spec *rocks.Rockspec, cfg rocks.Config) map[string]string {
 	return buildVars(spec, cfg)

@@ -101,9 +101,12 @@ turns stray writes into test failures:
 A canary test in `internal/sandbox` checks these guarantees from the inside,
 so a weakened sandbox fails the run; outside the sandbox it skips.
 
-Without a command, the script runs `go test -count=1 -tags
+Without a command, the script runs `go test -count=1 -timeout 45m -tags
 integration,integration_luaengine` over every package; `-count=1` keeps
-results from coming out of the test cache instead of running in the sandbox.
+results from coming out of the test cache instead of running in the sandbox,
+and the timeout leaves room for the client package's parity and interop
+suites, which take minutes. Pass `-timeout` to a custom command that runs
+them too.
 
 ```sh
 scripts/test-in-docker.sh                # the whole suite, offline

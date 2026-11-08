@@ -197,6 +197,8 @@ func mergeBuild(dst, src *rocks.Build) {
 	dst.Variables = mergeStringMap(dst.Variables, src.Variables)
 	dst.BuildVariables = mergeStringMap(dst.BuildVariables, src.BuildVariables)
 	dst.InstallVariables = mergeStringMap(dst.InstallVariables, src.InstallVariables)
+	dst.ExtraFiles = mergeStringMap(dst.ExtraFiles, src.ExtraFiles)
+	dst.Patches = mergeStringMap(dst.Patches, src.Patches)
 	dst.Install = mergeInstall(dst.Install, src.Install)
 }
 
