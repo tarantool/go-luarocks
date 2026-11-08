@@ -7,8 +7,9 @@
 // The usual pipeline is Eval → MergePlatforms(spec, RuntimePlatforms()) →
 // Validate: MergePlatforms folds the per-platform overlays (source.platforms,
 // build.platforms, ...) into the base fields for the running OS, and Validate
-// enforces required fields, the version grammar, the rockspec_format ceiling
-// (SupportedRockspecFormat) and the build-type allowlist, surfacing
+// enforces required fields, the version grammar, the rockspec_format (one of
+// the schemas upstream declares, none newer than
+// SupportedRockspecFormat) and the build-type allowlist, surfacing
 // rocks.ErrUnsupportedRockspecFeature for anything outside the implemented
 // subset.
 //

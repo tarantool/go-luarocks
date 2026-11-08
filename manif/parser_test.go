@@ -130,3 +130,152 @@ func TestParseLongBracketNormalizesEOL(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "line1\nline2\nline3", m["note"], "interior CR/CRLF must normalize to LF")
 }
+
+// TestParseRejectsNumberRunningIntoName checks that a number followed at once
+// by a name byte or a dot is one malformed number, as the Lua lexer reads it.
+func TestParseRejectsNumberRunningIntoName(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range []string{"A=0X=0\n", "x = 1a = 2\n", "x = { 1.5.3 }\n", "x = 0x10\n", "x = 1_\n"} {
+		_, err := manif.Parse([]byte(src))
+		require.ErrorIs(t, err, manif.ErrParse, "Parse(%q)", src)
+	}
+
+	v, err := manif.Parse([]byte("x = { 1,2;-3.5e1 }\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"x": []any{int64(1), int64(2), -35.0}}, v)
+}
+
+// TestParseRejectsKeywordKeys checks that a Lua keyword is no key, at the
+// top level or in a table, as in Lua.
+func TestParseRejectsKeywordKeys(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range []string{"end = 1\n", "x = { end = 1 }\n", "x = { nil = 1 }\n", "x = { true = 1 }\n"} {
+		_, err := manif.Parse([]byte(src))
+		require.ErrorIs(t, err, manif.ErrParse, "Parse(%q)", src)
+	}
+
+	v, err := manif.Parse([]byte("x = { [\"end\"] = 1, ends = 2, true }\n"))
+	require.NoError(t, err)
+
+	m, ok := v.(map[string]any)
+	require.True(t, ok)
+
+	tbl, ok := manif.AsMixedTable(m["x"])
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{"end": int64(1), "ends": int64(2)}, tbl.Str)
+	assert.Equal(t, map[int64]any{1: true}, tbl.Num)
+}
+
+// TestParseCRIsLineBreak checks that a raw CR breaks a line as LF does: it
+// ends a comment and cannot sit inside a short string.
+func TestParseCRIsLineBreak(t *testing.T) {
+	t.Parallel()
+
+	v, err := manif.Parse([]byte("-- comment\rx = 1\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"x": int64(1)}, v)
+
+	for _, src := range []string{"x = \"a\rb\"\n", "x = 'a\r'\n"} {
+		_, err := manif.Parse([]byte(src))
+		require.ErrorIs(t, err, manif.ErrParse, "Parse(%q)", src)
+	}
+}
+
+// TestParseKeysWithoutGoShape covers the table keys Lua allows but the Go
+// shapes cannot hold: Parse must report them, never panic.
+func TestParseKeysWithoutGoShape(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range []string{
+		"x = { [true] = 1 }\n",
+		"x = { [false] = 1, a = 2 }\n",
+		"x = { [{}] = 1 }\n",
+		"x = { [{ 1 }] = 1, [1] = 2 }\n",
+		"x = { [1.5] = 1, [\"1.5\"] = 2 }\n",
+		"x = { [0.5] = 1, [1] = 2, [\"1\"] = 3 }\n",
+		"x = " + strings.Repeat("{", 101) + strings.Repeat("}", 101) + "\n",
+	} {
+		_, err := manif.Parse([]byte(src))
+		require.ErrorIs(t, err, manif.ErrParse, "Parse(%q)", src)
+	}
+}
+
+// TestParseShapesByKeyValue checks that a table's shape follows its keys as
+// Lua sees them, not their order or spelling: integer keys 1..N in any order
+// make an array, an integral number key is that integer, and a repeated key
+// keeps the last value.
+func TestParseShapesByKeyValue(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		src  string
+		want any
+	}{
+		{"x = { [2] = \"b\", [1] = \"a\" }\n", []any{"a", "b"}},
+		{"x = { [1.0] = \"a\" }\n", []any{"a"}},
+		{"x = { [2] = \"b\", \"a\" }\n", []any{"a", "b"}},
+		{"x = { [1] = \"a\", [1] = \"b\" }\n", []any{"b"}},
+		{"x = { [-0.0] = \"z\", [3.0] = \"c\" }\n", map[string]any{"0": "z", "3": "c"}},
+	} {
+		v, err := manif.Parse([]byte(c.src))
+		require.NoError(t, err, "Parse(%q)", c.src)
+
+		m, ok := v.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, c.want, m["x"], "Parse(%q)", c.src)
+	}
+
+	v, err := manif.Parse([]byte("x = { [2.0] = 2, [1] = 1, k = \"v\" }\n"))
+	require.NoError(t, err)
+
+	m, ok := v.(map[string]any)
+	require.True(t, ok)
+
+	tbl, ok := manif.AsMixedTable(m["x"])
+	require.True(t, ok, "x is %T, want mixed table", m["x"])
+	assert.Equal(t, []int64{1, 2}, tbl.NumKeys)
+	assert.Equal(t, map[string]any{"k": "v"}, tbl.Str)
+}
+
+// TestParseReportsPositionalOverlap checks the report the differential test
+// relies on: a positional entry and an explicit key on the same index, in
+// either order, with the value given last kept.
+func TestParseReportsPositionalOverlap(t *testing.T) {
+	t.Parallel()
+
+	for src, want := range map[string]bool{
+		"x = { 0, [1] = 1 }\n":           true,
+		"x = { [1.0] = 1, 0 }\n":         true,
+		"x = { [1] = 0, [1] = 1 }\n":     false,
+		"x = { [2] = 1, 0 }\n":           false,
+		"x = { y = { \"a\", [1] = 1 } }": true,
+	} {
+		_, overlap, err := manif.ParseReportingOverlap([]byte(src))
+		require.NoError(t, err, "Parse(%q)", src)
+		assert.Equal(t, want, overlap, "Parse(%q)", src)
+	}
+
+	v, err := manif.Parse([]byte("x = { 0, [1] = 1 }\n"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"x": []any{int64(1)}}, v)
+}
+
+// TestParseMixedTableWithFloatKey checks that a table mixing integer, string
+// and non-integral number keys, which the mixed table cannot hold, falls back
+// to stringified keys like any other non-array table.
+func TestParseMixedTableWithFloatKey(t *testing.T) {
+	t.Parallel()
+
+	v, err := manif.Parse([]byte("x = { [1] = 1, a = 2, [1.5] = 3 }\n"))
+	require.NoError(t, err)
+
+	m, ok := v.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{"1": int64(1), "a": int64(2), "1.5": int64(3)}, m["x"])
+
+	v, err = manif.Parse([]byte("x = " + strings.Repeat("{", 100) + strings.Repeat("}", 100) + "\n"))
+	require.NoError(t, err, "100 nested tables are within the bound")
+	assert.NotNil(t, v)
+}

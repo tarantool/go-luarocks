@@ -60,3 +60,25 @@ func (vm *VM) LoadRockspec(src string) (spec *lua.LTable, ok bool, msg string, e
 
 	return t, true, "", nil
 }
+
+// TypeCheckRockspec runs type_rockspec.check (luarocks.type.rockspec) on spec,
+// plain Go data in ToLua form, with no globals: the schema check a rockspec
+// passes when it is loaded, alone. ok is false when the schema rejects it;
+// msg is the error then.
+func (vm *VM) TypeCheckRockspec(spec any) (ok bool, msg string, err error) {
+	tbl, err := vm.ToLua(spec)
+	if err != nil {
+		return false, "", err
+	}
+
+	res, err := vm.Call("luarocks.type.rockspec", "check", tbl, vm.L.NewTable())
+	if err != nil {
+		return false, "", err
+	}
+
+	if res[0] != lua.LTrue {
+		return false, errMsg(res), nil
+	}
+
+	return true, "", nil
+}

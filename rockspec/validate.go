@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
@@ -25,6 +26,10 @@ var allowedBuildTypes = map[string]bool{
 // tracking upstream type_rockspec.rockspec_format. A rockspec declaring a
 // newer format is rejected before feature gating.
 const SupportedRockspecFormat = "3.0"
+
+// rockspecFormats are the rockspec_format values upstream declares a schema
+// for (type/rockspec.lua declare_schemas); any other is unknown.
+var rockspecFormats = map[string]bool{"1.0": true, "1.1": true, "3.0": true}
 
 // defaultRockspecFormat is the rockspec_format assumed when a rockspec omits
 // the field, matching upstream (rockspec.format_is_at_least treats an absent
@@ -89,6 +94,24 @@ func unsupportedFieldErr(field, format, required string) error {
 		field, format, required)
 }
 
+// errPackageNotPathComponent is wrapped by the error Validate returns for a
+// package name that would not stay a single directory under the rocks dir.
+var errPackageNotPathComponent = errors.New("package name is not a single path component")
+
+// checkPackageName rejects a package name that would escape or alias its
+// directory once joined into <rocks-dir>/<package>/<version>. Upstream
+// asserts that the name has no "/" (path.lua:68, path.install_dir, which
+// loading a rockspec reaches through configure_paths). Go rejects "\\", a
+// separator on Windows, and the names "." and "..", which upstream misses,
+// too: "." installs into the rocks dir itself and ".." above it.
+func checkPackageName(name string) error {
+	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fmt.Errorf("rockspec: invalid package %q: %w", name, errPackageNotPathComponent)
+	}
+
+	return nil
+}
+
 // Validate performs presence and feature-allowlist checks on a harvested
 // Rockspec. It deliberately does NOT re-do every type assertion the upstream
 // `type_check.lua` schema enforces — the harvest in Eval already routes each
@@ -100,6 +123,10 @@ func Validate(spec *rocks.Rockspec) error {
 
 	if spec.Package == "" {
 		return errors.New("rockspec: missing required field 'package'")
+	}
+
+	if err := checkPackageName(spec.Package); err != nil {
+		return err
 	}
 
 	if spec.Version == "" {
@@ -120,6 +147,14 @@ func Validate(spec *rocks.Rockspec) error {
 	// support before type-checking.
 	if spec.RockspecFormat != "" && formatExceeds(spec.RockspecFormat, SupportedRockspecFormat) {
 		return fmt.Errorf("rockspec: Rockspec format %s is not supported, please upgrade LuaRocks", spec.RockspecFormat)
+	}
+
+	// A format that is not newer must still name one of the schemas, by its
+	// exact spelling: upstream looks the string up in the schema table
+	// (type/rockspec.lua check_rockspec_using_version), so "2.0", "3" or
+	// "0" are unknown.
+	if spec.RockspecFormat != "" && !rockspecFormats[spec.RockspecFormat] {
+		return fmt.Errorf("rockspec: unknown rockspec format %s", spec.RockspecFormat)
 	}
 
 	// Fields stamped with a schema _version must not appear under an older

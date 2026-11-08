@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -280,7 +281,7 @@ func FuzzParse(f *testing.F) {
 			return
 		}
 
-		gv, err := manif.Parse([]byte(src))
+		gv, overlap, err := manif.ParseReportingOverlap([]byte(src))
 		if err != nil {
 			return
 		}
@@ -294,7 +295,7 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("Parse accepts what upstream fails to load (%s): %q", msg, src)
 		}
 
-		if vmLexerArtifact(src) {
+		if vmLexerArtifact(src) || beyondDouble(src) || overlap { // P1, P8
 			return
 		}
 
@@ -312,6 +313,74 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("Parse and upstream disagree\nGo:       %#v\nupstream: %#v\ninput:    %q", got, want, src)
 		}
 	})
+}
+
+// Accepted divergences. An input that hits one skips the comparison it would
+// fail, and only that one; the IDs name the entries of the divergence list.
+//
+//   - P1: an integer literal of 2^53 or more in magnitude. Parse keeps it as
+//     an exact int64; Lua reads a double, rounded beyond 2^53, and keys a
+//     mixed table by it only below 2^53 in luaShape's projection.
+//   - P8: a table where a positional entry and an explicit key name the
+//     same index ({ 0, [1] = 1 }). Parse keeps the value given last, as
+//     LuaJIT does; gopher-lua, which runs the reference, stores positional
+//     entries after the explicit ones, as PUC Lua does. A VM artifact, like
+//     vmLexerArtifact, that the reference cannot judge.
+//   - W3: an integer of 1e14 or more in magnitude. Write prints an int64's
+//     digits; upstream's "%.14g" prints a double, in the exponent form from
+//     1e14 on. Parse reads every integer literal as an int64, and floats are
+//     written as upstream writes them.
+
+// digitRun matches a run of decimal digits.
+var digitRun = regexp.MustCompile(`[0-9]+`)
+
+// beyondDouble reports P1: the text has a run of digits of 2^53 or more.
+// Like vmLexerArtifact it looks at the raw text, strings included, and skips
+// only the value comparison.
+func beyondDouble(src string) bool {
+	for _, run := range digitRun.FindAllString(src, -1) {
+		if n, err := strconv.ParseUint(run, 10, 64); err != nil || n >= 1<<53 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// longInteger is the smallest magnitude "%.14g" prints in the exponent form.
+const longInteger = 1e14
+
+// hasLongInteger reports W3: a Parse result holds an int64 value or mixed
+// table key of 1e14 or more in magnitude.
+func hasLongInteger(v any) bool {
+	switch x := v.(type) {
+	case int64:
+		return x >= longInteger || x <= -longInteger
+	case []any:
+		return slices.ContainsFunc(x, hasLongInteger)
+	case map[string]any:
+		for _, e := range x {
+			if hasLongInteger(e) {
+				return true
+			}
+		}
+	default:
+		if mt, ok := manif.AsMixedTable(v); ok {
+			for k, e := range mt.Num {
+				if hasLongInteger(k) || hasLongInteger(e) {
+					return true
+				}
+			}
+
+			for _, e := range mt.Str {
+				if hasLongInteger(e) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // leadingZero matches a number literal with a leading zero.
@@ -441,6 +510,10 @@ func FuzzWrite(f *testing.F) {
 		}
 
 		if gerr != nil {
+			return
+		}
+
+		if hasLongInteger(gv) {
 			return
 		}
 

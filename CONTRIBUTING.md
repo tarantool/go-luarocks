@@ -117,6 +117,9 @@ input through the Go implementation and through the vendored upstream Lua code
 manifest reading and writing, source-directory and rock-name parsing), and the
 two must agree. The upstream side runs in a bare gopher-lua VM set up by
 `internal/luaref`, offline; its package comment lists the stubs it uses.
+The differences accepted on purpose are listed in each file, each under an
+ID and with its reason; an input that hits one skips only the comparison it
+would fail.
 
 Every target is a Go fuzz target, so a plain `go test` runs its seed corpus.
 To explore, fuzz one target at a time:

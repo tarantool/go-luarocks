@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -40,9 +42,54 @@ var depStringSeeds = []string{
 	"foo !! 1.0", "foo => 1.0", "foo bar", "foo >= 1.0 bar",
 }
 
+// schemaAgrees checks the schema pattern Eval applies to a dependency string
+// against upstream's type_rockspec.check, for every schema a dependency
+// string meets: the base list in formats 1.0 and 3.0, build_dependencies,
+// and the per-platform list in 3.0, which keeps the 1.0 pattern. It returns
+// whether the most permissive of them, 3.0, accepts s.
+func schemaAgrees(t *testing.T, vm *luaref.VM, s string) bool {
+	t.Helper()
+
+	spec := func(format, field string, deps any) map[string]any {
+		return map[string]any{
+			"rockspec_format": format, "package": "x", "version": "1-1",
+			"source": map[string]any{"url": "u"}, "build": map[string]any{},
+			field: deps,
+		}
+	}
+
+	accepts := false
+
+	for _, c := range []struct {
+		name       string
+		spec       map[string]any
+		namespaced bool
+	}{
+		{"1.0 dependencies", spec("1.0", "dependencies", []any{s}), false},
+		{"3.0 dependencies", spec("3.0", "dependencies", []any{s}), true},
+		{"3.0 build_dependencies", spec("3.0", "build_dependencies", []any{s}), true},
+		{"3.0 dependencies.platforms", spec("3.0", "dependencies",
+			map[string]any{"platforms": map[string]any{"linux": []any{s}}}), false},
+	} {
+		lok, msg, err := vm.TypeCheckRockspec(c.spec)
+		if err != nil {
+			t.Fatalf("reference: %v", err)
+		}
+
+		if gok := rockspec.DepStringMatchesSchemaForTest(s, c.namespaced); gok != lok {
+			t.Fatalf("dependency %q in %s: Go schema accepts: %v; upstream accepts: %v (%s)", s, c.name, gok, lok, msg)
+		}
+
+		accepts = accepts || lok
+	}
+
+	return accepts
+}
+
 // FuzzDepString checks the rockspec dependency-string parser against
 // queries.from_dep_string: the same strings are rejected, and the rest give
-// the same name, namespace and constraints.
+// the same name, namespace and constraints. First it checks the schema
+// pattern a dependency string must match to reach the parser.
 func FuzzDepString(f *testing.F) {
 	for _, s := range depStringSeeds {
 		f.Add(s)
@@ -60,11 +107,26 @@ func FuzzDepString(f *testing.F) {
 			return
 		}
 
+		if !schemaAgrees(t, vm, s) {
+			// D1-D3: from_dep_string reads a name and constraints up to the
+			// first "/" after the name and ignores the rest, which
+			// parseDepString rejects or reads otherwise ("a/", "a >= 1/x").
+			// No rockspec can carry such a string: the schema check above,
+			// on both sides, rejects it before either parser runs.
+			return
+		}
+
 		gd, gok := rockspec.ParseDepStringForTest(s)
+
+		vm.ResetWarnings()
 
 		lq, lok, msg, err := vm.FromDepString(s)
 		if err != nil {
 			t.Fatalf("reference: %v", err)
+		}
+
+		if !gok && lok && badConstraintVersion(vm, s) {
+			return
 		}
 
 		if gok != lok {
@@ -84,6 +146,72 @@ func FuzzDepString(f *testing.F) {
 			t.Fatalf("dependency %q: %s", s, d)
 		}
 	})
+}
+
+// Accepted divergences of the rockspec loader. An input that hits one skips
+// the comparison it would fail, and only that one; the IDs name the entries
+// of the divergence list, and those of the deps targets are described with
+// them in deps/diff_fuzz_test.go.
+//
+//   - V4, V6: a constraint version with a run of digits beyond int64, or
+//     starting with ".", "_" or "-". Upstream reads a rounded float, or warns
+//     and reads a 0; Go rejects the dependency.
+//   - R1, R2: an empty package or source.url. Upstream loads the rockspec;
+//     Validate requires both to be non-empty: an empty package would install
+//     into the rocks dir itself, and an empty URL fetches nothing.
+//   - R5: an unknown or mistyped field in a nested table, such as an unknown
+//     key in description. Upstream's type_check rejects it (unknown fields
+//     are fatal unless accept_unknown_fields); Eval reads the fields it knows
+//     and ignores the rest. Unknown top-level variables are rejected on both
+//     sides.
+//   - R6: the package names "." and "..", and names with "\". Validate
+//     rejects them, as names that would install into or above the rocks dir;
+//     upstream's path.install_dir asserts against "/" only.
+
+// badConstraintVersion reports V4 or V6 for an input upstream accepted and Go
+// did not: upstream warned that it could not parse a version, or the input
+// has a run of digits beyond int64.
+func badConstraintVersion(vm *luaref.VM, s string) bool {
+	if len(vm.Warnings()) > 0 {
+		return true
+	}
+
+	for _, run := range digitRun.FindAllString(s, -1) {
+		if _, err := strconv.ParseInt(run, 10, 64); err != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// digitRun matches a run of decimal digits.
+var digitRun = regexp.MustCompile(`[0-9]+`)
+
+// acceptedDivergence reports whether the verdicts of the Go loader, gerr, and
+// of upstream, lok and msg, differ in one of the accepted ways above.
+func acceptedDivergence(vm *luaref.VM, src string, gerr error, lok bool, msg string) bool {
+	if gerr == nil {
+		// R5.
+		return !lok && (strings.Contains(msg, "Unknown field ") ||
+			strings.Contains(msg, "Type mismatch on field description."))
+	}
+
+	if !lok {
+		return false
+	}
+
+	switch {
+	case errors.Is(gerr, rockspec.ErrPackageNotPathComponent): // R6
+		return true
+	case strings.Contains(gerr.Error(), "missing required field 'package'"), // R1
+		strings.Contains(gerr.Error(), "missing required field 'source.url'"): // R2
+		return true
+	case strings.Contains(gerr.Error(), "Parse error processing dependency"): // V4, V6
+		return badConstraintVersion(vm, src)
+	}
+
+	return false
 }
 
 // depView, moduleView and rockspecView are the parts of a loaded rockspec
@@ -313,12 +441,18 @@ func compareRockspec(t *testing.T, vm *luaref.VM, path, src string) {
 
 	gspec, gerr := goLoad(path)
 
+	vm.ResetWarnings()
+
 	lspec, lok, msg, err := vm.LoadRockspec(src)
 	if err != nil {
 		t.Fatalf("reference: %v", err)
 	}
 
 	if gerr != nil && lok && buildTimeCheck(gerr) {
+		return
+	}
+
+	if acceptedDivergence(vm, src, gerr, lok, msg) {
 		return
 	}
 
@@ -454,13 +588,6 @@ func FuzzRockspec(f *testing.F) {
 	})
 }
 
-// divergentFixtures are the fixtures on which Go and upstream are known to
-// disagree, each with the divergence; they come back in once it is fixed.
-var divergentFixtures = map[string]string{
-	"with_external_dep-0.1-1.rockspec": "known divergence: Eval drops a module's sources given as a " +
-		"string (sources = \"a.c\"), which upstream's builtin backend compiles",
-}
-
 // fixtureRockspecs lists the rockspecs of the rockspec tests and of the
 // upstream spec fixtures.
 func fixtureRockspecs(t *testing.T) []string {
@@ -499,10 +626,6 @@ func TestRockspecFixturesMatchUpstream(t *testing.T) {
 
 		t.Run(p, func(t *testing.T) {
 			t.Parallel()
-
-			if reason, ok := divergentFixtures[filepath.Base(p)]; ok {
-				t.Skip(reason)
-			}
 
 			vm, err := luaref.New()
 			if err != nil {

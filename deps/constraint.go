@@ -24,17 +24,22 @@ var operatorAliases = map[string]string{
 	"!=": "~=",
 }
 
+// luaSpace is Lua's %s class in the C locale. RE2's \s lacks the vertical
+// tab, and strings.TrimSpace trims Unicode spaces too, which Lua does not.
+const luaSpace = " \t\n\v\f\r"
+
 // constraintRe matches one constraint segment "<op><version>". The op group
 // is greedy over `[<>=~!]*` so multi-character operators like ">=" win
 // over a bare ">". Trailing whitespace + comma are stripped by the caller
 // when splitting segments.
-var constraintRe = regexp.MustCompile(`^\s*(@?)([<>=~!]*)\s*([0-9A-Za-z._-]+)\s*$`)
+var constraintRe = regexp.MustCompile(`^[ \t\n\v\f\r]*(@?)([<>=~!]*)[ \t\n\v\f\r]*([0-9A-Za-z._-]+)[ \t\n\v\f\r]*$`)
 
 // constraintTokenRe matches ONE leading constraint and captures the remaining
 // tail in group 4, so ParseConstraints can consume constraints separated by
 // whitespace, commas, or both — mirroring upstream parse_constraint's [%s,]*
-// trailing separator class (queries.lua:114).
-var constraintTokenRe = regexp.MustCompile(`^\s*(@?)([<>=~!]*)\s*([0-9A-Za-z._-]+)[\s,]*(.*)$`)
+// trailing separator class (queries.lua:114). The tail may span lines, as
+// Lua's "." matches a newline.
+var constraintTokenRe = regexp.MustCompile(`(?s)^[ \t\n\v\f\r]*(@?)([<>=~!]*)[ \t\n\v\f\r]*([0-9A-Za-z._-]+)[ \t\n\v\f\r,]*(.*)$`)
 
 // ParseConstraint parses one constraint segment (e.g. ">= 1.2.3", "~> 1.2",
 // "1.0" with implicit "==") into a rocks.VersionConstraint.
@@ -71,7 +76,7 @@ func ParseConstraint(s string) (rocks.VersionConstraint, error) {
 func ParseConstraints(s string) ([]rocks.VersionConstraint, error) {
 	out := []rocks.VersionConstraint{}
 
-	rest := strings.TrimSpace(s)
+	rest := strings.Trim(s, luaSpace)
 	for rest != "" {
 		m := constraintTokenRe.FindStringSubmatch(rest)
 		if m == nil {
@@ -89,7 +94,7 @@ func ParseConstraints(s string) ([]rocks.VersionConstraint, error) {
 		}
 
 		out = append(out, rocks.VersionConstraint{Op: op, Version: v})
-		rest = strings.TrimSpace(m[4])
+		rest = strings.Trim(m[4], luaSpace)
 	}
 
 	return out, nil
@@ -161,9 +166,11 @@ func partialMatch(version, requested rocks.Version) bool {
 	// Upstream gates on `if requested.revision then` (vers.lua:172): since 0 is
 	// truthy in Lua, an explicit "-0" revision IS enforced. HasRevision
 	// distinguishes an explicit "-0" from an absent revision, so "~> 1.2-0"
-	// correctly demands candidate revision 0 (glr-wik).
+	// correctly demands candidate revision 0 (glr-wik). A candidate without
+	// a revision has a nil one upstream, which equals no number, so it fails
+	// even "~> 1.2-0".
 	if requested.HasRevision {
-		return version.Revision == requested.Revision
+		return version.HasRevision && version.Revision == requested.Revision
 	}
 
 	return true

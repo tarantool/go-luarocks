@@ -1,6 +1,7 @@
 package rockspec_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,7 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/build"
 	"github.com/tarantool/go-luarocks/rockspec"
+	"github.com/tarantool/go-luarocks/tree"
 )
 
 func tdata(name string) string {
@@ -68,6 +71,15 @@ build = { type = "builtin" }
 	spec, err := rockspec.Eval(path, rocks.RockspecConfig{})
 	require.NoError(t, err)
 	assert.Equal(t, "luafoo", spec.Package, "Package should be lowercased")
+
+	// Only ASCII letters are lowered, as Lua's string.lower does; other
+	// bytes, UTF-8 or not, stay as they are.
+	spec, err = rockspec.Eval(writeTempRockspec(t, "package = \"\xc3\x84Bc\xff\"\n"+`version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = { type = "builtin" }
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, "\xc3\x84bc\xff", spec.Package)
 }
 
 func TestEval_DeployWrapBinScripts(t *testing.T) {
@@ -401,10 +413,20 @@ build = { type = "builtin" }
 			extra:   `dependencies = { 1234 }`,
 			wantErr: "Type mismatch on field dependencies: expected a string, got number",
 		},
-		{ // glr-vkx: leading operator, no name.
-			name:    "dependency parse error",
+		{ // glr-vkx: leading operator, no name; the schema pattern rejects it.
+			name:    "dependency without name",
 			extra:   `dependencies = { ">= 1.0" }`,
-			wantErr: "Parse error processing dependency '>= 1.0'",
+			wantErr: "invalid value '>= 1.0' does not match a valid dependency string",
+		},
+		{ // The schema pattern accepts it, from_dep_string does not.
+			name:    "dependency parse error",
+			extra:   `dependencies = { "foo !! 1.0" }`,
+			wantErr: "Parse error processing dependency 'foo !! 1.0'",
+		},
+		{ // A namespace needs format 3.0.
+			name:    "namespaced dependency before 3.0",
+			extra:   `dependencies = { "user/bar" }`,
+			wantErr: "invalid value 'user/bar' does not match a valid dependency string",
 		},
 		{ // glr-zvy: typo'd global.
 			name:    "unknown global",
@@ -473,6 +495,223 @@ func TestValidate_RejectsFutureRockspecFormat(t *testing.T) {
 	// 3.0 itself is accepted.
 	spec.RockspecFormat = rockspec.SupportedRockspecFormat
 	require.NoError(t, rockspec.Validate(spec))
+}
+
+// TestEval_PlatformTableHoldingItself checks that a build or source table
+// listed among its own platform overlays is read one level deep, as
+// MergePlatforms applies it, rather than without end.
+func TestEval_PlatformTableHoldingItself(t *testing.T) {
+	t.Parallel()
+
+	spec, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+local s = { url = "https://example.com/x.tar.gz" }
+s.platforms = { unix = s }
+source = s
+local b = { type = "builtin", modules = { m = "m.lua" } }
+b.platforms = { unix = b, linux = { platforms = { linux = b } } }
+build = b
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "builtin", spec.Build.Platforms["unix"].Type)
+	assert.Nil(t, spec.Build.Platforms["unix"].Platforms)
+	assert.Nil(t, spec.Build.Platforms["linux"].Platforms)
+	assert.Equal(t, "https://example.com/x.tar.gz", spec.Source.Platforms["unix"].URL)
+	assert.Nil(t, spec.Source.Platforms["unix"].Platforms)
+}
+
+// TestEval_ModuleListsGivenAsStrings checks that a module's sources and flag
+// lists may be a single string, and that the array part of a module table
+// takes precedence over its sources field, as in the builtin backend.
+func TestEval_ModuleListsGivenAsStrings(t *testing.T) {
+	t.Parallel()
+
+	spec, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = {
+   type = "builtin",
+   modules = {
+      a = { sources = "a.c", incdirs = "$(FOO_INCDIR)", libdirs = "lib",
+            libraries = "foo", defines = "X=1" },
+      b = { "b1.c", "b2.c", sources = { "ignored.c" } },
+      c = { sources = {} },
+   },
+}
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, rocks.Module{
+		Sources: []string{"a.c"}, Incdirs: []string{"$(FOO_INCDIR)"}, Libdirs: []string{"lib"},
+		Libraries: []string{"foo"}, Defines: []string{"X=1"},
+	}, spec.Build.Modules["a"])
+	assert.Equal(t, []string{"b1.c", "b2.c"}, spec.Build.Modules["b"].Sources)
+	assert.Nil(t, spec.Build.Modules["c"].Sources)
+}
+
+// TestEval_InstallArrayPart checks that the array entries of build.install,
+// which upstream installs under their base name right in the group's
+// directory, are kept under the key naming that destination.
+func TestEval_InstallArrayPart(t *testing.T) {
+	t.Parallel()
+
+	spec, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = {
+   type = "builtin",
+   install = {
+      bin = { "bin/x", "scripts/y.sh", z = "bin/z" },
+      conf = { "etc/a.conf" },
+      lua = { "src/foo.lua", "src/data.json", ["bar.baz"] = "src/baz.lua" },
+      lib = { "build/core.so" },
+   },
+}
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+
+	assert.Equal(t, rocks.BuildInstall{
+		Bin:  map[string]string{"x": "bin/x", "y.sh": "scripts/y.sh", "z": "bin/z"},
+		Conf: map[string]string{"a.conf": "etc/a.conf"},
+		Lua:  map[string]string{"foo": "src/foo.lua", "[2]": "src/data.json", "bar.baz": "src/baz.lua"},
+		Lib:  map[string]string{"[1]": "build/core.so"},
+	}, spec.Build.Install)
+
+	// A string key naming the same destination wins, as upstream copies it
+	// last.
+	spec, err = rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = { type = "builtin", install = { bin = { "a/x", x = "b/x" } } }
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"x": "b/x"}, spec.Build.Install.Bin)
+
+	for _, install := range []string{
+		`lua = { "src/foo.bar.lua" }`,
+		`lua = { "src/.lua" }`,
+		`lib = { "FOO.LUA" }`,
+		`bin = { "x/.." }`,
+		`conf = { "" }`,
+	} {
+		_, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = { type = "builtin", install = { `+install+` } }
+`), rocks.RockspecConfig{})
+		require.ErrorContains(t, err, "build.install.", "install = { %s }", install)
+	}
+}
+
+// TestEval_InstallArrayPartLandsWhereUpstreamPutsIt builds and deploys a rock
+// whose build.install has array entries, and checks that each file lands
+// where upstream's install_to copies it: under its base name, right in the
+// directory of its group.
+func TestEval_InstallArrayPartLandsWhereUpstreamPutsIt(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+
+	for _, f := range []string{"m.lua", "bin/x", "etc/a.conf", "src/foo.lua", "src/data.json", "build/core.so"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(src, filepath.Dir(f)), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(src, f), []byte("-- "+f+"\n"), 0o600))
+	}
+
+	spec, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = {
+   type = "builtin",
+   modules = { m = "m.lua" },
+   install = {
+      bin = { "bin/x" },
+      conf = { "etc/a.conf" },
+      lua = { "src/foo.lua", "src/data.json" },
+      lib = { "build/core.so" },
+   },
+}
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+
+	rockspec.MergePlatforms(spec, rockspec.RuntimePlatforms())
+	require.NoError(t, rockspec.Validate(spec))
+
+	stage := t.TempDir()
+	require.NoError(t, build.RunBackend(context.Background(), spec, src, stage, rocks.Config{}))
+
+	for _, f := range []string{"bin/x", "conf/a.conf", "lua/foo.lua", "lua/data.json", "lib/core.so"} {
+		assert.FileExists(t, filepath.Join(stage, f), "builtin backend")
+	}
+
+	tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
+	require.NoError(t, err)
+
+	_, err = tr.Deploy(spec, src, stage)
+	require.NoError(t, err)
+
+	for _, f := range []string{
+		filepath.Join(tr.BinDir(), "x"),
+		filepath.Join(tr.ConfDir("p", "1.0-1"), "a.conf"),
+		filepath.Join(tr.DeployLuaDir(), "foo.lua"),
+		filepath.Join(tr.DeployLuaDir(), "data.json"),
+		filepath.Join(tr.DeployLibDir(), "core.so"),
+	} {
+		assert.FileExists(t, f, "tree.Deploy")
+	}
+}
+
+// TestValidate_RejectsPackageEscapingRocksDir checks that a package name
+// must stay one directory under the rocks dir.
+func TestValidate_RejectsPackageEscapingRocksDir(t *testing.T) {
+	t.Parallel()
+
+	spec := &rocks.Rockspec{
+		Version: "1.0-1",
+		Source:  rocks.Source{URL: "https://example.com/x.tar.gz"},
+		Build:   rocks.Build{Type: "builtin"},
+	}
+
+	for _, p := range []string{"../evil", "a/b", "/abs", "a/", `a\b`, `..\x`, ".", ".."} {
+		spec.Package = p
+		require.ErrorIs(t, rockspec.Validate(spec), rockspec.ErrPackageNotPathComponent, "package %q", p)
+	}
+
+	for _, p := range []string{"foo", "foo.bar", "..a", "a..b", "...", "-x"} {
+		spec.Package = p
+		require.NoError(t, rockspec.Validate(spec), "package %q", p)
+	}
+}
+
+// TestValidate_RejectsUnknownRockspecFormat checks that a format no newer
+// than 3.0 must still be one upstream declares a schema for, spelled exactly.
+func TestValidate_RejectsUnknownRockspecFormat(t *testing.T) {
+	t.Parallel()
+
+	spec := &rocks.Rockspec{
+		Package: "p", Version: "1.0-1",
+		Source: rocks.Source{URL: "https://example.com/x.tar.gz"},
+		Build:  rocks.Build{Type: "builtin"},
+	}
+
+	for _, f := range []string{"2.0", "0", "3", "1", "1.0.0", "3.0-0", " 3.0"} {
+		spec.RockspecFormat = f
+		require.ErrorContains(t, rockspec.Validate(spec), "unknown rockspec format", "format %q", f)
+	}
+
+	for _, f := range []string{"1.0", "1.1", "3.0"} {
+		spec.RockspecFormat = f
+		require.NoError(t, rockspec.Validate(spec), "format %q", f)
+	}
+
+	// Written as "", the format is not absent but unknown.
+	_, err := rockspec.Eval(writeTempRockspec(t, `rockspec_format = ""
+package = "p"
+version = "1.0-1"
+source = { url = "https://example.com/x.tar.gz" }
+build = { type = "builtin" }
+`), rocks.RockspecConfig{})
+	require.ErrorContains(t, err, "unknown rockspec format")
 }
 
 func TestValidate_GatesNewFieldsByFormat(t *testing.T) {

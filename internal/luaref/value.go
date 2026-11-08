@@ -7,8 +7,9 @@ import (
 )
 
 // maxDepth bounds the nesting FromLua and ToLua follow, so a cyclic value
-// fails instead of recursing forever.
-const maxDepth = 100
+// fails instead of recursing forever. It is well above the 100 nested tables
+// manif.Parse accepts, so the reference can judge every text Parse reads.
+const maxDepth = 256
 
 // FromLua converts a Lua data value into plain Go: nil, bool, float64 (every
 // Lua number), string, or map[any]any for a table, whose keys are bool,
