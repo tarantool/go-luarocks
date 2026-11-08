@@ -264,3 +264,32 @@ func Chmod(root, path string, mode fs.FileMode) error {
 		return r.Chmod(rel, mode)
 	})
 }
+
+// WalkDir walks the directory dir, inside root, as filepath.WalkDir does,
+// through os.Root: fn gets each path joined onto root as filepath.Join(root,
+// rel) forms it, and a symlink on the way that leads out of root fails the
+// walk with an error wrapping ErrEscapes. Like filepath.WalkDir it does not
+// descend into a symlink to a directory, which fn gets as a non-directory
+// entry; dir itself may be a symlink that stays inside root. A dir that does
+// not exist is an error passed to fn, as with filepath.WalkDir.
+func WalkDir(root, dir string, fn fs.WalkDirFunc) error {
+	rel, err := Rel(root, dir)
+	if err != nil {
+		return err
+	}
+
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = r.Close() }()
+
+	return fs.WalkDir(r.FS(), filepath.ToSlash(rel), func(p string, d fs.DirEntry, err error) error {
+		if err != nil && strings.Contains(err.Error(), rootEscapeText) {
+			err = fmt.Errorf("%w: %w", ErrEscapes, err)
+		}
+
+		return fn(filepath.Join(root, filepath.FromSlash(p)), d, err)
+	})
+}

@@ -24,12 +24,20 @@ import (
 //
 // Returns ErrUnsupportedRockspecFeature if build.type is outside the
 // {builtin, cmake, make, command, none} set.
-func Eval(path string, _ rocks.RockspecConfig) (*rocks.Rockspec, error) {
+func Eval(path string, cfg rocks.RockspecConfig) (*rocks.Rockspec, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("rockspec: read %s: %w", path, err)
 	}
 
+	return EvalSource(path, src, cfg)
+}
+
+// EvalSource is Eval of a rockspec already read: src is its contents, and
+// path names it in errors only. It is for a caller that reads the file its
+// own way, as the tree package reads an installed rockspec without following
+// a symlink out of the tree.
+func EvalSource(path string, src []byte, _ rocks.RockspecConfig) (*rocks.Rockspec, error) {
 	L, reads := newSandboxedState()
 	defer L.Close()
 

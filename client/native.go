@@ -410,16 +410,6 @@ func (e *nativeEngine) Pack(ctx context.Context, target string, opts PackOpts) (
 // "all" otherwise. That is the layout a binary rock is installed from, so the
 // rock installs as built on either backend.
 func (e *nativeEngine) packInstalled(t *tree.Tree, name, version string) (string, error) {
-	installDir := t.InstallDir(name, version)
-	if _, err := os.Stat(installDir); err != nil {
-		return "", fmt.Errorf("rocks.Pack: %s %s does not seem to be an installed rock: %w", name, version, err)
-	}
-
-	rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest"))
-	if err != nil {
-		return "", fmt.Errorf("rocks.Pack: %w", err)
-	}
-
 	stage, err := os.MkdirTemp(e.cfg.WorkingDir, "rocks-pack-*")
 	if err != nil {
 		return "", fmt.Errorf("rocks.Pack: mkdir tmp: %w", err)
@@ -427,27 +417,9 @@ func (e *nativeEngine) packInstalled(t *tree.Tree, name, version string) (string
 
 	defer func() { _ = os.RemoveAll(stage) }()
 
-	if err := copyDirContents(installDir, stage); err != nil {
-		return "", fmt.Errorf("rocks.Pack: copy %s: %w", installDir, err)
-	}
-
-	for _, sec := range []struct {
-		files     map[string]string
-		deployDir string
-		sub       string
-		mode      os.FileMode
-	}{
-		{rm.Lib, t.DeployLibDir(), "lib", packExecMode},
-		{rm.Lua, t.DeployLuaDir(), "lua", packReadMode},
-	} {
-		if err := copyBackFiles(sec.files, sec.deployDir, filepath.Join(stage, sec.sub), name, version, sec.mode); err != nil {
-			return "", fmt.Errorf("rocks.Pack: failed copying back files: %w", err)
-		}
-	}
-
-	arch := "all"
-	if len(rm.Lib) > 0 || hasBinaries(t, rm) {
-		arch = remote.HostArch()
+	arch, err := stageInstalled(t, name, version, stage)
+	if err != nil {
+		return "", fmt.Errorf("rocks.Pack: %w", err)
 	}
 
 	outPath := filepath.Join(e.cfg.WorkingDir, name+"-"+version+"."+arch+".rock")
@@ -460,11 +432,130 @@ func (e *nativeEngine) packInstalled(t *tree.Tree, name, version string) (string
 	return outPath, nil
 }
 
+// stageInstalled lays name/version, installed in t, out in stage as Pack packs
+// it, and returns the arch Pack names the rock with.
+func stageInstalled(t *tree.Tree, name, version, stage string) (string, error) {
+	installDir := t.InstallDir(name, version)
+	if _, err := os.Stat(installDir); err != nil {
+		return "", fmt.Errorf("%s %s does not seem to be an installed rock: %w", name, version, err)
+	}
+
+	rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest"))
+	if err != nil {
+		return "", err
+	}
+
+	if err := copyDirContents(installDir, stage); err != nil {
+		return "", fmt.Errorf("copy %s: %w", installDir, err)
+	}
+
+	for _, sec := range []struct {
+		files     map[string]string
+		deployDir string
+		sub       string
+		mode      os.FileMode
+	}{
+		{rm.Lib, t.DeployLibDir(), "lib", packExecMode},
+		{rm.Lua, t.DeployLuaDir(), "lua", packReadMode},
+	} {
+		if err := copyBackFiles(sec.files, sec.deployDir, filepath.Join(stage, sec.sub), name, version, sec.mode); err != nil {
+			return "", fmt.Errorf("failed copying back files: %w", err)
+		}
+	}
+
+	if len(rm.Lib) > 0 || hasBinaries(t, rm) {
+		return remote.HostArch(), nil
+	}
+
+	return "all", nil
+}
+
+// PackStaged packs dir, laid out as an unpacked binary rock, as the binary
+// rock of spec at out: it installs dir into a temporary tree as
+// tree.Tx.InstallStaged does, and packs the rock from there as Rocks.Pack of
+// the native backend does, so the archive is byte for byte the one Pack makes
+// of the same rock installed from dir, and it installs as that rock does on
+// either backend. Its rock_manifest is the one InstallStaged writes, and its
+// rockspec spec.RawSource. out names the archive whole, the
+// <name>-<version>.<arch>.rock a server lists it under included, since a rock
+// made for another platform cannot take its arch from the host's, as Pack
+// does; it is written through a temporary file in its directory and renamed
+// into place. The temporary tree lives in the system's temporary directory.
+//
+// Like Pack's, the archive's entries carry no modification time and no
+// permissions, so two packs of the same files are the same bytes.
+func PackStaged(spec *rocks.Rockspec, dir, out string) error {
+	tmp, err := os.MkdirTemp("", "rocks-pack-staged-*")
+	if err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	defer func() { _ = os.RemoveAll(tmp) }()
+
+	t, err := tree.Open(rocks.Config{Tree: filepath.Join(tmp, "tree")})
+	if err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	err = t.Update(context.Background(), func(tx *tree.Tx) error {
+		_, err := tx.InstallStaged(spec, dir, tree.StagedOpts{})
+
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	stage := filepath.Join(tmp, "stage")
+	if err := os.Mkdir(stage, unpackDirMode); err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	if _, err := stageInstalled(t, spec.Package, spec.Version, stage); err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(out), "."+filepath.Base(out)+".*")
+	if err != nil {
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	part := f.Name()
+	_ = f.Close()
+
+	if err := zipDir(part, stage); err != nil {
+		_ = os.Remove(part)
+
+		return fmt.Errorf("rocks.PackStaged: zip %s: %w", out, err)
+	}
+
+	// The archive is readable by everyone, as one Pack creates is under the
+	// usual umask, so a server serves it.
+	if err := os.Chmod(part, packedRockMode); err != nil {
+		_ = os.Remove(part)
+
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	if err := os.Rename(part, out); err != nil {
+		_ = os.Remove(part)
+
+		return fmt.Errorf("rocks.PackStaged: %w", err)
+	}
+
+	return nil
+}
+
 // Modes of the files Pack copies back from the deploy dirs, upstream's "exec"
 // and "read" permissions (fs.copy in copy_back_files).
 const (
 	packExecMode os.FileMode = 0o755
 	packReadMode os.FileMode = 0o644
+)
+
+// packedRockMode is the mode of the archive PackStaged writes.
+const (
+	packedRockMode os.FileMode = 0o644
 )
 
 // copyBackFiles mirrors upstream copy_back_files (pack.lua:61-79): it copies
@@ -1036,16 +1127,6 @@ func checkSupportedPlatforms(spec *rocks.Rockspec, plats []string) error {
 	return nil
 }
 
-// wrapBinScripts mirrors repos.should_wrap_bin_scripts: wrap command scripts
-// unless the rockspec explicitly sets deploy.wrap_bin_scripts = false.
-func wrapBinScripts(spec *rocks.Rockspec) bool {
-	if spec.Deploy.WrapBinScripts != nil {
-		return *spec.Deploy.WrapBinScripts
-	}
-
-	return true
-}
-
 // installedLookup returns a deps.InstalledLookup over the current tree
 // manifest's repository — the installed versions of a rock name — so the
 // resolver can skip dependencies already satisfied by an installed rock.
@@ -1076,94 +1157,56 @@ func (e *nativeEngine) installedLookup(ctx context.Context) (deps.InstalledLooku
 // deployFromSource builds spec from the sources in srcDir and deploys the
 // result.
 func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspec, srcDir string) error {
-	return e.deployRock(ctx, spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
-		destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
-		if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
-			return nil, fmt.Errorf("mkdir destDir: %w", err)
-		}
+	return e.deployRock(ctx, spec, func(tx *tree.Tx) error {
+		return tx.Deploy(spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
+			destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
+			if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
+				return nil, fmt.Errorf("mkdir destDir: %w", err)
+			}
 
-		if err := build.RunBackend(ctx, spec, srcDir, destDir, e.cfg); err != nil {
-			return nil, err
-		}
-		// srcDir holds original .lua / install / copy_dirs files; destDir holds
-		// compiled .so artifacts from the build phase. Deploy reads from both.
-		rm, err := t.Deploy(spec, srcDir, destDir)
-		if err != nil {
-			return nil, fmt.Errorf("deploy: %w", err)
-		}
+			if err := build.RunBackend(ctx, spec, srcDir, destDir, e.cfg); err != nil {
+				return nil, err
+			}
+			// srcDir holds original .lua / install / copy_dirs files; destDir holds
+			// compiled .so artifacts from the build phase. Deploy reads from both.
+			rm, err := t.Deploy(spec, srcDir, destDir)
+			if err != nil {
+				return nil, fmt.Errorf("deploy: %w", err)
+			}
 
-		return rm, nil
+			return rm, nil
+		})
 	})
 }
 
 // deployBinary deploys the binary rock of spec unpacked into rockDir without
-// building it, as upstream install_binary_rock does.
+// building it, as upstream install_binary_rock does, through
+// tree.Tx.InstallStaged.
 func (e *nativeEngine) deployBinary(ctx context.Context, spec *rocks.Rockspec, rockDir string) error {
-	deploySpec, err := binarySpec(spec, rockDir)
-	if err != nil {
+	return e.deployRock(ctx, spec, func(tx *tree.Tx) error {
+		_, err := tx.InstallStaged(spec, rockDir, tree.StagedOpts{})
+
 		return err
-	}
-
-	return e.deployRock(ctx, deploySpec, func(t *tree.Tree) (*rocks.RockManifest, error) {
-		// The lua/ and lib/ trees of the rock are what tree.Deploy relocates
-		// from a build directory, so the rock directory serves as both.
-		rm, err := t.Deploy(deploySpec, rockDir, rockDir)
-		if err != nil {
-			return nil, fmt.Errorf("deploy: %w", err)
-		}
-
-		return rm, nil
 	})
 }
 
-// binarySpec returns the spec to deploy a binary rock unpacked into rockDir
-// with: its own rockspec without the build it was made with, since its files
-// are built already, plus a build.install.bin entry per bin/ script, so the
-// scripts get the wrappers a built rock's get, and every other top-level
-// directory (doc/, conf/, …) as a copy_directories entry, since upstream
-// unpacks the whole rock into the per-rock install dir.
-func binarySpec(spec *rocks.Rockspec, rockDir string) (*rocks.Rockspec, error) {
-	entries, err := os.ReadDir(rockDir)
-	if err != nil {
-		return nil, fmt.Errorf("read rock dir %s: %w", rockDir, err)
+// BinWrapFor returns the command wrapper inputs the native backend deploys
+// with for cfg — the interpreter, Config.Tarantool.Executable when it names a
+// file by a path, else <Prefix>/bin/tarantool, else /usr/bin/tarantool, and
+// LUAROCKS_SYSCONFDIR as upstream's cfg.sysconfdir resolves it — so a
+// tree.Tree given it deploys and rewraps commands byte for byte as
+// Rocks.Install does. The wrapper puts the tree it is deployed to alone on
+// package.path, as the native backend's do.
+func BinWrapFor(cfg rocks.Config) *tree.BinWrap {
+	return &tree.BinWrap{
+		Interpreter: luaInterpreterPath(cfg),
+		Sysconfdir:  sysconfDir(),
 	}
-
-	deploySpec := *spec
-	deploySpec.Build = rocks.Build{}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		switch entry.Name() {
-		case "lua", "lib":
-		case "bin":
-			bins, err := os.ReadDir(filepath.Join(rockDir, "bin"))
-			if err != nil {
-				return nil, fmt.Errorf("read rock bin dir: %w", err)
-			}
-
-			deploySpec.Build.Install.Bin = map[string]string{}
-
-			for _, bin := range bins {
-				if !bin.IsDir() {
-					deploySpec.Build.Install.Bin[bin.Name()] = filepath.Join("bin", bin.Name())
-				}
-			}
-		default:
-			deploySpec.Build.CopyDirectories = append(deploySpec.Build.CopyDirectories, entry.Name())
-		}
-	}
-
-	return &deploySpec, nil
 }
 
-// deployRock deploys one rock into the tree through deploy and records it in
-// the tree manifest, through tree.Tx.Deploy.
-func (e *nativeEngine) deployRock(
-	ctx context.Context, spec *rocks.Rockspec, deploy func(t *tree.Tree) (*rocks.RockManifest, error),
-) error {
+// deployRock deploys one rock into the tree through deploy, which runs in a
+// tree.Tx: tx.Deploy after a build, tx.InstallStaged for a binary rock.
+func (e *nativeEngine) deployRock(ctx context.Context, spec *rocks.Rockspec, deploy func(tx *tree.Tx) error) error {
 	// Abort before build/deploy when the rockspec excludes the current platform
 	// (upstream deps.check_supported_platforms, deps.lua:247-273).
 	if err := checkSupportedPlatforms(spec, rockspec.RuntimePlatforms()); err != nil {
@@ -1176,27 +1219,14 @@ func (e *nativeEngine) deployRock(
 	}
 
 	// Match upstream's command-wrapper deploy (repos.deploy_files →
-	// fs.wrap_script): the interpreter is the configured Tarantool
-	// executable (luaInterpreterPath), and LUAROCKS_SYSCONFDIR mirrors
-	// cfg.sysconfdir.
-	// repos.should_wrap_bin_scripts wraps unless the rockspec sets
-	// deploy.wrap_bin_scripts = false; when it does, leave BinWrap nil so
-	// Deploy copies scripts verbatim. (Upstream also honors a cfg-level
-	// wrap_bin_scripts override, which the hardcoded Tarantool cfg lacks.) The
-	// wrapper's package.path lists Config.Tree alone.
-	if wrapBinScripts(spec) {
-		t.BinWrap = &tree.BinWrap{
-			Interpreter: luaInterpreterPath(e.cfg),
-			Sysconfdir:  sysconfDir(),
-		}
-	}
+	// fs.wrap_script); the Tx leaves the scripts of a rock that sets
+	// deploy.wrap_bin_scripts = false unwrapped.
+	t.BinWrap = BinWrapFor(e.cfg)
 
 	// The Tx reads the tree manifest BEFORE deploying so Deploy can consult the
 	// providers of each module/command (check_spot_if_available) — this drives
 	// version promotion on reinstall/upgrade (glr-5e9).
-	return t.Update(ctx, func(tx *tree.Tx) error {
-		return tx.Deploy(spec, deploy)
-	})
+	return t.Update(ctx, deploy)
 }
 
 // openTree opens e.cfg.Tree with the engine's manifest store.

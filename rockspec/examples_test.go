@@ -56,6 +56,23 @@ func ExampleEval() {
 	// An example rock
 }
 
+// ExampleEvalSource evaluates rockspec contents already read; the name is
+// only used in errors, and RawSource keeps the bytes.
+func ExampleEvalSource() {
+	spec, err := rockspec.EvalSource("example-1.0-1.rockspec", []byte(exampleRockspec), rocks.RockspecConfig{})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(spec.Package, spec.Version, len(spec.RawSource) == len(exampleRockspec))
+
+	_, err = rockspec.EvalSource("broken.rockspec", []byte("package = "), rocks.RockspecConfig{})
+	fmt.Println(err != nil)
+	// Output:
+	// example 1.0-1 true
+	// true
+}
+
 // ExampleValidate checks a rockspec's required fields and feature support. A
 // well-formed spec validates to nil; an unsupported build type is rejected with
 // the typed rocks.ErrUnsupportedRockspecFeature sentinel.

@@ -201,9 +201,6 @@ func FindSourceBaseDir(dir string, spec *rocks.Rockspec) (string, error) {
 	return findSourceBaseDir(dir, spec)
 }
 
-// WrapBinScripts exposes the should_wrap_bin_scripts decision for unit tests.
-func WrapBinScripts(spec *rocks.Rockspec) bool { return wrapBinScripts(spec) }
-
 // CheckSupportedPlatforms exposes the supported-platforms gate for unit tests.
 func CheckSupportedPlatforms(spec *rocks.Rockspec, plats []string) error {
 	return checkSupportedPlatforms(spec, plats)

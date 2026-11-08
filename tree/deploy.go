@@ -134,6 +134,13 @@ const (
 // per-section logic lives in the deploy* helpers so this orchestrator stays a
 // readable sequence.
 func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.RockManifest, error) {
+	return t.deploy(spec, srcDir, buildDir, true)
+}
+
+// deploy is Deploy, with defaultDocs saying whether stage 3 installs the
+// default docs when no directory is copied, as a build does and the install of
+// a binary rock does not.
+func (t *Tree) deploy(spec *rocks.Rockspec, srcDir, buildDir string, defaultDocs bool) (*rocks.RockManifest, error) {
 	if spec == nil {
 		return nil, errors.New("tree.Deploy: nil spec")
 	}
@@ -183,7 +190,7 @@ func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.Roc
 		return nil, err
 	}
 
-	if err := t.deployCopyDirectories(spec, srcDir); err != nil {
+	if err := t.deployCopyDirectories(spec, srcDir, defaultDocs); err != nil {
 		return nil, err
 	}
 
@@ -546,8 +553,10 @@ func (t *Tree) deployBinFile(srcRoot, src, rel string, spec *rocks.Rockspec, rm 
 // directory if the source has one, and when no directory was copied at all the
 // source root's README, LICENSE, COPYING and *.md files go to the per-rock doc
 // dir instead (installDefaultDocs). A listed directory that does not exist is an
-// error; the default doc/ is not.
-func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string) error {
+// error; the default doc/ is not. With defaultDocs unset, as for a binary
+// rock, which upstream install_binary_rock unpacks whole, no default docs are
+// installed.
+func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string, defaultDocs bool) error {
 	installDir := t.InstallDir(spec.Package, spec.Version)
 
 	dirs := spec.Build.CopyDirectories
@@ -576,7 +585,7 @@ func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string) error 
 		anyDocs = true
 	}
 
-	if anyDocs {
+	if anyDocs || !defaultDocs {
 		return nil
 	}
 

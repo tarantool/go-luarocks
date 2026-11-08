@@ -156,7 +156,7 @@ outcome in these areas:
 | `Remove` of a rock another depends on | removed; `Force` and `ForceFast` change nothing | refused unless forced, or another version in the rock trees satisfies the dependent |
 | A rock, or a dependency, that several servers offer, on `Install` | taken from the first server in the list holding a matching version, first-found-wins | the newest matching version across every server |
 | Rock trees consulted, and listed by a command wrapper | `Config.Tree` alone | `Config.Tree`, then `Config.Tarantool.Prefix`, as the deps mode selects them |
-| Resolved dependencies in the tree manifest | a rock's direct ones, recorded at its deploy (the newest installed version its constraints accept); the other entries are left as they are | every rock's, transitively, recomputed on each write |
+| Resolved dependencies in the tree manifest | a rock's direct ones, recorded at its deploy (the newest installed version its constraints accept), or by `tree.Tree.Rebuild` against the whole tree; the other entries are left as they are | every rock's, transitively, recomputed on each write and by `make_manifest` |
 | An `external_dependencies` entry found on no search path | the build runs, its `$(<NAME>_INCDIR)`, … naming the directories under `/usr/local` | the build fails before it starts |
 | `tarantool` rock the VM provides | the part of `Config.Tarantool.Version` before its first dash, at revision 1, so a bare `3.9.0` provides `3.9.0-1`; a part that does not parse is logged and provides none | the part before the first dash, at revision 1, and none for a version with no dash, such as a bare `3.9.0` |
 | `Which` | plain paths in `Config.Tree` | (`Exec` `which`) the loader, over every rock tree's manifest |
@@ -306,15 +306,72 @@ each file of a rock is and whether it matches the rock's `rock_manifest`.
 without a dependents check, a plain path passing to the next provider — and
 update the tree manifest in the same transaction.
 
+The other changes a tool makes to a tree by hand have one each, every one
+writing the files and the manifest together:
+
+```go
+t.BinWrap = client.BinWrapFor(cfg) // the wrappers client.Install writes
+err = t.Update(ctx, func(tx *tree.Tx) error {
+    // A guest package's .rocks, as its binary rocks would install.
+    report, err := tx.Graft(guestRocks, tree.GraftOpts{Select: notPinnedHere})
+    if err != nil {
+        return err
+    }
+    // A project's own files, laid out as an unpacked binary rock.
+    _, err = tx.InstallStaged(spec, stageDir, tree.StagedOpts{RequirePlain: true, RemoveOtherVersions: true})
+    return err
+})
+```
+
+- `Tx.InstallStaged` deploys a directory laid out as an unpacked binary rock
+  (`lua/`, `lib/`, `bin/`, and the rest into the rock's install dir) as the
+  native client installs a `.rock`: conflict rules, wrappers,
+  `rock_manifest` and manifest entry alike. Its `spec.RawSource` becomes the
+  installed rockspec, which the lua backend reads. `RequirePlain` refuses,
+  with `ErrNotPlain` and the tree untouched, a rock a file of which another
+  rock holds the plain path of. `client.PackStaged` packs such a directory
+  into the `.rock` the native `Pack` makes of the rock once installed.
+- `Tx.Graft` installs the rocks another tree has on disk — an extracted
+  package's `.rocks` — as their binary rocks would install. Each rock is
+  staged as the native `Pack` stages an installed rock, its `lua` and `lib`
+  files taken from whichever of their plain and versioned paths has the
+  digest its `rock_manifest` records; the other tree's manifest is neither
+  trusted nor copied. A version installed already is skipped when its
+  `rock_manifest` is the same, and is `ErrConflict` otherwise, unless
+  `Replace`. A file that is not what its `rock_manifest` records
+  (`ErrIntegrity`), a symlink leading out of the source or an entry leaving
+  its directory (`rocks.ErrUnsafePath`), or a conflict leaves the tree as it
+  was. The report lists the files of the source's `share/`, `lib/` and `bin/`
+  no rock of it lists, which are not copied.
+- `Tx.Rewrap` rewrites every command wrapper for the tree's root and
+  `BinWrap`, for a tree moved, extracted elsewhere or run by another
+  interpreter; `client.BinWrapFor(cfg)` gives the inputs the native backend
+  deploys with.
+- `Tree.Rebuild` rewrites the manifest from the `rock_manifest`s and
+  rockspecs on disk, as `luarocks-admin make_manifest --local-tree` does, the
+  manifest there was, broken or gone, aside. Each rock's resolved
+  dependencies are its direct ones, at the newest version of the rebuilt tree
+  its constraints accept, as a native install in dependency order records
+  them, where upstream resolves them transitively (the table above).
+- `Tree.Check` is a read-only fsck: missing and modified files, files at the
+  wrong one of their plain and versioned paths, rock dirs the manifest does
+  not list and entries without their rock dir, files under `share/`, `lib/`
+  and `bin/` no rock owns, backups, and wrappers other than the ones
+  `BinWrap` gives. The other directories at the tree's root are a tool's
+  own, as `tt` keeps its metadata in one. Problems are the report; the error
+  is for I/O.
+
 A change to a tree takes the tree's lock: an advisory `flock(2)` on
 `share/tarantool/rocks/.lock` (Linux, macOS and the BSDs; elsewhere the lock
-guards nothing). `tree.Tree.Update`, every write of the native backend, and
-the typed writes of the lua backend (`Install`, `Build`, `Make`, `Remove`,
-`Purge`) take it exclusive and wait for it until their context ends, failing
-then with `tree.ErrLocked`, so two processes changing one tree run one
-after the other instead of losing each other's manifest entries. An external
-`luarocks` and `Exec` do not take it. The manifests themselves are written
-through a temp file of each writer's own, flushed and renamed into place.
+guards nothing). `tree.Tree.Update`, `Tree.Rebuild`, every write of the
+native backend, and the typed writes of the lua backend (`Install`, `Build`,
+`Make`, `Remove`, `Purge`) take it exclusive, and `Inspect`, `Tree.View`,
+`Tree.Check` and `Tx.Graft`, of its source, shared; each waits for it until
+its context ends, failing then with `tree.ErrLocked`, so two processes
+changing one tree run one after the other instead of losing each other's
+manifest entries. An external `luarocks` and `Exec` do not take it. The
+manifests themselves are written through a temp file of each writer's own,
+flushed and renamed into place.
 
 ### Packages
 
@@ -322,8 +379,10 @@ through a temp file of each writer's own, flushed and renamed into place.
 - `rockspec` — sandboxed `gopher-lua` rockspec evaluator
 - `manif` — upstream-compatible manifest reader/writer
 - `fetch` — source fetch backends (`http(s)`, `git`/`git+https`/`git+ssh`, `file://`)
-- `tree` — on-disk tree layout, deploy, conflicts, `which`, and the tree
-  manifest kept in step through `Update` transactions and read through `Inspect`
+- `tree` — on-disk tree layout, deploy, conflicts, `which`, the tree
+  manifest kept in step through `Update` transactions and read through
+  `Inspect`, and the grafts, staged installs, rewraps, rebuilds and checks of
+  a tree
 - `build` — build backends (`builtin`, `cmake`, `make`, `command`)
 - `remote` — rock server indexes (HTTP and local directories), search, and
   `MakeManifest`, the native `luarocks-admin make_manifest`

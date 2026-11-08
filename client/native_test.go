@@ -61,27 +61,6 @@ func TestNativeEngine_Unimplemented_ReturnsErrNotImplemented(t *testing.T) {
 // guard: nativeEngine must satisfy Engine.
 var _ client.Engine = (*client.NativeEngine)(nil)
 
-func TestWrapBinScripts_ShouldWrapDecision(t *testing.T) {
-	t.Parallel()
-
-	f := false
-	tr := true
-
-	cases := []struct {
-		name string
-		val  *bool
-		want bool
-	}{
-		{"absent defaults to wrap", nil, true},
-		{"explicit false opts out", &f, false},
-		{"explicit true wraps", &tr, true},
-	}
-	for _, c := range cases {
-		spec := &rocks.Rockspec{Deploy: rocks.Deploy{WrapBinScripts: c.val}}
-		require.Equal(t, c.want, client.WrapBinScripts(spec), c.name)
-	}
-}
-
 func TestCheckSupportedPlatforms(t *testing.T) {
 	t.Parallel()
 

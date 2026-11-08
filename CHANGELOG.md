@@ -21,6 +21,7 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `source.dir`, the `build.install` keys and values, `build.modules` paths
   and sources, `copy_directories` — with an error wrapping the new
   `rocks.ErrUnsafePath`, a deliberate strictness beyond upstream.
+  `EvalSource` evaluates the contents of a rockspec the caller read itself.
 - manif: A manifest reader and writer compatible with the upstream LuaRocks
   manifest format. A `rock_manifest` entry outside its `lua`, `lib`, `bin`,
   `conf` and `doc` sections is kept in `RockManifest.Other`. `FileStore`
@@ -71,12 +72,52 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   list, and `Tx.View` shows the tree as the transaction has it. The manifest
   is written even when the change fails half-way, so it never lags behind
   the files. The native client deploys and removes rocks through it.
+  `Tx.Deploy` copies the commands of a rock whose rockspec sets
+  `deploy.wrap_bin_scripts = false` verbatim, whatever `Tree.BinWrap` says.
+- tree: `Tx.InstallStaged` deploys a directory laid out as an unpacked
+  binary rock as the native client installs a `.rock` — conflict rules,
+  command wrappers, `rock_manifest` and tree manifest entry alike — its
+  `spec.RawSource` becoming the installed rockspec; `StagedOpts.RequirePlain`
+  refuses, with `ErrNotPlain` and the tree untouched, a rock a file of which
+  would not take its plain path, and `RemoveOtherVersions` removes the
+  rock's other versions first. As upstream's `install_binary_rock`, which
+  unpacks a rock whole, the files at the top of a binary rock land in its
+  install dir, and no default docs are made up from them.
+- tree: `Tx.Graft` installs the rocks another tree has on disk, such as an
+  extracted package's `.rocks`, as their binary rocks would install: each is
+  staged as the native `Pack` stages an installed rock, its `lua` and `lib`
+  files taken from whichever of their plain and versioned paths has the
+  digest its `rock_manifest` records, every staged file checked against it
+  (`ErrIntegrity`); the other tree's manifest is neither trusted nor copied.
+  A version installed already is skipped when its `rock_manifest` is the
+  same, and fails the graft with `ErrConflict` otherwise, unless `Replace`.
+  Nothing changes before every rock is staged and checked, so a symlink
+  leading out of the source or a `rock_manifest` entry leaving its directory
+  (`rocks.ErrUnsafePath`) leaves the tree as it was. The `GraftReport` lists
+  the files of the source's `share/`, `lib/` and `bin/` no rock of it lists.
+- tree: `Tx.Rewrap` rewrites every command wrapper for the tree's root and
+  `BinWrap`, for a tree moved, extracted elsewhere or run by another
+  interpreter, where `Deploy` would write one; commands copied verbatim are
+  left alone.
+- tree: `Tree.Rebuild` rewrites the tree manifest from the rock dirs on
+  disk, as `luarocks-admin make_manifest --local-tree` does, each rock's
+  resolved dependencies its direct ones at the newest version of the rebuilt
+  tree; a rock dir whose `rock_manifest` cannot be read is skipped and
+  reported, or with `RebuildOpts.Strict` fails it, the manifest unchanged.
+- tree: `Tree.Check` reports what is wrong with a tree without changing it:
+  files missing, modified or at the wrong one of their plain and versioned
+  paths, rock dirs the manifest does not list and entries without their
+  rock dir, files under `share/`, `lib/` and `bin/` no rock owns, backups,
+  wrappers other than the ones a `BinWrap` gives, and a manifest that does
+  not parse. The other directories at the tree's root are a tool's own.
 - tree, client: A change to a tree holds the tree's lock, an advisory
   `flock(2)` on `share/tarantool/rocks/.lock` (a no-op where there is no
-  `flock`): `Tree.Update`, every write of the native backend and the typed
-  writes of the lua backend wait for it until their context ends, failing
-  then with `tree.ErrLocked`, so concurrent changes of one tree, from
-  goroutines or processes, no longer lose each other's manifest entries.
+  `flock`): `Tree.Update`, `Tree.Rebuild`, every write of the native backend
+  and the typed writes of the lua backend wait for it until their context
+  ends, failing then with `tree.ErrLocked`, so concurrent changes of one
+  tree, from goroutines or processes, no longer lose each other's manifest
+  entries. `Tree.Check`, and `Tx.Graft` of its source, read under it,
+  shared.
 - tree: `Inspect` reads a tree into a `View` without creating anything, an
   absent tree or manifest reading as empty, and `Tree.View` does the same
   for an open tree; both read under the tree's lock, shared, waiting for it
@@ -182,7 +223,12 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   and `command` rocks too, and their provider lists keep upstream's order.
   Each rock's resolved `dependencies` are recorded when it is deployed, from
   its direct dependencies, each at the newest installed version its
-  constraints accept.
+  constraints accept. A binary rock is deployed through
+  `tree.Tx.InstallStaged`, and `BinWrapFor` returns the command wrapper
+  inputs the native backend deploys with, so a `tree.Tree` given them writes
+  the wrappers `Install` writes. `PackStaged` packs a directory laid out as
+  an unpacked binary rock into the `.rock` the native `Pack` makes of the
+  rock once installed from it.
 - client: The lua backend runs each operation in its own VM, so no state
   carries over between calls, and one client may be used from several
   goroutines at once. It honours `Config.Servers`, reads
