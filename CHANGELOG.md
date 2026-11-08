@@ -23,7 +23,10 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `rocks.ErrUnsafePath`, a deliberate strictness beyond upstream.
 - manif: A manifest reader and writer compatible with the upstream LuaRocks
   manifest format. A `rock_manifest` entry outside its `lua`, `lib`, `bin`,
-  `conf` and `doc` sections is kept in `RockManifest.Other`.
+  `conf` and `doc` sections is kept in `RockManifest.Other`. `FileStore`
+  writes a manifest through a temp file of its own, flushed to stable
+  storage before it is renamed into place, so two writers at once never
+  clobber each other's write half-way.
 - fetch: Source fetch backends for `http(s)`, `git`/`git+https`/`git+ssh`,
   and `file://` sources. `Sources` returns a `Result` that says whether the
   path is already the source root. `File` retrieves a single file into a
@@ -61,6 +64,36 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   leaves, by `..` or through a symlink pointing out, fails with
   `rocks.ErrUnsafePath` instead of reaching outside, where upstream follows
   it.
+- tree: `Tree.Update` changes a tree in a transaction, a `Tx`, which keeps
+  the tree manifest in step with the files: `Tx.Deploy` deploys a rock and
+  records it, `Tx.Remove` undeploys an installed version, a `RockRef`, and
+  drops it, failing with `ErrNotInstalled` for one the manifest does not
+  list, and `Tx.View` shows the tree as the transaction has it. The manifest
+  is written even when the change fails half-way, so it never lags behind
+  the files. The native client deploys and removes rocks through it.
+- tree, client: A change to a tree holds the tree's lock, an advisory
+  `flock(2)` on `share/tarantool/rocks/.lock` (a no-op where there is no
+  `flock`): `Tree.Update`, every write of the native backend and the typed
+  writes of the lua backend wait for it until their context ends, failing
+  then with `tree.ErrLocked`, so concurrent changes of one tree, from
+  goroutines or processes, no longer lose each other's manifest entries.
+- tree: `Inspect` reads a tree into a `View` without creating anything, an
+  absent tree or manifest reading as empty, and `Tree.View` does the same
+  for an open tree; both read under the tree's lock, shared, waiting for it
+  until their context ends, failing then with `ErrLocked`. A `View`
+  answers `Rocks`, `Versions` and `Installed`, the `Providers` of a module or
+  command, the `Owner` of a deployed file, a rock's `Files` and where each is
+  now (its plain or versioned path, and a command's real script), its
+  declared `Dependencies`, the resolved ones it `Requires`, its `Dependents`,
+  and a `Command`'s script and entry; `Verify` checks a rock's files against
+  its `rock_manifest` (`ErrIntegrity`), and `CheckPlain` that its files hold
+  their plain paths (`ErrNotPlain`). A manifest that does not parse fails
+  with `ErrCorrupt`.
+- tree: `Tx.Prune` removes, in one pass, every installed rock version a
+  keep function does not keep — `KeepVersions` keeps a set of pins — in a
+  fixed order, whatever order the rocks were installed in, and with
+  `PruneOpts.Orphans` also the install dirs the tree manifest does not
+  list.
 - build: Build backends — `builtin`, `cmake`, `make`, and `command`.
   `LUA_BINDIR` is derived from `Tarantool.Executable` when it has a
   directory component, so a flat Tarantool SDK with no `bin/` works. The
