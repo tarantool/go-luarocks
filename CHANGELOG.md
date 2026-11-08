@@ -74,6 +74,16 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   shares fetched manifests between indexes. A local server's row whose name,
   version or arch would lead its artifact path out of the directory is
   dropped.
+- remote: `MakeManifest`, a native `luarocks-admin make_manifest` for a rock
+  server: it indexes the `.rockspec`, `.src.rock` and `.<arch>.rock` files of
+  a directory into `manifest` and `manifest-<version>` for each of
+  `MakeManifestOpts.LuaVersions` (5.1 to 5.4 by default, leaving out the
+  versions whose rockspec rules that Lua out), and `index.html` with `Index`,
+  byte-equal to upstream's and each written atomically. `Zip` also writes the
+  zipped manifests, and a stale `manifest-<version>.zip` is always rewritten.
+  It reads only inside the directory, and fails, writing nothing, on a rock
+  file that is a symlink leading out of it (`rocks.ErrUnsafePath`), is not a
+  readable regular file, or on an input upstream fails on.
 - remote: `Search`, a port of upstream `search.search_repos` over the same
   manifest loaders the indexes use — substring or exact name matching,
   version constraints, the arch filter, a cross-server merge, the

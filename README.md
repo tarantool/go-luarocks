@@ -46,7 +46,8 @@ LuaJIT-as-distinct, no Windows. Linux + macOS, amd64 + arm64.
   source backends
 - Build Backends: `builtin`, `cmake`, `make`, and `command`
 - Upstream Compatibility: manifest reader/writer compatible with upstream
-  LuaRocks and an HTTP remote index client
+  LuaRocks, an HTTP remote index client, and a rock server indexer
+  byte-equal to `luarocks-admin make_manifest`
 
 ### Requirements
 
@@ -253,6 +254,30 @@ with):
 go test ./client/ -tags integration_luaengine -run TestBackendInterop -v
 ```
 
+#### Rock Servers
+
+`remote.MakeManifest(ctx, dir, opts)` turns a directory of `.rockspec`,
+`.src.rock` and `.<arch>.rock` files into a rock server without a Lua VM:
+it writes `manifest` and `manifest-5.1` … `manifest-5.4` (and, with
+`MakeManifestOpts.Index`, `index.html`) byte-equal to what
+`luarocks-admin make_manifest <dir>` writes, each through a temporary file
+and a rename. It is checked against upstream twice: offline against the
+vendored upstream code run by `internal/luaref`
+(`TestMakeManifest_MatchesUpstream`, `FuzzMakeManifest`), and in the
+sandbox against the lua backend's `Admin("make_manifest", dir)`:
+
+```bash
+go test ./client/ -tags integration_luaengine -run TestBackendParity_MakeManifest -v
+```
+
+Where upstream follows any name it lists, `MakeManifest` reads only inside
+`dir` (a rock file that is a symlink leading out fails with
+`rocks.ErrUnsafePath`), requires every listed name to be a readable regular
+file, writes nothing when anything fails (upstream writes the manifests
+before it fails in `index.html`), and rewrites a stale
+`manifest-<version>.zip`, which clients read before `manifest-<version>`.
+`MakeManifestOpts.Zip` writes the zips `luarocks-admin add` does.
+
 ### Packages
 
 - `deps` — version parsing, dependency constraints, transitive resolver
@@ -261,7 +286,8 @@ go test ./client/ -tags integration_luaengine -run TestBackendInterop -v
 - `fetch` — source fetch backends (`http(s)`, `git`/`git+https`/`git+ssh`, `file://`)
 - `tree` — on-disk tree layout, deploy, conflicts, `which`
 - `build` — build backends (`builtin`, `cmake`, `make`, `command`)
-- `remote` — HTTP remote index
+- `remote` — rock server indexes (HTTP and local directories), search, and
+  `MakeManifest`, the native `luarocks-admin make_manifest`
 - `client` — the Rocks facade + native and lua engines
 
 ### Examples

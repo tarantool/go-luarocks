@@ -78,3 +78,63 @@ func ExampleNewIndex() {
 	// /srv/rocks -> *remote.FileRemoteIndex
 	// file:///mnt/mirror -> *remote.FileRemoteIndex
 }
+
+// ExampleMakeManifest turns a directory of rock files into a rock server, as
+// `luarocks-admin make_manifest` does, and resolves a rock from it.
+func ExampleMakeManifest() {
+	dir, err := os.MkdirTemp("", "rockrepo")
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	for _, name := range []string{
+		"metrics-1.0.0-1.linux-x86_64.rock",
+		"metrics-1.0.0-1.macosx-aarch64.rock",
+		"metrics-1.0.0-1.src.rock",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			panic(err)
+		}
+	}
+
+	err = remote.MakeManifest(context.Background(), dir, remote.MakeManifestOpts{LuaVersions: []string{"5.1"}})
+	if err != nil {
+		panic(err)
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(dir, "manifest-5.1"))
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(string(manifest))
+
+	got, err := remote.NewIndex(dir, remote.IndexOptions{Arch: "macosx-aarch64"}).
+		Query(context.Background(), "metrics", "")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(filepath.Base(got[0].URL))
+	// Output:
+	// commands = {}
+	// modules = {}
+	// repository = {
+	//    metrics = {
+	//       ["1.0.0-1"] = {
+	//          {
+	//             arch = "linux-x86_64"
+	//          },
+	//          {
+	//             arch = "macosx-aarch64"
+	//          },
+	//          {
+	//             arch = "src"
+	//          }
+	//       }
+	//    }
+	// }
+	// metrics-1.0.0-1.macosx-aarch64.rock
+}
