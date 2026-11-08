@@ -22,7 +22,9 @@ import (
 //     renamed to that provider's versioned name (demoted), and any untracked
 //     file already at the plain path is backed up rather than clobbered.
 //   - "v"  (existing keeps priority) otherwise: the new file is written under
-//     its own versioned name.
+//     its own versioned name, and a file already there is backed up too, as
+//     upstream backs up any target whose provider is another rock or version
+//     (repos.lua:480-484).
 //
 // It returns the final on-disk target for the new file.
 func (t *Tree) resolveSpot(deployDir, plainTarget, item, newName, newVer string) (string, error) {
@@ -33,7 +35,12 @@ func (t *Tree) resolveSpot(deployDir, plainTarget, item, newName, newVer string)
 		(newName == curName && (newVer == curVer || versionGreater(newVer, curVer)))
 
 	if !nv {
-		return MungedPath(deployDir, plainTarget, newName, newVer), nil
+		versioned := MungedPath(deployDir, plainTarget, newName, newVer)
+		if err := backupExisting(versioned); err != nil {
+			return "", err
+		}
+
+		return versioned, nil
 	}
 
 	// New file wins the plain path. Preserve whatever is already there.
@@ -51,14 +58,38 @@ func (t *Tree) resolveSpot(deployDir, plainTarget, item, newName, newVer string)
 			}
 		case !ok:
 			// Untracked file (no provider recorded): back it up rather than lose it.
-			if err := os.Rename(plainTarget, plainTarget+"~"); err != nil {
-				return "", fmt.Errorf("backup %q: %w", plainTarget, err)
+			if err := backupExisting(plainTarget); err != nil {
+				return "", err
 			}
 		}
 		// Same provider + same version: a reinstall — overwrite in place.
 	}
 
 	return plainTarget, nil
+}
+
+// backupExisting mirrors upstream backup_existing (repos.lua:270-288): a file
+// already at target is renamed to target with "~" appended — as many times as
+// it takes to reach a free name, so an earlier backup is never overwritten.
+func backupExisting(target string) error {
+	if _, err := os.Lstat(target); err != nil {
+		return nil //nolint:nilerr // nothing at target: nothing to back up
+	}
+
+	backup := target + "~"
+	for {
+		if _, err := os.Lstat(backup); err != nil {
+			break
+		}
+
+		backup += "~"
+	}
+
+	if err := os.Rename(target, backup); err != nil {
+		return fmt.Errorf("backup %q: %w", target, err)
+	}
+
+	return nil
 }
 
 // spots records the deploy targets one Deploy call has already resolved: the
@@ -212,6 +243,29 @@ func ModuleIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
 			if mod := pathToModule(rel); mod != "" {
 				out[mod] = rel
 			}
+		}
+	}
+
+	return out
+}
+
+// CommandIndex inverts a deployed RockManifest into the command index the tree
+// manifest carries per installed rock: command name → its path relative to the
+// bin deploy dir, which for a command is the name itself. It mirrors upstream
+// repos.package_commands, which reads the rock_manifest's bin section, so a
+// command is indexed by where it was deployed, not by the build.install.bin
+// source path. A conflict-munged key is skipped, as in ModuleIndex.
+func CommandIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
+	out := map[string]string{}
+	if rm == nil {
+		return out
+	}
+
+	mungedPrefix := mungedVersion(pkg, ver) + "-"
+
+	for rel := range rm.Bin {
+		if !strings.HasPrefix(rel, mungedPrefix) {
+			out[rel] = rel
 		}
 	}
 

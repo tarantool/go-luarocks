@@ -210,7 +210,9 @@ build = {
 	entry := m.Repository["foo"]["1.0-1"]
 	assert.Equal(t, "installed", entry.Arch, "arch")
 	assert.NotEmpty(t, entry.Modules, "RepoEntry.Modules empty — read-path regression")
-	assert.NotEmpty(t, entry.Commands["foo-cli"], "RepoEntry.Commands missing foo-cli")
+	// Upstream repos.package_commands keys and values the per-entry index by
+	// the path under the bin dir, not by the build.install.bin source path.
+	assert.Equal(t, map[string]string{"foo-cli": "foo-cli"}, entry.Commands, "RepoEntry.Commands")
 
 	if assert.NotEmpty(t, m.Modules["foo"], "top-level m.Modules[\"foo\"] = %v, want [\"foo/1.0-1\"]", m.Modules["foo"]) {
 		assert.Equal(t, "foo/1.0-1", m.Modules["foo"][0], "top-level m.Modules[\"foo\"]")

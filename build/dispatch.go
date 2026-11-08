@@ -22,8 +22,12 @@ import (
 // observed type string (typed errors callers can branch on).
 //
 // srcDir is the unpacked source tree the rock will be built against.
-// destDir is the staging root the backend writes outputs into. The facade
-// is responsible for orchestrating srcDir (post-fetch) and destDir
+// destDir is the staging root the builtin backend writes its outputs into.
+// The make, cmake and command backends install where the rockspec's
+// $(PREFIX), $(LUADIR), … variables point instead — the rock's install dir
+// under cfg.Tree, as upstream path.configure_paths sets them — except that a
+// cmake build of a spec without a rock name installs under destDir. The
+// facade is responsible for orchestrating srcDir (post-fetch) and destDir
 // (the `<tree>/.../build/` working area handed to tree.Deploy).
 func RunBackend(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string, cfg rocks.Config) error {
 	switch spec.Build.Type {

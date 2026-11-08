@@ -262,6 +262,49 @@ func TestFileStoreRockRoundTrip(t *testing.T) {
 	assert.Equal(t, in.Lib, out.Lib, "lib differ")
 }
 
+// TestFileStoreRockOtherEntries: upstream make_rock_manifest lists every file
+// of the install dir, so a rock_manifest can carry a top-level file or a tree
+// under a directory that is none of lua, lib, bin, conf and doc. ReadRock keeps
+// them in Other, keyed by their install-dir-relative path, and WriteRock puts
+// them back at that path.
+func TestFileStoreRockOtherEntries(t *testing.T) {
+	t.Parallel()
+
+	file := filepath.Join(t.TempDir(), "rock_manifest")
+	src := []byte(`rock_manifest = {
+   doc = {
+      ["README.md"] = "d1"
+   },
+   ["luarocks.lock"] = "o1",
+   ["metrics-1.0.0-1.rockspec"] = "r1",
+   samples = {
+      ["demo.lua"] = "o2",
+      nested = {
+         ["more.txt"] = "o3"
+      }
+   }
+}
+`)
+	require.NoError(t, os.WriteFile(file, src, 0o600))
+
+	store := manif.FileStore{}
+	rm, err := store.ReadRock(file)
+	require.NoError(t, err, "ReadRock")
+	assert.Equal(t, "metrics-1.0.0-1.rockspec", rm.RockspecFile, "rockspec filename")
+	assert.Equal(t, map[string]string{"README.md": "d1"}, rm.Doc, "doc")
+	assert.Equal(t, map[string]string{
+		"luarocks.lock":           "o1",
+		"samples/demo.lua":        "o2",
+		"samples/nested/more.txt": "o3",
+	}, rm.Other, "other entries")
+
+	require.NoError(t, store.WriteRock(file, rm), "WriteRock")
+
+	back, err := store.ReadRock(file)
+	require.NoError(t, err, "ReadRock after WriteRock")
+	assert.Equal(t, rm, back, "a rock_manifest with other entries round-trips")
+}
+
 func TestReadTreeManifestHelper(t *testing.T) {
 	t.Parallel()
 

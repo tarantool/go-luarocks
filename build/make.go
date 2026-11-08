@@ -3,7 +3,6 @@ package build
 import (
 	"context"
 	"maps"
-	"path/filepath"
 	"sort"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -24,22 +23,17 @@ import (
 // auto-injected from the toolchain when the rockspec leaves it unset
 // (auto_variables, make.lua:71-80).
 //
-// LUADIR/LIBDIR/CONFDIR/BINDIR/DOCDIR are pointed into destDir — the per-rock
-// subtree tree.Deploy scans for make-installed files — so the canonical
-// install_variables = { INST_LIBDIR = '$(LIBDIR)', INST_LUADIR = '$(LUADIR)' }
-// pattern installs where the deploy step can find and relocate the files.
-func runMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string, cfg rocks.Config) error {
+// PREFIX and LUADIR/LIBDIR/CONFDIR/BINDIR/DOCDIR name the rock's install dir
+// and its subdirectories, as upstream path.configure_paths sets them, so the
+// canonical install_variables = { INST_LIBDIR = '$(LIBDIR)', INST_LUADIR =
+// '$(LUADIR)' } pattern installs where tree.Deploy relocates lua/, lib/ and
+// bin/ from and lists everything else in the rock_manifest. destDir is not
+// used.
+func runMake(ctx context.Context, spec *rocks.Rockspec, srcDir, _ string, cfg rocks.Config) error {
 	env := buildEnv(cfg)
 
-	// rockspec.variables for $(NAME) expansion, with the install dirs remapped
-	// into destDir (the subtree Deploy scans).
+	// rockspec.variables for $(NAME) expansion.
 	vars := buildVars(spec, cfg)
-	vars["PREFIX"] = destDir
-	vars["LUADIR"] = filepath.Join(destDir, "lua")
-	vars["LIBDIR"] = filepath.Join(destDir, "lib")
-	vars["CONFDIR"] = filepath.Join(destDir, "conf")
-	vars["BINDIR"] = filepath.Join(destDir, "bin")
-	vars["DOCDIR"] = filepath.Join(destDir, "doc")
 
 	// build.variables fold into BOTH maps (make.lua:59-64), then $(VAR) expand
 	// and auto-inject CC.
