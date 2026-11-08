@@ -401,6 +401,171 @@ func TestDeploy_CMakeInstallDirSubtree(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(installDir, "lib"), "emptied lib dir must be pruned")
 }
 
+// TestDeploy_DefaultCopyDirectories pins upstream install_files' defaults
+// (build.lua:299-321): with copy_directories unset a doc/ dir is copied, and
+// when no directory is copied the README, LICENSE, COPYING and *.md files of
+// the source root go to the per-rock doc dir.
+func TestDeploy_DefaultCopyDirectories(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		files    []string
+		copyDirs []string
+		wantDoc  []string
+	}{
+		{
+			name:    "doc dir copied by default",
+			files:   []string{"doc/index.md", "README.md"},
+			wantDoc: []string{"index.md"},
+		},
+		{
+			name:    "default docs without a doc dir",
+			files:   []string{"README.md", "LICENSE", "copying.txt", "CHANGES.md", "notes.txt", "src/readme.lua"},
+			wantDoc: []string{"CHANGES.md", "LICENSE", "README.md", "copying.txt"},
+		},
+		{
+			name:     "explicit empty list still gets default docs",
+			files:    []string{"doc/index.md", "README"},
+			copyDirs: []string{},
+			wantDoc:  []string{"README"},
+		},
+		{
+			name:     "an explicit directory suppresses default docs",
+			files:    []string{"samples/a.lua", "README.md"},
+			copyDirs: []string{"samples"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := t.TempDir()
+			for _, f := range c.files {
+				writeFile(t, filepath.Join(src, filepath.FromSlash(f)), f)
+			}
+
+			tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
+			require.NoError(t, err)
+
+			spec := &rocks.Rockspec{Package: demoPkg, Version: "1.0.0-1", Build: rocks.Build{CopyDirectories: c.copyDirs}}
+			rm, err := tr.Deploy(spec, src, src)
+			require.NoError(t, err)
+
+			var gotDoc []string
+			for k := range rm.Doc {
+				gotDoc = append(gotDoc, k)
+			}
+
+			assert.ElementsMatch(t, c.wantDoc, gotDoc, "rock_manifest.doc")
+
+			for _, f := range c.wantDoc {
+				assert.FileExists(t, filepath.Join(tr.DocDir(demoPkg, "1.0.0-1"), f))
+			}
+		})
+	}
+}
+
+// TestDeploy_RockManifestListsInstallDir: the rock_manifest lists every file
+// the per-rock install dir holds, as upstream make_rock_manifest walks it — a
+// non-doc copy_directories entry, and conf/doc files a backend installed into
+// $(CONFDIR)/$(DOCDIR) — but not the build/ staging dir the native backends
+// keep there.
+func TestDeploy_RockManifestListsInstallDir(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "samples", "demo.lua"), "demo")
+	writeFile(t, filepath.Join(src, "samples", "nested", "more.txt"), "more")
+
+	tr, err := tree.Open(rocks.Config{Tree: t.TempDir()})
+	require.NoError(t, err)
+
+	installDir := tr.InstallDir(demoPkg, "1.0.0-1")
+	buildDir := filepath.Join(installDir, "build")
+
+	writeFile(t, filepath.Join(installDir, "conf", "demo.cfg"), "cfg")
+	writeFile(t, filepath.Join(installDir, "doc", "manual.txt"), "manual")
+	writeFile(t, filepath.Join(installDir, "share", "extra.dat"), "extra")
+	writeFile(t, filepath.Join(buildDir, "staged.txt"), "staging")
+
+	spec := &rocks.Rockspec{
+		Package: demoPkg,
+		Version: "1.0.0-1",
+		Build:   rocks.Build{Type: "make", CopyDirectories: []string{"samples"}},
+	}
+	rm, err := tr.Deploy(spec, src, buildDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{"demo.cfg": md5Hex("cfg")}, rm.Conf, "rock_manifest.conf")
+	assert.Equal(t, map[string]string{"manual.txt": md5Hex("manual")}, rm.Doc, "rock_manifest.doc")
+	assert.Equal(t, map[string]string{
+		"samples/demo.lua":        md5Hex("demo"),
+		"samples/nested/more.txt": md5Hex("more"),
+		"share/extra.dat":         md5Hex("extra"),
+	}, rm.Other, "every other file of the install dir, the build/ staging dir aside")
+}
+
+// TestDeploy_BackendInstalledBin: a make, cmake or command rock that installs
+// a command into $(BINDIR) — <buildDir>/bin for make, <installDir>/bin for the
+// others — gets it deployed into <tree>/bin and listed in rock_manifest.bin, as
+// upstream deploys the rock_manifest's bin section (repos.lua:468-486): a Lua
+// script through a wrapper whose real script stays in the per-rock bin dir, a
+// shell script verbatim.
+func TestDeploy_BackendInstalledBin(t *testing.T) {
+	t.Parallel()
+
+	const (
+		luaCLI = "print('cli')\n"
+		shTool = "#!/bin/sh\necho tool\n"
+	)
+
+	for _, root := range []string{"buildDir", "installDir"} {
+		t.Run(root, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			buildDir := t.TempDir()
+
+			tr, err := tree.Open(rocks.Config{Tree: dir})
+			require.NoError(t, err)
+
+			tr.BinWrap = &tree.BinWrap{Interpreter: "/opt/tt/bin/tarantool", Sysconfdir: "/etc/luarocks"}
+
+			installDir := tr.InstallDir(demoPkg, "1.0.0-1")
+
+			binDir := filepath.Join(installDir, "bin")
+			if root == "buildDir" {
+				binDir = filepath.Join(buildDir, "bin")
+			}
+
+			writeFile(t, filepath.Join(binDir, "demo-cli"), luaCLI)
+			writeFile(t, filepath.Join(binDir, "tools", "demo-tool"), shTool)
+
+			spec := &rocks.Rockspec{Package: demoPkg, Version: "1.0.0-1", Build: rocks.Build{Type: "make"}}
+			rm, err := tr.Deploy(spec, t.TempDir(), buildDir)
+			require.NoError(t, err)
+
+			assert.Equal(t, map[string]string{
+				"demo-cli":        md5Hex(luaCLI),
+				"tools/demo-tool": md5Hex(shTool),
+			}, rm.Bin, "rock_manifest.bin")
+
+			realScript := filepath.Join(installDir, "bin", "demo-cli")
+			assert.FileExists(t, realScript, "the real script of a wrapped command stays in the per-rock bin dir")
+
+			wrapper, err := os.ReadFile(filepath.Join(tr.BinDir(), "demo-cli"))
+			require.NoError(t, err, "the Lua command must be deployed")
+			assert.Contains(t, string(wrapper), "'"+realScript+"'", "the wrapper must exec the real script")
+
+			tool, err := os.ReadFile(filepath.Join(tr.BinDir(), "tools", "demo-tool"))
+			require.NoError(t, err, "the shell command must be deployed")
+			assert.Equal(t, shTool, string(tool), "a non-Lua command is copied verbatim")
+		})
+	}
+}
+
 // TestDeploy_BuiltinWithoutSubtreesUnaffected — the relocation stage now runs
 // for every build type, so the common case with no lua/lib subtree at all must
 // stay a silent no-op rather than an error or a spurious deployment.
@@ -431,6 +596,48 @@ func TestDeploy_BuiltinWithoutSubtreesUnaffected(t *testing.T) {
 	assert.Empty(t, deployedFiles(t, tr.DeployLibDir()), "nothing should reach the lib deploy dir")
 	assert.Len(t, rm.Lua, 1, "rock_manifest.lua should hold only the declared module")
 	assert.Empty(t, rm.Lib, "rock_manifest.lib should stay empty")
+}
+
+// TestDeploy_NonBuiltinIgnoresModules: build.modules is read by upstream's
+// builtin backend alone, so a make, cmake, command or none rock that lists
+// modules deploys only what its build installed (build/make.lua, cmake.lua,
+// command.lua never read build.modules). build.install still applies to every
+// type (build.lua install_files).
+func TestDeploy_NonBuiltinIgnoresModules(t *testing.T) {
+	t.Parallel()
+
+	for _, typ := range []string{"make", "cmake", "command", "none"} {
+		t.Run(typ, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			src := t.TempDir()
+			buildDir := t.TempDir()
+
+			writeFile(t, filepath.Join(src, "src", "listed.lua"), "return 'listed'")
+			writeFile(t, filepath.Join(src, "src", "installed.lua"), "return 'installed'")
+
+			tr, err := tree.Open(rocks.Config{Tree: dir})
+			require.NoError(t, err)
+
+			spec := &rocks.Rockspec{
+				Package: demoPkg,
+				Version: "1.0.0-1",
+				Build: rocks.Build{
+					Type:    typ,
+					Modules: map[string]rocks.Module{"demo.listed": {Path: "src/listed.lua"}},
+					Install: rocks.BuildInstall{Lua: map[string]string{"demo.installed": "src/installed.lua"}},
+				},
+			}
+			rm, err := tr.Deploy(spec, src, buildDir)
+			require.NoError(t, err)
+
+			assert.Equal(t, []string{"demo/installed.lua"}, deployedFiles(t, tr.DeployLuaDir()),
+				"a %s rock must not deploy its build.modules", typ)
+			assert.Equal(t, map[string]string{"demo/installed.lua": md5Hex("return 'installed'")}, rm.Lua,
+				"rock_manifest.lua of a %s rock", typ)
+		})
+	}
 }
 
 // stageBuiltinRock writes the source tree and the build dir the builtin
@@ -821,6 +1028,37 @@ func TestModuleIndex_InvertsMungedPath(t *testing.T) {
 	rm := &rocks.RockManifest{Lua: map[string]string{filepath.ToSlash(rel): "d1"}}
 	assert.Empty(t, tree.ModuleIndex(rm, demoPkg, "1.0.0-1"),
 		"a MungedPath-formed key must not be indexed as a module")
+}
+
+// TestCommandIndex: the tree manifest's per-rock command index is derived from
+// the rock_manifest's bin section, keyed and valued by the path under the bin
+// dir, as upstream repos.package_commands does — so a build.install.bin entry
+// is not valued by its source path.
+func TestCommandIndex(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		rm   *rocks.RockManifest
+		want map[string]string
+	}{
+		{"nil manifest", nil, map[string]string{}},
+		{"no commands", &rocks.RockManifest{Lua: map[string]string{"demo.lua": "d1"}}, map[string]string{}},
+		{
+			name: "commands with and without a directory",
+			rm:   &rocks.RockManifest{Bin: map[string]string{"demo-cli": "d1", "tools/demo": "d2"}},
+			want: map[string]string{"demo-cli": "demo-cli", "tools/demo": "tools/demo"},
+		},
+		{
+			name: "munged key skipped",
+			rm:   &rocks.RockManifest{Bin: map[string]string{"demo-cli": "d1", "demo_1_0_0_1-old-cli": "d2"}},
+			want: map[string]string{"demo-cli": "demo-cli"},
+		},
+	}
+
+	for _, c := range cases {
+		assert.Equal(t, c.want, tree.CommandIndex(c.rm, demoPkg, "1.0.0-1"), c.name)
+	}
 }
 
 func writeFile(t *testing.T, p, body string) {

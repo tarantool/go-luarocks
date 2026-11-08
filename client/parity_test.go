@@ -10,11 +10,12 @@ package client_test
 // The parity claim is about DEPLOYED ARTIFACTS, not manifest
 // byte-formatting: native writes its own manifest, lua writes upstream's, and
 // those `manifest` files legitimately differ in formatting/ordering. So the
-// hard assertions are scoped to the deployed artifacts (every file outside
-// share/tarantool/rocks/, as in parity_extra_test.go) and the read-path
-// projections (List/Which); manifest-formatting and engine-specific extra files
-// under share/tarantool/rocks/ (e.g. upstream's rock_manifest) are logged as
-// documented differences.
+// hard assertions are the deployed artifacts (every file outside
+// share/tarantool/rocks/, as in parity_extra_test.go), the read-path
+// projections (List/Which), the installed rockspec, and the CONTENTS of the
+// rock_manifest and the tree manifest (parity_manifest_test.go); the formatting
+// of those files and engine-specific extra files under share/tarantool/rocks/
+// (the native build/ staging dir) are logged as documented differences.
 //
 // Build-tagged off by default; run with `-tags integration_luaengine`.
 
@@ -158,30 +159,27 @@ build = {
 		}
 	}
 
-	// The installed per-rock rockspec: lua (upstream LuaRocks) copies it into
-	// the per-rock install dir; native does NOT (tree.Deploy + nativeEngine.
-	// deployFromSource write rock_manifest and the build/ staging tree, but not
-	// the rockspec — see native.go deployFromSource). This is per-rock
-	// BOOKKEEPING, not a deployed module artifact, so it is a DOCUMENTED
-	// difference rather than a hard failure. (The original plan listed rockspec
-	// presence under hard assertions, but its comparison strategy is explicit
-	// that only a divergent *deployed module artifact* may fail; this entry sits
-	// in the rocks/ bookkeeping subtree and is reported, not failed.)
+	// The installed per-rock rockspec: both backends copy it verbatim into the
+	// per-rock install dir (upstream write_rock_dir_files, native
+	// tree.deployRockspec), so it must be present and byte-equal in both.
 	const specRel = "share/tarantool/rocks/foo/1.0-1/foo-1.0-1.rockspec"
-	_, specInA := mapA[specRel]
-	_, specInB := mapB[specRel]
-	if specInA != specInB {
-		t.Logf("documented difference: per-rock rockspec at %s present in native=%v lua=%v (native does not copy the rockspec into the install dir; lua/upstream does)", specRel, specInA, specInB)
-	}
+	specA, specInA := mapA[specRel]
+	specB, specInB := mapB[specRel]
+	require.True(t, specInA && specInB, "per-rock rockspec at %s present in native=%v lua=%v", specRel, specInA, specInB)
+	assert.Equal(t, specB, specA, "per-rock rockspec at %s differs between backends", specRel)
 
-	// The SET of installed rock paths (everything under rocks/<name>/<version>/,
-	// minus the top-level manifest) must match between engines.
+	// What the rock_manifest and the tree manifest record must agree too,
+	// whatever their formatting.
+	compareRockManifests(t, "purelua", treeA, treeB, "foo", "1.0-1")
+	compareTreeManifests(t, "purelua", treeA, treeB)
+
+	// The rest of the per-rock bookkeeping subtree (everything under
+	// rocks/<name>/<version>/, minus the top-level manifest) may differ in
+	// files the rock_manifest does not list — the native build/ staging dir.
+	// Log it as a documented difference.
 	rocksA := rockPathSet(mapA)
 	rocksB := rockPathSet(mapB)
 	for _, only := range symmetricDiff(rocksA, rocksB) {
-		// Don't hard-fail here unless it's a deployed module (handled above):
-		// upstream writes per-rock bookkeeping (e.g. rock_manifest) that native
-		// does not. Log it as a documented difference.
 		t.Logf("documented difference (rock bookkeeping): %s", only)
 	}
 

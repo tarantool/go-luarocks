@@ -14,27 +14,30 @@ import (
 // can locate custom modules/libs/includes the user pointed at via the env.
 var cmakeEnvVars = []string{"CMAKE_MODULE_PATH", "CMAKE_LIBRARY_PATH", "CMAKE_INCLUDE_PATH"}
 
+// cmakeBuildDir is the build directory upstream cmake.run configures, under
+// the source dir (cmake.lua:51).
+const cmakeBuildDir = "build.luarocks"
+
 // runCMake implements the `cmake` build backend.
 //
-// Sequence (pure pass-through — luarocks itself does NOT auto-inject
-// LUA_INCLUDE_DIR, CMAKE_INSTALL_PREFIX, CMAKE_MODULE_LINKER_FLAGS, etc.;
-// the rockspec is responsible for supplying them via build.variables):
+// Sequence (mirrors upstream luarocks/src/luarocks/build/cmake.lua; luarocks
+// does NOT inject LUA_INCLUDE_DIR, CMAKE_MODULE_LINKER_FLAGS, etc. — the
+// rockspec supplies them via build.variables):
 //
-//  1. cmake . -D<K>=<V> ...        (configure)
-//  2. cmake --build .              (build)
-//  3. cmake --install . --prefix destDir
+//  1. cmake -H. -Bbuild.luarocks -D<K>=<V> ...                 (configure)
+//  2. cmake --build build.luarocks --config Release            (build)
+//  3. cmake --build build.luarocks --target install --config Release
 //
-// The working directory is srcDir. Builds happen in-tree, matching
-// upstream's `-H. -Bbuild.luarocks` shape closely enough for our purposes
-// (upstream uses `build.luarocks` as a subdir; we let cmake default to
-// in-tree which gives the same outputs on the install step).
+// The working directory is srcDir, and the build happens out of tree in its
+// build.luarocks subdirectory, so the configure step cannot overwrite a
+// Makefile or anything else of the source tree.
 //
-// The install --prefix argument is the one piece of plumbing we DO inject:
-// the facade needs the rock's output rooted at destDir, and cmake's
-// --install --prefix is the cleanest way to achieve that without
-// post-hoc moving. This matches the spirit of upstream which expects
-// CMAKE_INSTALL_PREFIX to be set to $(PREFIX); --prefix on --install
-// overrides it.
+// One piece of plumbing is ours: a rockspec that sets no CMAKE_INSTALL_PREFIX
+// gets it set to the rock's $(PREFIX), its install dir, where tree.Deploy picks
+// the installed files up, rather than left to CMake's /usr/local default as
+// upstream leaves it. Without a rock name (a hand-built spec) the prefix is
+// destDir. A rockspec that sets CMAKE_INSTALL_PREFIX — to "$(PREFIX)", as
+// rocks do — installs exactly where upstream's would.
 func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string, cfg rocks.Config) error {
 	env := buildEnv(cfg)
 	vars := buildVars(spec, cfg)
@@ -58,6 +61,13 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 		}
 	}
 
+	if _, ok := dvars["CMAKE_INSTALL_PREFIX"]; !ok {
+		dvars["CMAKE_INSTALL_PREFIX"] = destDir
+		if spec.Package != "" {
+			dvars["CMAKE_INSTALL_PREFIX"] = vars["PREFIX"]
+		}
+	}
+
 	keys := make([]string, 0, len(dvars))
 	for k := range dvars {
 		keys = append(keys, k)
@@ -65,8 +75,9 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 
 	sort.Strings(keys)
 
-	configure := make([]string, 0, 1+len(keys))
-	configure = append(configure, ".")
+	dirs := []string{"-H.", "-B" + cmakeBuildDir}
+	configure := make([]string, 0, len(dirs)+len(keys))
+	configure = append(configure, dirs...)
 
 	for _, k := range keys {
 		configure = append(configure, "-D"+k+"="+dvars[k])
@@ -82,7 +93,7 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 	honorPasses := rockspecFormatAtLeast3(spec.RockspecFormat)
 
 	if !honorPasses || passEnabled(spec.Build.BuildPass) {
-		if err := runCmd(ctx, "cmake", []string{"--build", "."}, srcDir, env); err != nil {
+		if err := runCmd(ctx, "cmake", []string{"--build", cmakeBuildDir, "--config", "Release"}, srcDir, env); err != nil {
 			return err
 		}
 	}
@@ -91,7 +102,7 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 		return nil
 	}
 
-	return runCmd(ctx, "cmake", []string{"--install", ".", "--prefix", destDir}, srcDir, env)
+	return runCmd(ctx, "cmake", []string{"--build", cmakeBuildDir, "--target", "install", "--config", "Release"}, srcDir, env)
 }
 
 // rockspecFormatAtLeast3 reports whether the rockspec_format (default "1.0") is

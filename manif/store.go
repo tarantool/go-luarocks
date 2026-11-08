@@ -647,6 +647,14 @@ func rockManifestToTable(rm *rocks.RockManifest) map[string]any {
 	addDir("conf", rm.Conf)
 	addDir("doc", rm.Doc)
 
+	// Everything else of the install dir sits at its own path from the top,
+	// as make_rock_manifest's walk puts it.
+	for k, v := range stringMapToNested(rm.Other) {
+		if _, taken := out[k]; !taken {
+			out[k] = v
+		}
+	}
+
 	return out
 }
 
@@ -681,11 +689,12 @@ func stringMapToNested(m map[string]string) map[string]any {
 
 func rockManifestFromTable(t map[string]any) (*rocks.RockManifest, error) {
 	rm := &rocks.RockManifest{
-		Lua:  map[string]string{},
-		Lib:  map[string]string{},
-		Bin:  map[string]string{},
-		Conf: map[string]string{},
-		Doc:  map[string]string{},
+		Lua:   map[string]string{},
+		Lib:   map[string]string{},
+		Bin:   map[string]string{},
+		Conf:  map[string]string{},
+		Doc:   map[string]string{},
+		Other: map[string]string{},
 	}
 
 	// The rockspec entry is keyed by its versioned filename (a top-level string
@@ -709,9 +718,11 @@ func rockManifestFromTable(t map[string]any) (*rocks.RockManifest, error) {
 		break
 	}
 
-	for key, dst := range map[string]map[string]string{
+	dirs := map[string]map[string]string{
 		"lua": rm.Lua, "lib": rm.Lib, "bin": rm.Bin, "conf": rm.Conf, "doc": rm.Doc,
-	} {
+	}
+
+	for key, dst := range dirs {
 		if v, ok := t[key]; ok {
 			m, ok := v.(map[string]any)
 			if !ok {
@@ -719,6 +730,23 @@ func rockManifestFromTable(t map[string]any) (*rocks.RockManifest, error) {
 			}
 
 			flattenNested("", m, dst)
+		}
+	}
+
+	// Any other entry is a file of the install dir outside those directories:
+	// a top-level file, or a tree under another directory.
+	for key, v := range t {
+		if _, isDir := dirs[key]; isDir || key == legacyRockspecKey || key == rm.RockspecFile {
+			continue
+		}
+
+		switch x := v.(type) {
+		case string:
+			rm.Other[key] = x
+		case map[string]any:
+			flattenNested(key, x, rm.Other)
+		default:
+			return nil, fmt.Errorf("rock_manifest.%s is %T, want string or map", key, v)
 		}
 	}
 

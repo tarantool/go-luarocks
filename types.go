@@ -294,4 +294,9 @@ type RockManifest struct {
 	Bin      map[string]string
 	Conf     map[string]string
 	Doc      map[string]string
+	// Other holds every other file of the per-rock install dir — a
+	// copy_directories entry other than doc, say — keyed by its path
+	// relative to that dir, since upstream make_rock_manifest lists the whole
+	// directory.
+	Other map[string]string
 }

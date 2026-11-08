@@ -31,12 +31,13 @@ func writeInternal(t *testing.T, p, body string) {
 	require.NoError(t, os.WriteFile(p, []byte(body), filePerm), "write %q", p)
 }
 
-// chmodCleanup records a permission change that must be undone (writable
-// again) before t.TempDir's own cleanup tries to remove the tree; t.Cleanup
-// runs LIFO, so registering this after t.TempDir() makes it run first.
-func chmodCleanup(t *testing.T, path string, mode os.FileMode) {
+// readOnlyDir makes the directory path read-only (0o500) and records the
+// change to be undone (writable again) before t.TempDir's own cleanup tries
+// to remove the tree; t.Cleanup runs LIFO, so registering this after
+// t.TempDir() makes it run first.
+func readOnlyDir(t *testing.T, path string) {
 	t.Helper()
-	require.NoError(t, os.Chmod(path, mode))
+	require.NoError(t, os.Chmod(path, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(path, dirPerm) })
 }
 
@@ -209,7 +210,7 @@ func TestResolveSpot_DemoteMkdirError(t *testing.T) {
 
 	// deployDir must stay read-only until after resolveSpot runs; register the
 	// restore before chmod so cleanup can remove the tree afterward.
-	chmodCleanup(t, deployDir, 0o500)
+	readOnlyDir(t, deployDir)
 
 	_, err := tr.resolveSpot(deployDir, plain, "foo.demo", testPkg, "2.0-1")
 	require.Error(t, err)
@@ -244,9 +245,8 @@ func TestResolveSpot_DemoteRenameError(t *testing.T) {
 	assert.Contains(t, err.Error(), "demote")
 }
 
-// TestResolveSpot_BackupRenameError covers the untracked-file branch's
-// os.Rename failure: the "~" backup path already exists as a non-empty
-// directory.
+// TestResolveSpot_BackupRenameError covers the backup branch's os.Rename
+// failure: the deploy dir is read-only, so the untracked file cannot be moved.
 func TestResolveSpot_BackupRenameError(t *testing.T) {
 	t.Parallel()
 
@@ -255,11 +255,70 @@ func TestResolveSpot_BackupRenameError(t *testing.T) {
 	deployDir := tr.DeployLuaDir()
 	plain := filepath.Join(deployDir, "demo.lua")
 	writeInternal(t, plain, "untracked")
-	writeInternal(t, filepath.Join(plain+"~", "blocker"), "occupied")
+
+	readOnlyDir(t, deployDir)
 
 	_, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "backup")
+}
+
+// TestResolveSpot_BackupKeepsEarlierBackups is the regression test for the
+// clobbered backup: upstream backup_existing appends "~" until the name is
+// free (repos.lua:276-279), so a backup left by an earlier deploy survives. A
+// single os.Rename to <target>~ overwrote it.
+func TestResolveSpot_BackupKeepsEarlierBackups(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{Paths: Paths{Tree: dir}}
+	deployDir := tr.DeployLuaDir()
+	plain := filepath.Join(deployDir, "demo.lua")
+	writeInternal(t, plain, "untracked")
+	writeInternal(t, plain+"~", "first backup")
+	writeInternal(t, plain+"~~", "second backup")
+
+	_, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
+	require.NoError(t, err)
+
+	for p, want := range map[string]string{
+		plain + "~":   "first backup",
+		plain + "~~":  "second backup",
+		plain + "~~~": "untracked",
+	} {
+		b, err := os.ReadFile(p) //nolint:gosec // test temp path
+		require.NoError(t, err, "read %s", p)
+		assert.Equal(t, want, string(b), p)
+	}
+}
+
+// TestResolveSpot_VersionedTargetBackedUp: upstream backs up whatever sits at
+// the target whenever its provider is another rock or version
+// (repos.lua:480-484), including a versioned target. Writing the versioned
+// name over an existing file lost it.
+func TestResolveSpot_VersionedTargetBackedUp(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tr := &Tree{
+		Paths: Paths{Tree: dir},
+		Provider: func(item string) (string, string, bool) {
+			if item == testPkg {
+				return testPkg, "2.0-1", true
+			}
+
+			return "", "", false
+		},
+	}
+	deployDir := tr.DeployLuaDir()
+	plain := filepath.Join(deployDir, "demo.lua")
+	versioned := MungedPath(deployDir, plain, testPkg, testVer)
+	writeInternal(t, versioned, "stale")
+
+	got, err := tr.resolveSpot(deployDir, plain, testPkg, testPkg, testVer)
+	require.NoError(t, err)
+	assert.Equal(t, versioned, got, "an older version takes the versioned name")
+	assert.FileExists(t, versioned+"~", "the file already there is backed up")
 }
 
 func TestIsLua_MissingFile(t *testing.T) {
@@ -479,8 +538,7 @@ func TestCopyTree_Errors(t *testing.T) {
 		t.Parallel()
 
 		dir := t.TempDir()
-		rm := &rocks.RockManifest{Doc: map[string]string{}}
-		err := copyTree(filepath.Join(dir, "nope"), filepath.Join(dir, "out"), rm, "doc")
+		err := copyTree(filepath.Join(dir, "nope"), filepath.Join(dir, "out"))
 		require.Error(t, err)
 	})
 
@@ -491,8 +549,7 @@ func TestCopyTree_Errors(t *testing.T) {
 		src := filepath.Join(dir, "notadir")
 		writeInternal(t, src, "hi")
 
-		rm := &rocks.RockManifest{Doc: map[string]string{}}
-		err := copyTree(src, filepath.Join(dir, "out"), rm, "doc")
+		err := copyTree(src, filepath.Join(dir, "out"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a directory")
 	})
@@ -687,9 +744,8 @@ func TestDeploy_InstallBinCopyError(t *testing.T) {
 }
 
 // TestDeploy_InstallBinWrappedResolveSpotError forces the wrapped-bin
-// branch's resolveSpot call to fail: the wrapper's plain target already
-// exists as a non-empty directory, so the untracked-file backup rename
-// cannot succeed.
+// branch's resolveSpot call to fail: the wrapper's plain target is an
+// untracked file in a read-only bin dir, so the backup rename cannot succeed.
 func TestDeploy_InstallBinWrappedResolveSpotError(t *testing.T) {
 	t.Parallel()
 
@@ -704,10 +760,9 @@ func TestDeploy_InstallBinWrappedResolveSpotError(t *testing.T) {
 	tr.BinWrap = &BinWrap{Interpreter: "/usr/bin/lua", Sysconfdir: "/etc/luarocks"}
 
 	// The wrapper's plain target is an untracked existing file, so resolveSpot
-	// attempts to back it up to "demo~" — pre-occupy that backup path with a
-	// non-empty directory so the rename fails.
+	// attempts to back it up to "demo~" — in a bin dir it cannot write.
 	writeInternal(t, filepath.Join(tr.BinDir(), testPkg), "untracked launcher")
-	writeInternal(t, filepath.Join(tr.BinDir(), "demo~", "occupied"), "x")
+	readOnlyDir(t, tr.BinDir())
 
 	spec := &rocks.Rockspec{
 		Package: testPkg,
@@ -737,7 +792,7 @@ func TestDeploy_InstallBinWrapperMkdirError(t *testing.T) {
 
 	tr.BinWrap = &BinWrap{Interpreter: "/usr/bin/lua", Sysconfdir: "/etc/luarocks"}
 
-	chmodCleanup(t, tr.BinDir(), 0o500)
+	readOnlyDir(t, tr.BinDir())
 
 	spec := &rocks.Rockspec{
 		Package: testPkg,
@@ -788,10 +843,9 @@ func TestDeploy_InstalledSubtreeError(t *testing.T) {
 	require.NoError(t, err)
 
 	// The deployed target is an untracked existing file, so resolveSpot
-	// attempts to back it up to "demo.lua~" — pre-occupy that backup path
-	// with a non-empty directory so the rename fails.
+	// attempts to back it up to "demo.lua~" — in a deploy dir it cannot write.
 	writeInternal(t, filepath.Join(tr.DeployLuaDir(), "demo.lua"), "untracked")
-	writeInternal(t, filepath.Join(tr.DeployLuaDir(), "demo.lua~", "occupied"), "x")
+	readOnlyDir(t, tr.DeployLuaDir())
 
 	spec := &rocks.Rockspec{
 		Package: testPkg,

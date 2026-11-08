@@ -18,7 +18,8 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
 - rockspec: A sandboxed `gopher-lua`-based evaluator for `.rockspec` files,
   including conditional (platform-guarded) rockspecs.
 - manif: A manifest reader and writer compatible with the upstream LuaRocks
-  manifest format.
+  manifest format. A `rock_manifest` entry outside its `lua`, `lib`, `bin`,
+  `conf` and `doc` sections is kept in `RockManifest.Other`.
 - fetch: Source fetch backends for `http(s)`, `git`/`git+https`/`git+ssh`,
   and `file://` sources. `Sources` returns a `Result` that says whether the
   path is already the source root. `File` retrieves a single file into a
@@ -27,12 +28,21 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `http.DefaultTransport`, so connections are reused and `HTTP_PROXY`,
   `HTTPS_PROXY` and `NO_PROXY` are honoured.
 - tree: On-disk rock tree layout, deployment, conflict detection, and
-  `which`-style lookup. A `lua`/`lib` subtree installed by any build backend
-  is relocated into the deploy dirs, and `ModuleIndex` derives a rock's
-  modules from its `rock_manifest`, as upstream `repos.package_modules` does.
+  `which`-style lookup. A `lua`/`lib`/`bin` subtree installed by any build
+  backend is deployed like the rockspec's own sections, `build.modules` is
+  read for `builtin` rocks only, and the default `copy_directories` and docs
+  of upstream's `install_files` apply. A rock's `rock_manifest` lists every
+  file of its install dir, and `ModuleIndex` derives its modules from it, as
+  upstream `repos.package_modules` does. A file `Deploy` finds in its way
+  that another rock or version owns, or none does, is backed up without
+  overwriting earlier backups.
 - build: Build backends — `builtin`, `cmake`, `make`, and `command`.
   `LUA_BINDIR` is derived from `Tarantool.Executable` when it has a
-  directory component, so a flat Tarantool SDK with no `bin/` works.
+  directory component, so a flat Tarantool SDK with no `bin/` works. The
+  `make` and `cmake` backends install into the rock's install dir, as
+  upstream's `$(PREFIX)`, `$(LUADIR)`, … name it; `cmake` builds out of tree
+  in `build.luarocks` and installs under the rock's `$(PREFIX)` when the
+  rockspec sets no `CMAKE_INSTALL_PREFIX`.
 - remote: Indexes for rock servers that are HTTP(S) endpoints or local
   directories (`/srv/rocks` or `file:///srv/rocks`) — the offline case
   upstream serves with `luarocks --only-server=/path/to/repo`. `NewIndex`
@@ -61,8 +71,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   chose, as upstream `install` does: a `.all.rock` or host-arch `.rock` is
   deployed as built, a `.src.rock` is built from its bundled sources, and
   only a bare `.rockspec` fetches `source.url`. The tree manifest's
-  `modules` index is derived from each rock's deployed `rock_manifest`, so
-  it lists the modules of `cmake`, `make` and `command` rocks too.
+  `modules` and `commands` indexes are derived from each rock's deployed
+  `rock_manifest`, so they list the modules of `cmake`, `make` and `command`
+  rocks too, and name each command by its path under `bin/`.
 - client: The lua backend runs each operation in its own VM, so no state
   carries over between calls. It honours `Config.Servers`, reads
   `/etc/luarocks/config-5.1.lua` (`LUAROCKS_SYSCONFDIR` overrides it), and

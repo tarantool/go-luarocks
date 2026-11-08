@@ -141,12 +141,16 @@ func TestRunMake_SubstitutesVarsAndAutoInjectsCC(t *testing.T) {
 
 	t.Setenv("PATH", stubDir)
 	t.Setenv("CC", "") // force DeriveFlags default "cc"
-	require.NoError(t, build.RunBackend(context.Background(), spec, srcDir, destDir, rocks.Config{}))
+	require.NoError(t, build.RunBackend(context.Background(), spec, srcDir, destDir, rocks.Config{Tree: "/tree"}))
 
 	got := string(mustReadLog(t, filepath.Join(dir, "log")))
-	// $(LIBDIR)/$(LUADIR) expand into destDir; the literal placeholder is gone.
-	assert.Contains(t, got, "INST_LIBDIR="+filepath.Join(destDir, "lib"), "INST_LIBDIR must expand to destDir/lib")
-	assert.Contains(t, got, "INST_LUADIR="+filepath.Join(destDir, "lua"), "INST_LUADIR must expand to destDir/lua")
+	// $(LIBDIR)/$(LUADIR) expand into the rock's install dir, as upstream
+	// path.configure_paths sets them — not into destDir, which put anything a
+	// Makefile installed into $(CONFDIR) or $(DOCDIR) outside it — and the
+	// literal placeholder is gone.
+	installDir := "/tree/share/tarantool/rocks/foo/1.0-1"
+	assert.Contains(t, got, "INST_LIBDIR="+installDir+"/lib", "INST_LIBDIR must expand to the install dir's lib")
+	assert.Contains(t, got, "INST_LUADIR="+installDir+"/lua", "INST_LUADIR must expand to the install dir's lua")
 	assert.NotContains(t, got, "$(LIBDIR)", "no unexpanded placeholder may survive")
 	// glr-vz4: CC auto-injected as an argv assignment on both phases.
 	assert.Equal(t, 2, strings.Count(got, "CC=cc"), "CC must be auto-injected on both phases; log:\n%s", got)

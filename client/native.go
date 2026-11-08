@@ -971,11 +971,13 @@ func (e *nativeEngine) deployRock(
 		}
 	}
 
-	if len(rm.Bin) > 0 {
-		entry.Commands = map[string]string{}
-		for binName, srcRel := range spec.Build.Install.Bin {
-			entry.Commands[binName] = srcRel
-			m.Commands[binName] = upsertProvider(m.Commands[binName], pkgVer, true)
+	// The commands index likewise comes from what Deploy wrote (rm.Bin), as
+	// upstream repos.package_commands reads it: keyed and valued by the path
+	// under the bin dir, not by the rockspec's build.install.bin source paths.
+	if cmds := tree.CommandIndex(rm, spec.Package, spec.Version); len(cmds) > 0 {
+		entry.Commands = cmds
+		for cmd := range cmds {
+			m.Commands[cmd] = upsertProvider(m.Commands[cmd], pkgVer, true)
 		}
 	}
 

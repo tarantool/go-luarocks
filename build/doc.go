@@ -1,9 +1,11 @@
 // Package build implements the four supported rockspec build backends —
 // builtin, cmake, make, command — plus the none no-op. RunBackend is the
 // single public entry point used by the facade: it dispatches on the
-// rockspec's build.type, compiles/copies the rock's modules from srcDir, and
-// stages the result under destDir for tree.Deploy. Flags carries the
-// caller-tunable knobs (verbosity, extra CMake/make variables).
+// rockspec's build.type and builds the rock from srcDir — the builtin backend
+// compiles/copies its modules and stages the result under destDir, the make,
+// cmake and command backends install into the rock's install dir — for
+// tree.Deploy. Flags carries the caller-tunable knobs (verbosity, extra
+// CMake/make variables).
 //
 // The package never sets process environment variables. Every
 // subprocess invocation builds its env via cmd.Env, layering on top of
