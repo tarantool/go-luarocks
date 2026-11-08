@@ -11,3 +11,9 @@ func LuaOSName(goos string) string { return luaOSName(goos) }
 // LuaCPUName exposes luaCPUName for external tests, so every GOARCH branch
 // can be exercised regardless of the host running the test suite.
 func LuaCPUName(goarch string) string { return luaCPUName(goarch) }
+
+// ParseRockFileName exposes parseRockFileName, upstream path.parse_name, so
+// the differential tests can tell which rocks a set of file names lists.
+func ParseRockFileName(fileName string) (name, version, arch string, ok bool) {
+	return parseRockFileName(fileName)
+}

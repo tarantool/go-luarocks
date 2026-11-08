@@ -17,9 +17,13 @@
 //     run an interpreter) and each_platform, which yields the platforms
 //     passed to New in order — upstream's default least-specific-first walk.
 //   - luarocks.fs is a stub that raises on any use: persist.lua requires it at
-//     load time but none of the functions under test call it.
-//   - io.open reads only the in-memory files registered with AddFile; every
-//     other open fails as a missing file would. os.getenv finds no variable.
+//     load time but none of the functions under test call it, except the
+//     ones MakeManifest adds over its in-memory Repo (see there).
+//   - io.open reads only the in-memory files registered with AddFile (and,
+//     during MakeManifest, those of its Repo); every other open fails as a
+//     missing file would. It writes only during MakeManifest, into memory.
+//   - luarocks.util.printerr records what it prints, for MakeManifest,
+//     instead of writing to stderr. os.getenv finds no variable.
 //     io.popen, os.execute, os.remove, os.rename, os.exit, os.tmpname,
 //     loadfile and dofile raise. The reference never touches the host.
 //   - util.warning (luarocks.core.util) records the warning instead of
@@ -149,6 +153,12 @@ type VM struct {
 	L        *lua.LState
 	files    map[string]string
 	warnings []string
+
+	// repo, written and stderr hold the state of a MakeManifest call: the
+	// directory it serves, the files it wrote and what it printed.
+	repo    *Repo
+	written map[string]string
+	stderr  []string
 }
 
 // New boots a VM whose stub cfg.each_platform yields platforms, or
@@ -525,7 +535,17 @@ func (vm *VM) ioOpen(ls *lua.LState) int {
 	name := ls.CheckString(1)
 	mode := ls.OptString(secondArg, "r")
 
+	if mode == "w" || mode == "wb" {
+		if _, _, inRepo := repoPath(name); vm.repo != nil && inRepo {
+			return vm.ioCreate(ls, name)
+		}
+	}
+
 	content, ok := vm.files[name]
+	if !ok {
+		content, ok = vm.repoFile(name)
+	}
+
 	if !ok || (mode != "r" && mode != "rb") {
 		ls.Push(lua.LNil)
 		ls.Push(lua.LString(name + ": No such file or directory"))
@@ -550,6 +570,35 @@ func (vm *VM) ioOpen(ls *lua.LState) int {
 		return 1
 	}))
 	fd.RawSetString("close", ls.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LTrue)
+
+		return 1
+	}))
+	ls.Push(fd)
+
+	return 1
+}
+
+// ioCreate opens name for writing into vm.written; close stores what was
+// written.
+func (vm *VM) ioCreate(ls *lua.LState, name string) int {
+	var buf strings.Builder
+
+	fd := ls.NewTable()
+	fd.RawSetString("write", ls.NewFunction(func(L *lua.LState) int {
+		for i := 2; i <= L.GetTop(); i++ {
+			buf.WriteString(L.CheckString(i))
+		}
+
+		L.Push(L.Get(1))
+
+		return 1
+	}))
+	fd.RawSetString("close", ls.NewFunction(func(L *lua.LState) int {
+		if vm.written != nil {
+			vm.written[name] = buf.String()
+		}
+
 		L.Push(lua.LTrue)
 
 		return 1

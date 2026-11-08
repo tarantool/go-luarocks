@@ -20,6 +20,11 @@
 // pattern, because a search says what exists while an install picks one. It
 // reuses the same loaders, so it needs no index of its own.
 //
+// MakeManifest is the other side of a local server: it writes the manifests
+// (and optionally index.html) that turn a directory of rock files into one,
+// byte-equal to `luarocks-admin make_manifest`, without a Lua VM except for
+// the rockspecs it reads.
+//
 // The indexes share everything but the transport: manifest probe order (the
 // zipped and plain manifest-<lua_version>, then manifest, then the
 // Go-specific manifest-<lua_version>.json), decoding, the arch filter, the
