@@ -226,3 +226,18 @@ func ResolveInstalledDeps(spec *rocks.Rockspec, m *rocks.Manifest) map[string]st
 
 // RemoveProvider exposes the provider-removal helper for unit tests.
 func RemoveProvider(index map[string][]string, provider string) { removeProvider(index, provider) }
+
+// PreloadPaths returns the embedded-FS path of every module the engine
+// preloads.
+func PreloadPaths() []string {
+	paths := make([]string, 0, len(luaPreloadMap))
+	for _, path := range luaPreloadMap {
+		paths = append(paths, path)
+	}
+
+	return paths
+}
+
+// AbsentModules returns the modules the engine answers with a failing stub
+// instead of their source.
+func AbsentModules() []string { return slices.Clone(luaAbsentModules) }
