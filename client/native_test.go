@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/tree"
 )
 
 // The native backend implements the install/build/make/pack/which/list/show
@@ -115,41 +116,59 @@ func TestCheckSupportedPlatforms(t *testing.T) {
 	}
 }
 
-func TestUpsertProvider_ActiveOrdering(t *testing.T) {
+// TestAddProvider_UpstreamOrder: provider lists keep upstream's sort_pkgs
+// order — rock name first, then newest version first — whatever the order the
+// rocks were installed in, so index 0 is always the provider Deploy gave the
+// plain path. Recording a newly installed rock at the front made a downgrade
+// (or a second rock sorting after the first) the "active" provider of files it
+// had deployed under versioned names.
+func TestAddProvider_UpstreamOrder(t *testing.T) {
 	t.Parallel()
 
-	// Active provider moves to index 0; inactive is appended; dedups.
-	assert.Equal(t, []string{"demo/2.0-1", "demo/1.0-1"},
-		client.UpsertProvider([]string{"demo/1.0-1"}, "demo/2.0-1", true), "upgrade → new active first")
-	assert.Equal(t, []string{"demo/1.0-1", "demo/2.0-1"},
-		client.UpsertProvider([]string{"demo/1.0-1"}, "demo/2.0-1", false), "inactive → appended")
-	assert.Equal(t, []string{"demo/1.0-1"},
-		client.UpsertProvider([]string{"demo/1.0-1"}, "demo/1.0-1", true), "reinstall → no duplicate")
+	cases := []struct {
+		name     string
+		list     []string
+		provider string
+		want     []string
+	}{
+		{"upgrade", []string{"demo/1.0-1"}, "demo/2.0-1", []string{"demo/2.0-1", "demo/1.0-1"}},
+		{"downgrade", []string{"demo/2.0-1"}, "demo/1.0-1", []string{"demo/2.0-1", "demo/1.0-1"}},
+		{"reinstall", []string{"demo/1.0-1"}, "demo/1.0-1", []string{"demo/1.0-1"}},
+		{"middle version", []string{"demo/3.0-1", "demo/1.0-1"}, "demo/2.0-1", []string{"demo/3.0-1", "demo/2.0-1", "demo/1.0-1"}},
+		{"versions compare as versions", []string{"demo/9.0-1"}, "demo/10.0-1", []string{"demo/10.0-1", "demo/9.0-1"}},
+		{"smaller name first", []string{"bbb/1.0-1"}, "aaa/1.0-1", []string{"aaa/1.0-1", "bbb/1.0-1"}},
+		{"larger name after", []string{"aaa/1.0-1"}, "bbb/2.0-1", []string{"aaa/1.0-1", "bbb/2.0-1"}},
+		{"first provider", nil, "demo/1.0-1", []string{"demo/1.0-1"}},
+	}
+
+	for _, c := range cases {
+		assert.Equal(t, c.want, client.AddProvider(c.list, c.provider), c.name)
+	}
 }
 
-func TestManifestProvider_ReadsActiveSlot(t *testing.T) {
+// TestManifestProviders_KeepsModulesAndCommandsApart: a module and a command
+// of the same name are looked up in their own index, as upstream
+// manif.get_providers does.
+func TestManifestProviders_KeepsModulesAndCommandsApart(t *testing.T) {
 	t.Parallel()
 
 	m := &rocks.Manifest{
 		Modules:  map[string][]string{"demo": {"demo/2.0-1", "demo/1.0-1"}},
-		Commands: map[string][]string{"tool": {"cli/3.0-1"}},
+		Commands: map[string][]string{"demo": {"cli/3.0-1"}, "tool": {"cli/3.0-1"}},
 	}
-	p := client.ManifestProvider(m)
+	p := client.ManifestProviders(m)
 
-	name, ver, ok := p("demo")
-	require.True(t, ok)
-	assert.Equal(t, "demo", name)
-	assert.Equal(t, "2.0-1", ver, "active provider is index 0")
-
-	name, ver, ok = p("tool")
-	require.True(t, ok)
-	assert.Equal(t, "cli", name)
-	assert.Equal(t, "3.0-1", ver)
-
-	_, _, ok = p("absent")
-	assert.False(t, ok)
+	assert.Equal(t, []string{"demo/2.0-1", "demo/1.0-1"}, p(tree.ModuleItem, "demo"))
+	assert.Equal(t, []string{"cli/3.0-1"}, p(tree.CommandItem, "demo"))
+	assert.Equal(t, []string{"cli/3.0-1"}, p(tree.CommandItem, "tool"))
+	assert.Empty(t, p(tree.ModuleItem, "tool"))
+	assert.Empty(t, p(tree.ModuleItem, "absent"))
 }
 
+// TestResolveInstalledDeps pins go-luarocks' own per-entry repo.dependencies:
+// the rock's direct dependencies, each at the installed version with the
+// greatest string (not the newest version its constraint accepts, as upstream
+// scan_deps picks it), without the rock itself or what is not installed.
 func TestResolveInstalledDeps(t *testing.T) {
 	t.Parallel()
 

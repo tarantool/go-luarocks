@@ -39,13 +39,16 @@ type Tree struct {
 	// construct a Tree without a Tarantool target).
 	BinWrap *BinWrap
 
-	// Provider resolves the currently-active provider of a deploy item (a
-	// module name for lua/lib, a command name for bin) from the tree manifest,
-	// returning the provider's rock name+version. It backs Deploy's
-	// check_spot_if_available (repos.lua:248): when nil, every deployed file is
-	// treated as having no current provider and takes the plain active path.
-	// The facade sets this from the pre-install tree manifest.
-	Provider func(item string) (name, version string, ok bool)
+	// Providers lists the installed rocks that provide a deploy item — a
+	// module (ModuleItem) for a lua/lib file, a command (CommandItem) for a bin
+	// file — as "name/version" tokens in the order of the tree manifest's
+	// modules or commands index: index 0 is the provider holding the plain
+	// path, index 1 the one that takes it over when index 0 goes away. It backs
+	// Deploy's check_spot_if_available (repos.lua:248) and DeleteVersion's
+	// promotion of the next provider (repos.lua:585). When nil, no item has a
+	// provider: every deployed file takes its plain path. The facade sets this
+	// from the tree manifest as it stands before the operation.
+	Providers func(kind ItemKind, item string) []string
 }
 
 // BinWrap carries the two environment-dependent inputs upstream bakes into a

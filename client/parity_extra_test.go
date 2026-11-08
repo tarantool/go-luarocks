@@ -30,17 +30,15 @@ package client_test
 // Trees holding more than one rock — versions of one rock, rocks sharing a
 // module — are covered by parity_versions_test.go.
 //
-// Each fixture goes through both ways of building a rockspec from a source
-// tree (parityOps): Make over the staged source, and Build of the rockspec,
-// which fetches its source.url first. An Install of a rockspec ends in the
-// same native deploy, but it is not compared here: for the default
-// InstallOpts.Deps (DepsAll) the lua backend runs `install --deps-mode all`,
-// and upstream's command wrapper then lists every rocks tree of its
-// configuration (fs/unix.lua wrap_script → path.package_paths →
-// core/path.lua map_trees), where the native backend — and upstream's
-// default deps_mode "one", which Make and Build run in — list the target
-// tree alone. That is a difference in how the two backends are driven, not
-// in what the native backend deploys.
+// Each fixture goes through every way of building a rockspec from a source
+// tree (parityOps): Make over the staged source, Build of the rockspec, which
+// fetches its source.url first, and Install of the rock from a directory
+// server listing the rockspec, which builds it the way Build does. The
+// command wrappers an Install writes differ by design (divWrapperTrees): the
+// lua backend's, upstream's, list the Tarantool prefix's tree after the
+// target one, for the --deps-mode every DepsPolicy maps to, where the native
+// one lists the target tree alone. checkWrapperTrees checks each side, and
+// the wrappers are compared without the prefix's tree.
 //
 // The parity contract (same as parity_test.go): DEPLOYED ARTIFACTS must be
 // byte-equal. A deployed artifact is any file NOT under
@@ -559,7 +557,11 @@ type parityOp struct {
 	// directory, as Make needs. The others fetch the source themselves and
 	// get an empty working directory, so they cannot pick the staged files up.
 	inSource bool
-	run      func(t *testing.T, r *client.Rocks, fx parityFixture, src string)
+	// run runs the operation; keep is BuildOpts.Keep for Build, which the
+	// lua backend passes as --keep to keep the other installed versions of
+	// the rock (the native one keeps them anyway, and only its staging dir
+	// with it). Make and Install have no Keep and ignore it.
+	run func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool)
 }
 
 // parityOps are the operations TestBackendParity_Fixtures runs every fixture
@@ -568,17 +570,29 @@ type parityOp struct {
 // the rockspec come from.
 func parityOps() []parityOp {
 	return []parityOp{
-		{"make", true, func(t *testing.T, r *client.Rocks, fx parityFixture, src string) {
+		{"make", true, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
 			t.Helper()
 			specPath := writeParityRockspec(t, fx, src, "file://localhost/"+fx.pkg+".tar.gz")
 			require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}),
 				"Make(%s)", fx.name)
 		}},
-		{"build", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string) {
+		{"build", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
 			t.Helper()
 			specPath := writeParityRockspec(t, fx, t.TempDir(), parityTarball(t, fx, src))
-			require.NoError(t, r.Build(context.Background(), specPath, client.BuildOpts{}),
+			require.NoError(t, r.Build(context.Background(), specPath, client.BuildOpts{Keep: keep}),
 				"Build(%s)", fx.name)
+		}},
+		{"install", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
+			t.Helper()
+			repo := t.TempDir()
+			writeParityRockspec(t, fx, repo, parityTarball(t, fx, src))
+			manifest := "commands = {}\nmodules = {}\nrepository = {\n   [\"" + fx.pkg + "\"] = { [\"" + fx.version +
+				"\"] = { { arch = \"rockspec\" } } },\n}\n"
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "manifest"), []byte(manifest), 0o600))
+			require.NoError(t, r.Install(context.Background(), fx.pkg, client.InstallOpts{
+				Version: fx.version,
+				Servers: []string{repo},
+			}), "Install(%s)", fx.name)
 		}},
 	}
 }
@@ -596,6 +610,7 @@ func TestBackendParity_Fixtures(t *testing.T) {
 
 				// --- Deployed-artifact parity (the hard contract). ---
 				compareDeployed(t, fx.name, treeNative, treeLua)
+				checkWrapperTrees(t, op, treeNative, treeLua)
 
 				// --- Read-path parity: List. ---
 				listN := installedSet(t, rNative)
@@ -654,16 +669,16 @@ func parityDeploy(
 	t.Helper()
 
 	tree := t.TempDir()
-	r := parityStep(t, op, fx, backend, tree, prefix, incDir)
+	r := parityStep(t, op, fx, false, backend, tree, prefix, incDir)
 
 	return tree, r
 }
 
-// parityStep stages fx's source in a fresh dir and runs op through the given
-// backend into tree, which may already hold rocks. Returns the client it ran
-// op with.
+// parityStep stages fx's source in a fresh dir and runs op, with keep as its
+// Keep option, through the given backend into tree, which may already hold
+// rocks. Returns the client it ran op with.
 func parityStep(
-	t *testing.T, op parityOp, fx parityFixture, backend client.Backend, tree, prefix, incDir string,
+	t *testing.T, op parityOp, fx parityFixture, keep bool, backend client.Backend, tree, prefix, incDir string,
 ) *client.Rocks {
 	t.Helper()
 	src := t.TempDir()
@@ -691,7 +706,7 @@ func parityStep(
 		},
 	}, client.WithBackend(backend))
 	require.NoError(t, err, "New(%s, backend=%v)", fx.name, backend)
-	op.run(t, r, fx, src)
+	op.run(t, r, fx, src, keep)
 
 	return r
 }
@@ -700,14 +715,14 @@ func parityStep(
 // share/tarantool/rocks/ — to be present in both trees with the same bytes.
 // A compiled .so is compared by presence only, and a generated text artifact
 // may differ in the absolute root of the tree it was generated for.
-func compareDeployed(t *testing.T, label, treeNative, treeLua string) {
-	t.Helper()
+func compareDeployed(tb testing.TB, label, treeNative, treeLua string) {
+	tb.Helper()
 
-	depN := deployedArtifacts(t, treeNative)
-	depL := deployedArtifacts(t, treeLua)
+	depN := deployedArtifacts(tb, treeNative)
+	depL := deployedArtifacts(tb, treeLua)
 
-	require.NotEmpty(t, depN, "native deployed no artifacts for %s", label)
-	require.NotEmpty(t, depL, "lua deployed no artifacts for %s", label)
+	require.NotEmpty(tb, depN, "native deployed no artifacts for %s", label)
+	require.NotEmpty(tb, depL, "lua deployed no artifacts for %s", label)
 
 	allRel := map[string]struct{}{}
 	for rel := range depN {
@@ -721,15 +736,15 @@ func compareDeployed(t *testing.T, label, treeNative, treeLua string) {
 		dL, inL := depL[rel]
 		switch {
 		case !inN:
-			t.Errorf("[%s] deployed artifact %q present in LUA tree but MISSING in native", label, rel)
+			tb.Errorf("[%s] deployed artifact %q present in LUA tree but MISSING in native", label, rel)
 		case !inL:
-			t.Errorf("[%s] deployed artifact %q present in NATIVE tree but MISSING in lua", label, rel)
+			tb.Errorf("[%s] deployed artifact %q present in NATIVE tree but MISSING in lua", label, rel)
 		case dN != dL:
 			// Compiled objects (.so) are not expected to be byte-reproducible
 			// across two independent compilations (embedded paths, debug info,
 			// ordering). For those the parity contract is presence, not bytes.
 			if strings.HasSuffix(rel, ".so") {
-				t.Logf("[%s] note: compiled %q differs byte-wise (expected; non-reproducible build): native md5=%s lua md5=%s",
+				tb.Logf("[%s] note: compiled %q differs byte-wise (expected; non-reproducible build): native md5=%s lua md5=%s",
 					label, rel, dN, dL)
 				continue
 			}
@@ -738,14 +753,14 @@ func compareDeployed(t *testing.T, label, treeNative, treeLua string) {
 			// absolute root. Normalize each tree root to a placeholder before
 			// comparing — equal-after-normalization is true parity.
 			if textArtifactsEqual(treeNative, treeLua, rel) {
-				t.Logf("[%s] %q matches after tree-root normalization (only the per-tree absolute path differs)", label, rel)
+				tb.Logf("[%s] %q matches after tree-root normalization (only the per-tree absolute path differs)", label, rel)
 				continue
 			}
-			t.Errorf("[%s] ARTIFACT DIVERGENCE %q: native md5=%s lua md5=%s", label, rel, dN, dL)
-			dumpDiff(t, label, rel, treeNative, treeLua)
+			tb.Errorf("[%s] ARTIFACT DIVERGENCE %q: native md5=%s lua md5=%s", label, rel, dN, dL)
+			dumpDiff(tb, label, rel, treeNative, treeLua)
 		}
 	}
-	t.Logf("[%s] deployed artifacts compared: %v", label, sortedKeys(allRel))
+	tb.Logf("[%s] deployed artifacts compared: %v", label, sortedKeys(allRel))
 }
 
 // writeParityRockspec writes fx's rockspec, with url as its source.url, into
@@ -807,6 +822,8 @@ func parityTarball(t *testing.T, fx parityFixture, src string) string {
 // between the two trees once each tree's own absolute root is normalized to a
 // placeholder. This is the correct parity check for generated launchers, which
 // must embed the (necessarily different) tree path of the tree they live in.
+// A command wrapper is compared without the Tarantool prefix's tree, which
+// only upstream install lists (divWrapperTrees).
 func textArtifactsEqual(treeNative, treeLua, rel string) bool {
 	bN, err := os.ReadFile(filepath.Join(treeNative, filepath.FromSlash(rel)))
 	if err != nil {
@@ -816,16 +833,16 @@ func textArtifactsEqual(treeNative, treeLua, rel string) bool {
 	if err != nil {
 		return false
 	}
-	normN := strings.ReplaceAll(string(bN), treeNative, "<TREE>")
-	normL := strings.ReplaceAll(string(bL), treeLua, "<TREE>")
+	normN := strings.ReplaceAll(dropPrefixTree(string(bN)), treeNative, "<TREE>")
+	normL := strings.ReplaceAll(dropPrefixTree(string(bL)), treeLua, "<TREE>")
 	return normN == normL
 }
 
 // dumpDiff logs a short head of a text artifact from both trees so a content
 // divergence is legible in the test output (e.g. native copies a bin script
 // verbatim while upstream installs a generated wrapper).
-func dumpDiff(t *testing.T, fx, rel, treeNative, treeLua string) {
-	t.Helper()
+func dumpDiff(tb testing.TB, fx, rel, treeNative, treeLua string) {
+	tb.Helper()
 	head := func(root string) string {
 		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
@@ -837,16 +854,16 @@ func dumpDiff(t *testing.T, fx, rel, treeNative, treeLua string) {
 		}
 		return s
 	}
-	t.Logf("[%s] %q NATIVE content:\n%s", fx, rel, head(treeNative))
-	t.Logf("[%s] %q LUA content:\n%s", fx, rel, head(treeLua))
+	tb.Logf("[%s] %q NATIVE content:\n%s", fx, rel, head(treeNative))
+	tb.Logf("[%s] %q LUA content:\n%s", fx, rel, head(treeLua))
 }
 
 // deployedArtifacts returns map[relpath]md5 for every deployed file — i.e.
 // every regular file NOT under share/tarantool/rocks/ (that subtree is
 // per-rock bookkeeping + the top-level manifest, which differ by design).
-func deployedArtifacts(t *testing.T, root string) map[string]string {
-	t.Helper()
-	full := treeDigest(t, root)
+func deployedArtifacts(tb testing.TB, root string) map[string]string {
+	tb.Helper()
+	full := treeDigest(tb, root)
 	out := map[string]string{}
 	for rel, sum := range full {
 		if strings.HasPrefix(rel, "share/tarantool/rocks/") {

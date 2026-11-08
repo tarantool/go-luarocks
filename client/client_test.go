@@ -98,6 +98,15 @@ func TestPackUnpack_RoundTrip(t *testing.T) {
 	specBytes := []byte("package = 'hello'\nversion = '1.0-1'\n")
 	require.NoError(t, os.WriteFile(filepath.Join(rocksDir, "hello-1.0-1.rockspec"), specBytes, 0o600))
 
+	// Its one module, deployed, and the rock_manifest listing it.
+	const module = "return 'hello'\n"
+
+	luaDir := filepath.Join(tree, "share", "tarantool")
+	require.NoError(t, os.WriteFile(filepath.Join(luaDir, "hello.lua"), []byte(module), 0o600))
+	require.NoError(t, (manif.FileStore{}).WriteRock(filepath.Join(rocksDir, "rock_manifest"), &rocks.RockManifest{
+		Lua: map[string]string{"hello.lua": "0123456789abcdef0123456789abcdef"},
+	}), "WriteRock")
+
 	// Write the tree manifest via manif.FileStore so the facade can read it.
 	m := &rocks.Manifest{
 		Repository: map[string]map[string]rocks.RepoEntry{
@@ -113,14 +122,22 @@ func TestPackUnpack_RoundTrip(t *testing.T) {
 	require.NoError(t, err, "New")
 	archive, err := r.Pack(context.Background(), "hello", client.PackOpts{})
 	require.NoError(t, err, "Pack")
-	_, err = os.Stat(archive)
-	require.NoError(t, err, "Pack archive missing")
+	// A rock with neither a lib file nor a binary command packs as an "all"
+	// rock, as upstream pack names it.
+	assert.Equal(t, filepath.Join(workDir, "hello-1.0-1.all.rock"), archive, "the packed rock")
 
 	extractDir := filepath.Join(workDir, "extracted")
 	require.NoError(t, r.Unpack(context.Background(), archive, extractDir), "Unpack")
 	specOut := filepath.Join(extractDir, "hello-1.0-1.rockspec")
 	_, err = os.Stat(specOut)
-	assert.NoError(t, err, "expected %s after Unpack", specOut)
+	require.NoError(t, err, "expected %s after Unpack", specOut)
+
+	// The deployed module is copied back into the rock's lua/ dir, the layout
+	// a binary rock installs from.
+	got, err := os.ReadFile(filepath.Join(extractDir, "lua", "hello.lua")) //nolint:gosec // test temp path
+	require.NoError(t, err, "the module in the packed rock")
+	assert.Equal(t, module, string(got), "the module in the packed rock")
+	assert.FileExists(t, filepath.Join(extractDir, "rock_manifest"), "the rock_manifest in the packed rock")
 }
 
 // TestMake_BuiltinPureLua_EndToEnd is a regression test for two review

@@ -25,6 +25,12 @@ import (
 // lexer, which Tarantool's loadfile uses, skips the "#!" line the same way), so
 // a "#!/usr/bin/env tarantool" script is Lua and upstream wraps it. The parser
 // here sees the same chunk, as gopher-lua's own LoadFile does.
+//
+// The parser is gopher-lua's, for Lua 5.1, not the interpreter's: a script
+// that only LuaJIT's loadfile accepts — LuaJIT bytecode, a UTF-8 BOM, \z
+// escapes, hex floats, LL/ULL/i number literals — is copied verbatim here
+// where upstream wraps it. Running the configured interpreter instead, as
+// upstream does, would make every deploy of a command depend on it.
 func isLua(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -91,10 +97,10 @@ const (
 //     renamed to <last-segment>.lua. See installDest.
 //   - build.install.conf: the KEY is a literal path joined under the per-rock
 //     ConfDir (<install-dir>/conf); conf is never deployed to a shared dir.
-//   - build.install.bin: the KEY is a literal path. When BinWrap is set the
-//     real script lands in the per-rock <install-dir>/bin and BinDir gets an
-//     executable launcher (0o755); when nil the script is copied verbatim
-//     (0o755).
+//   - build.install.bin: the KEY is a literal path. The real script lands in
+//     the per-rock <install-dir>/bin; when BinWrap is set and it is Lua,
+//     BinDir gets an executable launcher for it (0o755), and otherwise a
+//     verbatim copy (0o755).
 //   - build.copy_directories: each entry is a directory under srcDir copied
 //     recursively into the per-rock install dir; unset, it defaults to a doc/
 //     dir, and with no directory copied the source root's README, LICENSE,
@@ -146,7 +152,7 @@ func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.Roc
 
 	// Every lua/lib/bin target is resolved once per Deploy, however many stages
 	// reach it (see spots).
-	claimed := spots{}
+	claimed := newSpots()
 
 	if err := t.deployModules(spec, srcDir, buildDir, rm, claimed); err != nil {
 		return nil, err
@@ -284,7 +290,7 @@ func (t *Tree) deployRockspec(spec *rocks.Rockspec, rm *rocks.RockManifest) erro
 // at it (build/make.lua, cmake.lua, command.lua; build.lua run_build_driver
 // returns early for "none"). A rock of those types deploys only what its build
 // installed, whatever modules it lists.
-func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *rocks.RockManifest, claimed spots) error {
+func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *rocks.RockManifest, claimed *spots) error {
 	if !isBuiltin(spec.Build.Type) {
 		return nil
 	}
@@ -295,16 +301,12 @@ func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *
 			return err
 		}
 
-		deployDir := deployDirForKind(t.Paths, kind)
-
-		plainRel, err := filepath.Rel(deployDir, dstPath)
+		rel, err := filepath.Rel(t.deployDirOf(kind), dstPath)
 		if err != nil {
 			return err
 		}
 
-		item := pathToModule(filepath.ToSlash(plainRel))
-
-		finalPath, _, err := claimed.claim(t, deployDir, dstPath, item, spec.Package, spec.Version)
+		finalPath, _, err := claimed.claim(t, kind, rel, spec.Package, spec.Version)
 		if err != nil {
 			return err
 		}
@@ -321,18 +323,13 @@ func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *
 			return fmt.Errorf("tree.Deploy: module %q: %w", modName, err)
 		}
 
-		rel, err := filepath.Rel(deployDir, finalPath)
-		if err != nil {
-			return err
-		}
-
-		rel = filepath.ToSlash(rel)
-
+		// The rock_manifest lists the plain path even when the file took its
+		// versioned one: upstream's is a listing of the per-rock install dir.
 		switch kind {
 		case kindLua:
-			rm.Lua[rel] = sum
+			rm.Lua[filepath.ToSlash(rel)] = sum
 		case kindLib:
-			rm.Lib[rel] = sum
+			rm.Lib[filepath.ToSlash(rel)] = sum
 		}
 	}
 
@@ -359,34 +356,33 @@ func isBuiltin(buildType string) bool {
 //   - bin, conf → is_module_path=false: the key is a literal slash path; the
 //     destination is dir_name(key)/base_name(key), which filepath.Join
 //     reproduces directly (see deployInstallConf / deployInstallBin).
-func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest, claimed spots) error {
+func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest, claimed *spots) error {
 	type instGroup struct {
 		entries      map[string]string
-		dir          string
+		kind         string
 		mode         os.FileMode
 		dst          map[string]string
 		isModulePath bool
 	}
 
 	groups := []instGroup{
-		{spec.Build.Install.Lua, t.DeployLuaDir(), filePerm, rm.Lua, true},
-		{spec.Build.Install.Lib, t.DeployLibDir(), execPerm, rm.Lib, true},
+		{spec.Build.Install.Lua, kindLua, filePerm, rm.Lua, true},
+		{spec.Build.Install.Lib, kindLib, execPerm, rm.Lib, true},
 	}
 	for _, g := range groups {
+		dir := t.deployDirOf(g.kind)
+
 		for key, srcRel := range g.entries {
 			src := filepath.Join(srcDir, srcRel)
-			dst := installDest(g.dir, key, srcRel, g.isModulePath)
 
-			plainRel, err := filepath.Rel(g.dir, dst)
+			rel, err := filepath.Rel(dir, installDest(dir, key, srcRel, g.isModulePath))
 			if err != nil {
 				return err
 			}
 
-			item := pathToModule(filepath.ToSlash(plainRel))
-
 			// A target stage 1 already deployed is overwritten in place: upstream
 			// install_files runs after the backend and wins (build.lua:412-423).
-			dst, _, err = claimed.claim(t, g.dir, dst, item, spec.Package, spec.Version)
+			dst, _, err := claimed.claim(t, g.kind, rel, spec.Package, spec.Version)
 			if err != nil {
 				return err
 			}
@@ -394,11 +390,6 @@ func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm 
 			sum, err := copyFile(src, dst, g.mode)
 			if err != nil {
 				return fmt.Errorf("tree.Deploy: install %q: %w", key, err)
-			}
-
-			rel, err := filepath.Rel(g.dir, dst)
-			if err != nil {
-				return err
 			}
 
 			g.dst[filepath.ToSlash(rel)] = sum
@@ -431,7 +422,7 @@ func (t *Tree) deployInstallConf(spec *rocks.Rockspec, srcDir string) error {
 // like conf: the key is the path under the bin dir. Each entry goes through
 // deployBinFile, which also deploys the commands a build backend installed
 // itself (stage 4).
-func (t *Tree) deployInstallBin(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest, claimed spots) error {
+func (t *Tree) deployInstallBin(spec *rocks.Rockspec, srcDir string, rm *rocks.RockManifest, claimed *spots) error {
 	for key, srcRel := range spec.Build.Install.Bin {
 		rel := filepath.Clean(key) // is_module_path=false: dir_name/base_name == the key path
 
@@ -445,46 +436,29 @@ func (t *Tree) deployInstallBin(spec *rocks.Rockspec, srcDir string, rm *rocks.R
 
 // deployBinFile deploys the command script src as <tree>/bin/<rel>, the way
 // upstream repos.deploy_files deploys each entry of the rock_manifest's bin
-// section: when t.BinWrap is set AND the script parses as Lua, the real script
-// lands in the per-rock <install-dir>/bin and <tree>/bin gets a launcher
+// section. The real script lands in the per-rock <install-dir>/bin/<rel>
+// first, where upstream install_files copies every build.install.bin entry
+// (build.lua install_files) and where a backend that installed into
+// $(BINDIR) has put it already, and it stays there. Then, when t.BinWrap is
+// set AND the script parses as Lua, <tree>/bin gets a launcher for it
 // (should_wrap_bin_scripts → fs.wrap_script); a non-Lua script (compiled
-// binary, shell script) fails is_lua and is copied verbatim, as install_binary
-// does (repos.lua:452). When BinWrap is unset the script is copied verbatim
-// too (legacy behavior).
+// binary, shell script) fails is_lua and is copied there verbatim, as
+// install_binary does (repos.lua:452-458), and so is every script when
+// BinWrap is unset (legacy behavior).
 //
 // A command is deployed once per Deploy, by the first stage to reach it:
 // build.install.bin (stage 2b) runs before the backend-installed bin subtrees
 // (stage 4), as upstream install_files overwrites what the backend installed at
 // the same path before the single deploy pass. A repeat visit is a no-op.
-func (t *Tree) deployBinFile(src, rel string, spec *rocks.Rockspec, rm *rocks.RockManifest, claimed spots) error {
-	plain := filepath.Join(t.BinDir(), rel)
-	if _, seen := claimed[plain]; seen {
+//
+// Either way the rock_manifest lists the command under its plain path, which
+// is also where the real script lives in the per-rock bin dir, whether the
+// command took the plain or the versioned name in <tree>/bin.
+func (t *Tree) deployBinFile(src, rel string, spec *rocks.Rockspec, rm *rocks.RockManifest, claimed *spots) error {
+	if claimed.seen(t, deployBin, rel) {
 		return nil
 	}
 
-	if t.BinWrap == nil || !isLua(src) {
-		dst, _, err := claimed.claim(t, t.BinDir(), plain, filepath.ToSlash(rel), spec.Package, spec.Version)
-		if err != nil {
-			return err
-		}
-
-		sum, err := copyFile(src, dst, execPerm)
-		if err != nil {
-			return err
-		}
-
-		r, err := filepath.Rel(t.BinDir(), dst)
-		if err != nil {
-			return err
-		}
-
-		rm.Bin[filepath.ToSlash(r)] = sum
-
-		return nil
-	}
-
-	// Wrapped: real script → per-rock <install-dir>/bin/<rel>, where a backend
-	// that installed into $(BINDIR) has put it already.
 	realScript := filepath.Join(t.InstallDir(spec.Package, spec.Version), "bin", rel)
 
 	var (
@@ -504,19 +478,25 @@ func (t *Tree) deployBinFile(src, rel string, spec *rocks.Rockspec, rm *rocks.Ro
 
 	rm.Bin[filepath.ToSlash(rel)] = sum
 
-	// Public launcher → <tree>/bin/<rel>, execing the interpreter on the
-	// real script (matches fs/unix.lua wrap_script byte-for-byte).
-	wrapperDst, _, err := claimed.claim(t, t.BinDir(), plain, filepath.ToSlash(rel), spec.Package, spec.Version)
+	dst, _, err := claimed.claim(t, deployBin, rel, spec.Package, spec.Version)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(wrapperDst), dirPerm); err != nil {
+	if t.BinWrap == nil || !isLua(realScript) {
+		_, err := copyFile(realScript, dst, execPerm)
+
+		return err
+	}
+
+	// Public launcher → <tree>/bin/<rel>, execing the interpreter on the
+	// real script (matches fs/unix.lua wrap_script byte-for-byte).
+	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
 		return fmt.Errorf("mkdir bin: %w", err)
 	}
 
 	body := t.binWrapperScript(realScript, spec.Package, spec.Version)
-	if err := os.WriteFile(wrapperDst, []byte(body), execPerm); err != nil {
+	if err := os.WriteFile(dst, []byte(body), execPerm); err != nil {
 		return fmt.Errorf("write bin wrapper: %w", err)
 	}
 
@@ -644,7 +624,7 @@ func (t *Tree) deployInstalledSubtrees(
 	spec *rocks.Rockspec,
 	buildDir string,
 	rm *rocks.RockManifest,
-	claimed spots,
+	claimed *spots,
 ) error {
 	roots := []struct {
 		dir  string
@@ -664,17 +644,16 @@ func (t *Tree) deployInstalledSubtrees(
 		seen[filepath.Clean(root.dir)] = true
 
 		for _, sub := range []struct {
-			kind      string
-			deployDir string
-			mode      os.FileMode
-			rmMap     map[string]string
+			kind  string
+			mode  os.FileMode
+			rmMap map[string]string
 		}{
-			{kindLua, t.DeployLuaDir(), filePerm, rm.Lua},
-			{kindLib, t.DeployLibDir(), execPerm, rm.Lib},
+			{kindLua, filePerm, rm.Lua},
+			{kindLib, execPerm, rm.Lib},
 		} {
 			src := filepath.Join(root.dir, sub.kind)
 
-			err := t.deployInstalledSubtree(src, sub.deployDir, sub.mode, sub.rmMap, spec, root.disp, claimed)
+			err := t.deployInstalledSubtree(src, sub.kind, sub.mode, sub.rmMap, spec, root.disp, claimed)
 			if err != nil {
 				return fmt.Errorf("tree.Deploy: scan installed %s subtree: %w", sub.kind, err)
 			}
@@ -696,7 +675,7 @@ func (t *Tree) deployInstalledSubtrees(
 // source is left in place from either root: upstream keeps the real script in
 // the per-rock bin dir, where a command wrapper points (repos.lua:452-458). A
 // missing subtree is a no-op.
-func (t *Tree) deployInstalledBin(binDir string, spec *rocks.Rockspec, rm *rocks.RockManifest, claimed spots) error {
+func (t *Tree) deployInstalledBin(binDir string, spec *rocks.Rockspec, rm *rocks.RockManifest, claimed *spots) error {
 	info, err := os.Stat(binDir)
 	if err != nil || !info.IsDir() {
 		return nil //nolint:nilerr // a missing subtree simply means nothing was installed there
@@ -716,48 +695,6 @@ func (t *Tree) deployInstalledBin(binDir string, spec *rocks.Rockspec, rm *rocks
 	})
 }
 
-// DeleteVersion undeploys a single installed rock version: it deletes the files
-// this version deployed (recorded in its rock_manifest, at their actual — plain
-// or versioned — paths), removes the per-rock install directory, and prunes the
-// rock's name directory when no other version remains. It is the file-removal
-// half of upstream repos.delete_version (repos.lua:585-695).
-//
-// Promotion of a next-highest kept version back to the active (unversioned)
-// name is the caller's responsibility via the tree manifest; it only matters
-// when multiple versions of the same rock are installed (the --keep path).
-func (t *Tree) DeleteVersion(name, version string) error {
-	installDir := t.InstallDir(name, version)
-
-	// Best-effort: read the rock_manifest to know which deployed files to delete.
-	// A missing/unreadable manifest still lets us remove the install dir.
-	if rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest")); err == nil && rm != nil {
-		for _, g := range []struct {
-			dir   string
-			files map[string]string
-		}{
-			{t.DeployLuaDir(), rm.Lua},
-			{t.DeployLibDir(), rm.Lib},
-			{t.BinDir(), rm.Bin},
-		} {
-			for rel := range g.files {
-				_ = os.Remove(filepath.Join(g.dir, filepath.FromSlash(rel)))
-			}
-		}
-	}
-
-	if err := os.RemoveAll(installDir); err != nil {
-		return fmt.Errorf("tree.DeleteVersion: remove install dir: %w", err)
-	}
-
-	// Prune the rock's name dir when no versions remain.
-	nameDir := filepath.Join(t.RocksDir(), name)
-	if entries, err := os.ReadDir(nameDir); err == nil && len(entries) == 0 {
-		_ = os.Remove(nameDir)
-	}
-
-	return nil
-}
-
 // srcDisposition says what deployInstalledSubtree does with a source file once
 // it has been deployed: keepSource leaves it where the backend put it,
 // moveSource removes it (and prunes the directories it emptied). See
@@ -770,18 +707,18 @@ const (
 )
 
 // deployInstalledSubtree walks a backend-installed subtree (<root>/lua or
-// <root>/lib) and deploys every file into deployDir under its subtree-relative
-// path, resolving collisions and recording each md5 in rmMap. With
-// disp == moveSource the source file is removed afterwards and the emptied
+// <root>/lib) and deploys every file into the deploy dir of kind under its
+// subtree-relative path, resolving collisions and recording each md5 in rmMap.
+// With disp == moveSource the source file is removed afterwards and the emptied
 // directories are pruned. A missing subtree is a no-op (the backend installed
 // nothing there).
 func (t *Tree) deployInstalledSubtree(
-	srcDir, deployDir string,
+	srcDir, kind string,
 	mode os.FileMode,
 	rmMap map[string]string,
 	spec *rocks.Rockspec,
 	disp srcDisposition,
-	claimed spots,
+	claimed *spots,
 ) error {
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
@@ -802,9 +739,7 @@ func (t *Tree) deployInstalledSubtree(
 			return err
 		}
 
-		item := pathToModule(filepath.ToSlash(rel))
-
-		dst, first, err := claimed.claim(t, deployDir, filepath.Join(deployDir, rel), item, spec.Package, spec.Version)
+		dst, first, err := claimed.claim(t, kind, rel, spec.Package, spec.Version)
 		if err != nil {
 			return err
 		}
@@ -819,12 +754,7 @@ func (t *Tree) deployInstalledSubtree(
 				return err
 			}
 
-			r, err := filepath.Rel(deployDir, dst)
-			if err != nil {
-				return err
-			}
-
-			rmMap[filepath.ToSlash(r)] = sum
+			rmMap[filepath.ToSlash(rel)] = sum
 		}
 
 		if disp == moveSource {
@@ -986,7 +916,9 @@ func moduleLastSegment(mod string) string {
 // tree's deploy dirs, attempts to load luarocks.loader (guarded — a native tree
 // has none, the pcall absorbs it), registers the rock context, then execs the
 // interpreter on the real script. Path entries mirror path.package_paths:
-// "<lua_dir>/?.lua;<lua_dir>/?/init.lua" and "<lib_dir>/?.so".
+// "<lua_dir>/?.lua;<lua_dir>/?/init.lua" and "<lib_dir>/?.so". Only the tree
+// deployed to is listed, where upstream lists every rock tree its deps mode
+// selects.
 func (t *Tree) binWrapperScript(realScript, name, version string) string {
 	lua := filepath.ToSlash(t.DeployLuaDir())
 	lib := filepath.ToSlash(t.DeployLibDir())
@@ -1038,17 +970,6 @@ func luaQuote(s string) string {
 // embedded single quote as '\”.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func deployDirForKind(p Paths, kind string) string {
-	switch kind {
-	case kindLua:
-		return p.DeployLuaDir()
-	case kindLib:
-		return p.DeployLibDir()
-	}
-
-	return p.Tree
 }
 
 // copyFile writes src → dst with mode, mkdir-p the parent, and returns

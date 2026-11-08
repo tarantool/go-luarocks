@@ -51,6 +51,7 @@ RUN install -d -m 0755 /etc/apt/keyrings \
         tarantool="${TARANTOOL_VERSION}-1" \
         tarantool-dev="${TARANTOOL_VERSION}-1" \
         unzip \
+        zip \
     && rm -rf /var/lib/apt/lists/* \
     && test -f "$(dirname "$(dirname "$(command -v tarantool)")")/include/tarantool/lua.h"
 

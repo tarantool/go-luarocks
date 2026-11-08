@@ -112,46 +112,33 @@ jobs:
 
   # The tests behind the `integration` and `integration_luaengine` build tags:
   # real cc/make/cmake/git builds, real-rock installs from luarocks.org, and
-  # the backend-parity harness that backs the README's "zero divergence in
-  # deployed artifacts" claim. Each of them skips when a prerequisite is
-  # missing; strict mode turns those skips into failures, so a broken setup
-  # below fails the job instead of leaving it green with nothing run.
+  # the backend-parity harness that backs the README's "Backend Parity"
+  # section: byte-equal deployed artifacts where the backends share
+  # semantics, and the documented divergences where they do not. Each of
+  # them skips when a prerequisite is missing; strict mode turns those skips
+  # into failures, so a broken setup below fails the job instead of leaving
+  # it green with nothing run.
   integration:
     name: integration
     runs-on: ubuntu-latest
-    env:
-      GO_LUAROCKS_INTEGRATION_STRICT: '1'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-          check-latest: true
+      # The integration, backend-parity and lua-engine suites run in the
+      # sandbox of scripts/test-in-docker.sh: an image with pinned Go and
+      # Tarantool (with its headers), a read-only root and source tree, an
+      # unprivileged user, strict mode, and a check that nothing was left
+      # outside the test's temp dirs. See CONTRIBUTING.md.
+      - name: Build the sandbox image
+        run: scripts/test-in-docker.sh true
 
-      # Installs both the tarantool and the tarantool-dev packages: the
-      # lua-backend tests need lua.h at <prefix>/include/tarantool, and the
-      # binary at /usr/bin/tarantool puts it at /usr/include/tarantool. This
-      # is the only step that provisions tarantool; the ones below assume
-      # nothing but that layout, so it can be swapped for another source
-      # (a pinned container image, say) on its own.
-      - uses: tarantool/setup-tarantool@v4
-        with:
-          tarantool-version: '3'
+      # Offline: proves the suites that should not need the network do not,
+      # and skips the ones that do (GO_LUAROCKS_OFFLINE).
+      - name: Test (integration, offline)
+        run: scripts/test-in-docker.sh --no-build
 
-      - name: Show the toolchain
-        run: |
-          tarantool --version
-          prefix=$(dirname "$(dirname "$(command -v tarantool)")")
-          ls -l "$prefix/include/tarantool/lua.h"
-          cc --version | head -n 1
-          make --version | head -n 1
-          cmake --version | head -n 1
-          git --version
-          unzip -v | head -n 1
-
-      - name: Test (integration)
-        run: go test -tags integration,integration_luaengine ${{ env.PKGS }}
+      - name: Test (integration, network)
+        run: scripts/test-in-docker.sh --no-build --net
 
   coverage:
     name: coverage

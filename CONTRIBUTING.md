@@ -36,9 +36,12 @@ go test ./deps/...
 Tests that need more than Go are gated behind build tags. The `integration`
 tag enables the `build`, `fetch`, and native `client` tests that run `cc`,
 `make`, `cmake`, `git`, and `tarantool` or reach `luarocks.org` and GitHub.
-The `integration_luaengine` tag enables the `client` tests of the lua backend
-and the backend-parity harness (`TestBackendParity_*`); they need a real
-`tarantool` on `PATH` and its `lua.h` at `<prefix>/include/tarantool/lua.h`,
+The `integration_luaengine` tag enables the `client` tests of the lua backend,
+the backend-parity harness (`TestBackendParity_*`), the checks of the
+deliberate differences between the backends (`TestBackendDivergence_*`) and
+the backend-interoperability harness (`TestBackendInterop_*`); they need a
+real `tarantool` on `PATH` and its `lua.h` at
+`<prefix>/include/tarantool/lua.h`,
 where `<prefix>` is the directory above the one holding `tarantool` (the
 `tarantool-dev` package puts it at `/usr/include/tarantool/lua.h`):
 
@@ -46,13 +49,16 @@ where `<prefix>` is the directory above the one holding `tarantool` (the
 go test ./client/ -tags integration_luaengine -run TestBackendParity -v
 ```
 
+`TestBackendInterop_Pack` also needs `zip`, which upstream packs a rock with.
+
 A tagged test whose prerequisite is missing is skipped, so the suite runs on
 a machine that has only some of them. Set `GO_LUAROCKS_INTEGRATION_STRICT=1`
 to make a missing prerequisite fail the test instead, so a run that is meant
 to exercise the whole suite cannot pass by skipping it. The network is the
 exception: `GO_LUAROCKS_OFFLINE=1` declares a run offline by design, and the
-tests that need the network are then skipped even in strict mode. The CI
-`integration` job runs exactly this:
+tests that need the network are then skipped even in strict mode. The
+sandboxed runner below runs exactly this, and the CI `integration` job runs
+it through that runner, once offline and once with network:
 
 ```sh
 GO_LUAROCKS_INTEGRATION_STRICT=1 go test -tags integration,integration_luaengine \
@@ -76,8 +82,8 @@ install leaves the real home alone.
 The integration and lua-engine suites run real build tools and LuaRocks
 code. `scripts/test-in-docker.sh` runs them in a Docker container built from
 `test/docker/Dockerfile`, which pins Go, Tarantool (with its headers), CMake,
-make, a C compiler, and git. The sandbox protects your machine and turns
-stray writes into test failures:
+make, a C compiler, git, unzip and zip. The sandbox protects your machine and
+turns stray writes into test failures:
 
 - the root filesystem and the source tree are read-only, and `HOME` points
   to a read-only directory, so writing there fails with `EROFS` or `EACCES`;
@@ -107,6 +113,34 @@ scripts/test-in-docker.sh go test -count=1 -v ./build/...   # a custom command
 
 Override the pinned versions with `GO_VERSION`, `DEBIAN_SUITE`, or
 `TARANTOOL_VERSION`, e.g. `GO_VERSION=1.26.8 scripts/test-in-docker.sh`.
+
+### Rock corpus
+
+`client/corpus_test.go` (build tag `integration_corpus`, so no other suite
+runs it) installs real rocks from rocks.tarantool.org and luarocks.org, each
+at a pinned version, through both backends into fresh trees, compares them
+with the backend-parity helpers, and smoke-tests each tree: it requires every
+module of the tree with the real `tarantool` and runs every command with
+`--help`, and the outcomes must agree. A rock that installs through neither
+backend is reported as corpus rot and skipped; one that installs through one
+backend only, or whose trees differ, fails, and so does one whose install
+leaves anything outside its trees and temp dirs (checked after each step in
+the sandbox, so the leftover is pinned to a rock). The test prints a Markdown
+report of every rock at the end. It needs the network and runs third-party
+build scripts, so run it in the sandbox:
+
+```sh
+scripts/test-in-docker.sh --net go test -count=1 -v -timeout 2h \
+  -tags integration,integration_luaengine,integration_corpus -run TestCorpus ./client/
+```
+
+Narrow it to one rock with `-run 'TestCorpus_Parity/http@'`. The `corpus`
+workflow runs it weekly and uploads the report and the log. To add a rock,
+append it to `corpusRocks` with a released version, what the install does
+(the artifact the server has for that version and the rockspec's build type),
+and the shape it covers that the other rocks do not. A rock whose own build
+script litters `/tmp` gets the pattern in `corpusRock.tmpLeak`, which the test
+notes and removes.
 
 ### Differential tests
 

@@ -7,11 +7,18 @@ package client_test
 // their index through that dispatch rather than assuming HTTP.
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,17 +33,20 @@ import (
 // rock sources stay file:// trees elsewhere on disk, exactly as in the HTTP
 // fixture, so the only difference between the two is where the *index* reads
 // from.
+//
+// Unlike the HTTP fixture's, each source is a file:// tarball rather than a
+// directory, which upstream cannot fetch, so the lua backend installs from
+// this repository too; and hello also installs a Lua command, hello-cli, so
+// installing it deploys a command wrapper, whose package.path names the rock
+// trees the install used.
 func installTestRepo(t *testing.T) string {
 	t.Helper()
 
-	helloSrc := t.TempDir()
-	depSrc := t.TempDir()
-	stageRockSource(t, helloSrc, "hello", "1.0-1", "dependencies = { 'dep >= 1.0', 'tarantool' }")
-	stageRockSource(t, depSrc, "dep", "1.0-1", "")
-
 	repo := t.TempDir()
-	copyRockspec(t, filepath.Join(helloSrc, "hello-1.0-1.rockspec"), repo)
-	copyRockspec(t, filepath.Join(depSrc, "dep-1.0-1.rockspec"), repo)
+	writeTarballRock(t, repo, "hello", "dependencies = { 'dep >= 1.0', 'tarantool' }",
+		"install = { bin = { ['hello-cli'] = 'bin/hello-cli' } },",
+		map[string]string{"bin/hello-cli": "print(require('hello').name)\n"})
+	writeTarballRock(t, repo, "dep", "", "", nil)
 
 	const manifest = `commands = {}
 modules = {}
@@ -52,14 +62,65 @@ repository = {
 	return repo
 }
 
-func copyRockspec(t *testing.T, src, destDir string) {
+// writeTarballRock writes the rockspec of version 1.0-1 of a pure-Lua builtin
+// rock, with the module <name>.lua and the extra files, into repo. Its
+// sources are packed into <name>.tar.gz, with the single top directory
+// <name>/, in a directory of their own, which source.url names. extraSpec is
+// added to the rockspec at the top level and extraBuild inside its build
+// table.
+func writeTarballRock(t *testing.T, repo, name, extraSpec, extraBuild string, extra map[string]string) {
 	t.Helper()
 
-	body, err := os.ReadFile(src)
-	require.NoError(t, err, "read %q", src)
+	const version = "1.0-1"
+
+	files := map[string]string{name + ".lua": "return { name = '" + name + "' }\n"}
+	maps.Copy(files, extra)
+
+	tarball := filepath.Join(t.TempDir(), name+".tar.gz")
+	writeTarGz(t, tarball, name, files)
+
+	spec := fmt.Sprintf(`package = %q
+version = %q
+source = { url = "file://%s" }
+%s
+build = {
+   type = "builtin",
+   modules = { [%q] = %q },
+   %s
+}
+`, name, version, tarball, extraSpec, name, name+".lua", extraBuild)
 
 	require.NoError(t,
-		os.WriteFile(filepath.Join(destDir, filepath.Base(src)), body, 0o600), "copy %q", src)
+		os.WriteFile(filepath.Join(repo, name+"-"+version+".rockspec"), []byte(spec), 0o600),
+		"write the %s rockspec", name)
+}
+
+// writeTarGz packs files, keyed by their path under the top directory top,
+// into the gzipped tarball at path, in path order.
+func writeTarGz(t *testing.T, path, top string, files map[string]string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+
+	for _, rel := range slices.Sorted(maps.Keys(files)) {
+		body := files[rel]
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     top + "/" + rel,
+			Mode:     0o644,
+			Size:     int64(len(body)),
+			Typeflag: tar.TypeReg,
+		}), "tar header %s", rel)
+
+		_, err := io.WriteString(tw, body)
+		require.NoError(t, err, "tar body %s", rel)
+	}
+
+	require.NoError(t, tw.Close(), "close tar")
+	require.NoError(t, zw.Close(), "close gzip")
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o600), "write %s", path)
 }
 
 // deadServer is an HTTP rock server that has no manifest, so every index

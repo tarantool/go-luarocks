@@ -1,71 +1,264 @@
 package tree
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
 )
 
-// resolveSpot implements upstream check_spot_if_available (repos.lua:248-268):
-// given the item being deployed and the new rock's name/version, it consults
-// the tree's current provider (t.Provider) and decides whether the NEW file
-// takes the plain (active) path or a versioned name.
-//
-//   - "nv" (new wins the plain path) when there is no current provider, the new
-//     name sorts lexicographically before the current one, or (same name) the
-//     new version equals or is greater than the current one. In that case the
-//     previously-active file — if it belongs to a DIFFERENT provider — is
-//     renamed to that provider's versioned name (demoted), and any untracked
-//     file already at the plain path is backed up rather than clobbered.
-//   - "v"  (existing keeps priority) otherwise: the new file is written under
-//     its own versioned name, and a file already there is backed up too, as
-//     upstream backs up any target whose provider is another rock or version
-//     (repos.lua:480-484).
-//
-// It returns the final on-disk target for the new file.
-func (t *Tree) resolveSpot(deployDir, plainTarget, item, newName, newVer string) (string, error) {
-	curName, curVer, ok := t.currentProvider(item)
+// Files can be deployed under their plain (non-versioned) name or under a
+// versioned one, since several installed rocks — two versions of one rock, or
+// two rocks — may provide the same item: a module, deployed from the lua or
+// lib dir, or a command, deployed from the bin dir. Exactly one provider of an
+// item holds the plain path: the lexicographically smallest rock name, and of
+// its versions the newest. The others hold versioned paths (MungedPath). This
+// file mirrors how upstream keeps that invariant across deploys and removals
+// (repos.lua:229-268, 440-551, 585-695).
 
-	nv := !ok ||
-		newName < curName ||
-		(newName == curName && (newVer == curVer || versionGreater(newVer, curVer)))
+// ItemKind says which index of the tree manifest a deployed item belongs to.
+type ItemKind int
 
-	if !nv {
-		versioned := MungedPath(deployDir, plainTarget, newName, newVer)
-		if err := backupExisting(versioned); err != nil {
+const (
+	// ModuleItem is a module: the item a file of the lua or lib deploy dir
+	// provides, named by the file's module name (path_to_module).
+	ModuleItem ItemKind = iota
+	// CommandItem is a command: the item a file of the bin dir provides,
+	// named by the file's path under that dir.
+	CommandItem
+)
+
+// Deploy types: the rock_manifest subtree a deployed file comes from, which
+// picks its deploy dir (repos.lua get_deploy_paths).
+const (
+	deployLua = kindLua
+	deployLib = kindLib
+	deployBin = "bin"
+)
+
+// deployDirOf returns the deploy dir of a deploy type.
+func (t *Tree) deployDirOf(dt string) string {
+	switch dt {
+	case deployLua:
+		return t.DeployLuaDir()
+	case deployLib:
+		return t.DeployLibDir()
+	default:
+		return t.BinDir()
+	}
+}
+
+// providedItem mirrors upstream get_provided_item (repos.lua:19-25): the kind
+// and name of the item the file rel of deploy type dt provides.
+func providedItem(dt, rel string) (ItemKind, string) {
+	if dt == deployBin {
+		return CommandItem, rel
+	}
+
+	return ModuleItem, pathToModule(rel)
+}
+
+// providers returns the installed providers of item, as t.Providers reports
+// them, or nil when t.Providers is unset.
+func (t *Tree) providers(kind ItemKind, item string) []string {
+	if t.Providers == nil {
+		return nil
+	}
+
+	return t.Providers(kind, item)
+}
+
+// currentProvider mirrors the lookup of upstream check_spot_if_available
+// (repos.lua:249-257): the rock name and version of the first provider of the
+// item the file rel of deploy type dt provides. Older LuaRocks registered a
+// "foo.init" file as module "foo", so a lua file whose module name ends in
+// ".init" falls back to that name.
+func (t *Tree) currentProvider(dt, rel string) (name, version string, ok bool) {
+	kind, item := providedItem(dt, rel)
+
+	list := t.providers(kind, item)
+	if len(list) == 0 && dt == deployLua {
+		if base, cut := strings.CutSuffix(item, ".init"); cut {
+			list = t.providers(kind, base)
+		}
+	}
+
+	if len(list) == 0 {
+		return "", "", false
+	}
+
+	return splitProvider(list[0])
+}
+
+// nextProviderIndex is the index of the provider that takes an item's plain
+// path over when the provider at index 0 goes away.
+const nextProviderIndex = 1
+
+// nextProvider mirrors upstream manif.get_next_provider: the second provider of
+// the item the file rel of deploy type dt provides, the one that takes over the
+// plain path when the first goes away.
+func (t *Tree) nextProvider(dt, rel string) (name, version string, ok bool) {
+	kind, item := providedItem(dt, rel)
+
+	list := t.providers(kind, item)
+	if len(list) <= nextProviderIndex {
+		return "", "", false
+	}
+
+	return splitProvider(list[nextProviderIndex])
+}
+
+// splitProvider splits a "name/version" provider token.
+func splitProvider(token string) (name, version string, ok bool) {
+	return strings.Cut(token, "/")
+}
+
+// takesPlainPath mirrors the decision of upstream check_spot_if_available
+// (repos.lua:259-267): name/version deploys the file rel of deploy type dt under
+// its plain path ("nv") when the item has no provider yet, when name sorts
+// before the current provider's, or when it is the current provider's name at
+// the same or a newer version; otherwise under its versioned name ("v"). It
+// also returns the current provider.
+func (t *Tree) takesPlainPath(dt, rel, name, version string) (plain bool, curName, curVer string) {
+	curName, curVer, ok := t.currentProvider(dt, rel)
+
+	plain = !ok ||
+		name < curName ||
+		(name == curName && (version == curVer || versionGreater(version, curVer)))
+
+	return plain, curName, curVer
+}
+
+// counterpart is one file a deploy or removal renames between its plain and
+// its versioned path: a deploy type and a path under its deploy dir.
+type counterpart struct {
+	dt  string
+	rel string
+}
+
+// deployCounterparts lists the files of the current provider that a deploy
+// demotes when the new rock takes the plain path of the file rel of deploy
+// type dt (repos.lua:475-478, 495-500, 514-519): the provider's own file at that
+// path, and, for a module, the other form of the module too — the .so beside a
+// .lua and the .lua beside a .so — so that one rock's Lua and C halves of a
+// module never split between two providers.
+func deployCounterparts(dt, rel string) []counterpart {
+	switch dt {
+	case deployLua:
+		return []counterpart{{deployLua, rel}, {deployLib, withSoExt(rel)}}
+	case deployLib:
+		return []counterpart{{deployLua, withLuaExt(rel)}, {deployLib, rel}}
+	default:
+		return []counterpart{{deployBin, rel}}
+	}
+}
+
+// deleteCounterparts lists the files of the next provider that a removal
+// promotes to their plain paths when the removed rock held the plain path of
+// the file rel of deploy type dt (repos.lua:608-617, 628-636, 647-655). It
+// mirrors upstream exactly, including its lua branch, which names the lib
+// counterpart with the .lua extension the file already has
+// (`file_path:gsub("%.[^.]+$", ".lua")`), so a lib file is never promoted from
+// there.
+func deleteCounterparts(dt, rel string) []counterpart {
+	switch dt {
+	case deployLua:
+		return []counterpart{{deployLua, rel}, {deployLib, withLuaExt(rel)}}
+	case deployLib:
+		return []counterpart{{deployLua, withLuaExt(rel)}, {deployLib, rel}}
+	default:
+		return []counterpart{{deployBin, rel}}
+	}
+}
+
+// withSoExt mirrors Lua's rel:gsub("%.lua$", ".so") (cfg.lib_extension is "so"
+// on every platform the native backend serves): it swaps a trailing .lua for
+// .so and leaves any other path alone.
+func withSoExt(rel string) string {
+	if base, cut := strings.CutSuffix(rel, ".lua"); cut {
+		return base + ".so"
+	}
+
+	return rel
+}
+
+// withLuaExt mirrors Lua's rel:gsub("%.[^.]+$", ".lua"): it swaps the
+// extension of the last path element — a final "." followed by anything but
+// dots — for .lua, and leaves a path without one alone. As in Lua, the dot may
+// sit in a directory name when the file name has none ("a.b/c" becomes
+// "a.lua").
+func withLuaExt(rel string) string {
+	i := strings.LastIndex(rel, ".")
+	if i < 0 || i == len(rel)-1 {
+		return rel
+	}
+
+	return rel[:i] + ".lua"
+}
+
+// resolveSpot mirrors what upstream repos.deploy_files does for one file of the
+// new rock name/version (repos.lua:470-541): it decides between the plain and
+// the versioned path (takesPlainPath), demotes the current provider's files to
+// their versioned names when the new rock takes the plain path
+// (deployCounterparts), and clears the target: a file there that belongs to no
+// provider of the same name and version is moved aside to a backup
+// (backupExisting), one that does is removed. It returns the target, the path
+// the caller writes the new file to.
+//
+// Upstream performs every rename of a deploy before it installs any file.
+// Deploy writes each file as soon as its spot is resolved instead, so a
+// counterpart this Deploy already wrote — the new rock's own .lua, say, when
+// its .so is resolved next — is the new rock's and is left alone: upstream
+// renamed the old file there before writing the new one.
+//
+// One deliberate departure: when the current provider is the very name and
+// version being deployed, its files are not demoted. Upstream's code would
+// rename them to their own versioned names and leave those copies behind, but
+// it never gets there — build_rockspec and install_binary_rock delete an
+// installed copy of the version before deploying it, as the native client does
+// too — so only a caller re-deploying over a tree manifest that still lists the
+// version reaches this, and gets the file overwritten in place.
+func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]bool) (string, error) {
+	deployDir := t.deployDirOf(dt)
+	plain := filepath.Join(deployDir, rel)
+
+	takesPlain, curName, curVer := t.takesPlainPath(dt, rel, newName, newVer)
+
+	if takesPlain && curName != "" && (curName != newName || curVer != newVer) {
+		for _, c := range deployCounterparts(dt, rel) {
+			dir := t.deployDirOf(c.dt)
+			src := filepath.Join(dir, c.rel)
+
+			if written[src] {
+				continue
+			}
+
+			if err := renameIfExists(src, MungedPath(dir, src, curName, curVer), dir); err != nil {
+				return "", fmt.Errorf("demote %q: %w", src, err)
+			}
+		}
+	}
+
+	target := plain
+	if !takesPlain {
+		target = MungedPath(deployDir, plain, newName, newVer)
+	}
+
+	if curName != newName || curVer != newVer {
+		if err := backupExisting(target); err != nil {
 			return "", err
 		}
-
-		return versioned, nil
+	} else if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("remove %q: %w", target, err)
 	}
 
-	// New file wins the plain path. Preserve whatever is already there.
-	if _, err := os.Stat(plainTarget); err == nil {
-		switch {
-		case ok && (curName != newName || curVer != newVer):
-			// Demote the different provider's active file to its versioned name.
-			demoted := MungedPath(deployDir, plainTarget, curName, curVer)
-			if err := os.MkdirAll(filepath.Dir(demoted), dirPerm); err != nil {
-				return "", err
-			}
-
-			if err := os.Rename(plainTarget, demoted); err != nil {
-				return "", fmt.Errorf("demote %q: %w", plainTarget, err)
-			}
-		case !ok:
-			// Untracked file (no provider recorded): back it up rather than lose it.
-			if err := backupExisting(plainTarget); err != nil {
-				return "", err
-			}
-		}
-		// Same provider + same version: a reinstall — overwrite in place.
-	}
-
-	return plainTarget, nil
+	return target, nil
 }
 
 // backupExisting mirrors upstream backup_existing (repos.lua:270-288): a file
@@ -92,9 +285,47 @@ func backupExisting(target string) error {
 	return nil
 }
 
+// renameIfExists mirrors upstream op_rename (repos.lua:347-363): when src
+// exists it replaces dst, whose directory is created as needed, and the
+// directories src leaves empty are pruned up to, not including, stop.
+func renameIfExists(src, dst, stop string) error {
+	if _, err := os.Lstat(src); err != nil {
+		return nil //nolint:nilerr // a missing source is a no-op, as upstream's fs.exists gate
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+
+	pruneEmptyParents(filepath.Dir(src), stop)
+
+	return nil
+}
+
+// pruneEmptyParents removes dir and each parent it leaves empty, stopping at
+// stop, which is kept — upstream's remove_dir_tree_if_empty, bounded by the
+// deploy dir. Best-effort: a removal that fails ends it.
+func pruneEmptyParents(dir, stop string) {
+	stop = filepath.Clean(stop)
+
+	for d := filepath.Clean(dir); d != stop && strings.HasPrefix(d, stop+string(filepath.Separator)); d = filepath.Dir(d) {
+		if err := os.Remove(d); err != nil {
+			return
+		}
+	}
+}
+
 // spots records the deploy targets one Deploy call has already resolved: the
 // plain (unversioned) target path of each deployed file → the final path
-// resolveSpot chose for it.
+// resolveSpot chose for it, plus the set of final paths written.
 //
 // Upstream deploys a rock in a single pass: the build backend and
 // install_files both write into the per-rock install dir, install_files
@@ -102,49 +333,157 @@ func backupExisting(target string) error {
 // and repos.deploy_files then moves each file of the resulting rock_manifest to
 // its deploy spot exactly once (repos.lua:488-541). Deploy instead reads the
 // same file from more than one place — the builtin backend stages build.modules
-// and build.install.lua/lib in the build dir that stage 4 relocates — so a
-// second resolveSpot of a target the first one just wrote would find an
-// "untracked" file there and back it up to <target>~ (or, on an upgrade, demote
-// the new rock's own file over the old version's). spots makes the second
-// visit reuse the first decision instead.
-type spots map[string]string
+// and build.install.* in the build dir that stage 4 relocates — so a second
+// resolveSpot of a target the first one just wrote would find a file there and
+// back it up to <target>~. spots makes the second visit reuse the first
+// decision instead.
+type spots struct {
+	final   map[string]string
+	written map[string]bool
+}
 
-// claim returns the final on-disk target for the file at plainTarget and
-// whether this is the first time the Deploy call reaches it. The first claim
-// resolves the spot (resolveSpot); a repeat returns the recorded final path
-// without consulting the tree again.
-func (s spots) claim(t *Tree, deployDir, plainTarget, item, newName, newVer string) (string, bool, error) {
-	if final, ok := s[plainTarget]; ok {
+func newSpots() *spots {
+	return &spots{final: map[string]string{}, written: map[string]bool{}}
+}
+
+// claim returns the final on-disk target for the file rel of deploy type dt
+// and whether this is the first time the Deploy call reaches it. The first
+// claim resolves the spot (resolveSpot); a repeat returns the recorded final
+// path without consulting the tree again.
+func (s *spots) claim(t *Tree, dt, rel, newName, newVer string) (string, bool, error) {
+	plain := filepath.Join(t.deployDirOf(dt), rel)
+	if final, ok := s.final[plain]; ok {
 		return final, false, nil
 	}
 
-	final, err := t.resolveSpot(deployDir, plainTarget, item, newName, newVer)
+	final, err := t.resolveSpot(dt, rel, newName, newVer, s.written)
 	if err != nil {
 		return "", false, err
 	}
 
-	s[plainTarget] = final
+	s.final[plain] = final
+	s.written[final] = true
 
 	return final, true, nil
 }
 
-// currentProvider looks up the active provider of item via t.Provider, with the
-// legacy ".init" fallback upstream keeps for backward compatibility (older
-// LuaRocks registered "foo.init" files under "foo"; repos.lua:253-256).
-func (t *Tree) currentProvider(item string) (name, version string, ok bool) {
-	if t.Provider == nil {
-		return "", "", false
+// seen reports whether the Deploy call has already claimed the file rel of
+// deploy type dt.
+func (s *spots) seen(t *Tree, dt, rel string) bool {
+	_, ok := s.final[filepath.Join(t.deployDirOf(dt), rel)]
+
+	return ok
+}
+
+// DeleteVersion undeploys a single installed rock version, as upstream
+// repos.delete_version does (repos.lua:585-695): for each file of its
+// rock_manifest it deletes the copy the version deployed — the plain path when
+// the version holds it, the versioned one otherwise (takesPlainPath) — and when
+// it held the plain path, promotes the item's next provider (t.Providers, index
+// 1) by renaming that provider's versioned files to their plain names
+// (deleteCounterparts). Then it removes the per-rock install directory and the
+// rock's name directory when no other version remains.
+//
+// t.Providers must still list the version being deleted: removing it from the
+// tree manifest is the caller's job, after DeleteVersion. A missing or
+// unreadable rock_manifest still lets the install dir be removed.
+func (t *Tree) DeleteVersion(name, version string) error {
+	installDir := t.InstallDir(name, version)
+
+	if rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest")); err == nil && rm != nil {
+		if err := t.undeployFiles(name, version, rm); err != nil {
+			return fmt.Errorf("tree.DeleteVersion: %w", err)
+		}
 	}
 
-	if n, v, found := t.Provider(item); found {
-		return n, v, true
+	if err := os.RemoveAll(installDir); err != nil {
+		return fmt.Errorf("tree.DeleteVersion: remove install dir: %w", err)
 	}
 
-	if base, cut := strings.CutSuffix(item, ".init"); cut {
-		return t.Provider(base)
+	// Prune the rock's name dir when no versions remain.
+	nameDir := filepath.Join(t.RocksDir(), name)
+	if entries, err := os.ReadDir(nameDir); err == nil && len(entries) == 0 {
+		_ = os.Remove(nameDir)
 	}
 
-	return "", "", false
+	return nil
+}
+
+// undeployFiles deletes the deployed files of name/version listed in rm and
+// promotes the next providers, all deletions first, as upstream does.
+func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error {
+	type rename struct{ src, dst, stop string }
+
+	var (
+		deletes []counterpart
+		renames []rename
+	)
+
+	for _, sec := range []struct {
+		dt    string
+		files map[string]string
+	}{
+		{deployBin, rm.Bin},
+		{deployLua, rm.Lua},
+		{deployLib, rm.Lib},
+	} {
+		for _, rel := range sortedKeys(sec.files) {
+			if plain, _, _ := t.takesPlainPath(sec.dt, rel, name, version); !plain {
+				deletes = append(deletes, counterpart{sec.dt, mungedRel(rel, name, version)})
+
+				continue
+			}
+
+			deletes = append(deletes, counterpart{sec.dt, rel})
+
+			nextName, nextVer, ok := t.nextProvider(sec.dt, rel)
+			if !ok {
+				continue
+			}
+
+			for _, c := range deleteCounterparts(sec.dt, rel) {
+				cdir := t.deployDirOf(c.dt)
+				plainPath := filepath.Join(cdir, c.rel)
+				renames = append(renames, rename{MungedPath(cdir, plainPath, nextName, nextVer), plainPath, cdir})
+			}
+		}
+	}
+
+	for _, d := range deletes {
+		dir := t.deployDirOf(d.dt)
+		p := filepath.Join(dir, filepath.FromSlash(d.rel))
+
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove %q: %w", p, err)
+		}
+
+		pruneEmptyParents(filepath.Dir(p), dir)
+	}
+
+	for _, r := range renames {
+		if err := renameIfExists(r.src, r.dst, r.stop); err != nil {
+			return fmt.Errorf("promote %q: %w", r.src, err)
+		}
+	}
+
+	return nil
+}
+
+// mungedRel returns the versioned form of the deploy-dir-relative path rel,
+// as MungedPath forms it.
+func mungedRel(rel, pkg, ver string) string {
+	return mungedVersion(pkg, ver) + "-" + rel
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+
+	sort.Strings(out)
+
+	return out
 }
 
 // versionGreater reports whether version a is strictly greater than b under the
@@ -208,38 +547,28 @@ func MungedPath(deployDir, target, pkg, ver string) string {
 // build.modules — and for the same reason. build.modules is populated by the
 // builtin backend only, so a cmake, make or command rock declares no modules at
 // all and an index keyed on that field silently stays empty, however much the
-// rock actually deployed.
+// rock actually deployed. Like upstream's, the rock_manifest lists every file
+// under its plain path, whether the rock holds that path or a versioned one, so
+// a rock that lost a module to another provider still lists it.
 //
-// Two deliberate departures from upstream, both documented rather than fixed
-// here because each would change behaviour beyond the derivation:
-//
-//   - Upstream scans lib then lua, so a rock shipping both `foo.so` and
-//     `foo.lua` records the .lua path. This scans lua then lib, keeping the
-//     .so preference the caller's rockspec-driven index has always encoded.
-//   - A conflict-munged key (an inactive install that lost the plain spot to a
-//     higher version, see MungedPath) is SKIPPED. Its module name would have to
-//     be un-munged first, and the rock recorded as a non-active provider — a
-//     distinction the tree manifest writer does not make today, so indexing it
-//     would misreport it as the active provider.
+// One deliberate departure from upstream, documented rather than fixed here
+// because it would change behaviour beyond the derivation: upstream scans lib
+// then lua, so a rock shipping both `foo.so` and `foo.lua` records the .lua
+// path. This scans lua then lib, keeping the .so preference the caller's
+// rockspec-driven index has always encoded.
 //
 // Exported for the same reason MungedPath is: the caller that writes the tree
 // manifest must invert exactly the path formation Deploy used.
-func ModuleIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
+func ModuleIndex(rm *rocks.RockManifest) map[string]string {
 	out := map[string]string{}
 	if rm == nil {
 		return out
 	}
 
-	mungedPrefix := mungedVersion(pkg, ver) + "-"
-
 	// lua first, then lib: a later assignment wins, so a .so beats a .lua of
 	// the same module name.
 	for _, files := range []map[string]string{rm.Lua, rm.Lib} {
 		for rel := range files {
-			if strings.HasPrefix(rel, mungedPrefix) {
-				continue
-			}
-
 			if mod := pathToModule(rel); mod != "" {
 				out[mod] = rel
 			}
@@ -253,20 +582,16 @@ func ModuleIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
 // manifest carries per installed rock: command name → its path relative to the
 // bin deploy dir, which for a command is the name itself. It mirrors upstream
 // repos.package_commands, which reads the rock_manifest's bin section, so a
-// command is indexed by where it was deployed, not by the build.install.bin
-// source path. A conflict-munged key is skipped, as in ModuleIndex.
-func CommandIndex(rm *rocks.RockManifest, pkg, ver string) map[string]string {
+// command installed by a make, cmake or command backend is indexed as well as
+// a build.install.bin entry.
+func CommandIndex(rm *rocks.RockManifest) map[string]string {
 	out := map[string]string{}
 	if rm == nil {
 		return out
 	}
 
-	mungedPrefix := mungedVersion(pkg, ver) + "-"
-
 	for rel := range rm.Bin {
-		if !strings.HasPrefix(rel, mungedPrefix) {
-			out[rel] = rel
-		}
+		out[rel] = rel
 	}
 
 	return out

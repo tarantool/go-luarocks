@@ -269,11 +269,13 @@ type InstalledRock struct {
 // ShowInfo is the projection returned by Rocks.Show — the human-readable
 // summary upstream's `luarocks show` prints.
 type ShowInfo struct {
-	Package      string
-	Version      string
-	Summary      string
-	License      string
-	Homepage     string
+	Package  string
+	Version  string
+	Summary  string
+	License  string
+	Homepage string
+	// Modules are the modules the rock provides, by the names require takes
+	// ("foo.bar", not "foo/bar.lua"), sorted.
 	Modules      []string
 	Dependencies []Dep
 }

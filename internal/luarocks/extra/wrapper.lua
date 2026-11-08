@@ -127,4 +127,26 @@ function wrapper.exec(bin, ...)
     cmd.run_command('LuaRocks package manager', rocks_commands, 'luarocks.cmd.external', ...)
 end
 
+-- use_rocks_trees puts the rock trees the engine hands over (glr_rocks_trees)
+-- in place of the cfg.rocks_trees cfg.init built from the config files.
+-- Nothing cfg.init derives depends on that list, so replacing it afterwards
+-- is the same as a config file setting it, except for package.path:
+-- luarocks.loader, which a warm VM has loaded, appended the old trees to it
+-- (cfg.init_package_paths), and it gets the new ones instead. package.path
+-- holds nothing else (client/lua.go newVM empties it).
+local function use_rocks_trees()
+    local cfg = require("luarocks.core.cfg")
+    cfg.init()
+    cfg.rocks_trees = glr_rocks_trees()
+    package.path = ""
+    cfg.init_package_paths()
+end
+
+-- exec_typed is exec for the typed methods of the Go client: the command runs
+-- over the engine's rock trees rather than the configured ones.
+function wrapper.exec_typed(bin, ...)
+    use_rocks_trees()
+    return wrapper.exec(bin, ...)
+end
+
 return wrapper

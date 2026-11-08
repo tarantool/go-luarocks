@@ -17,11 +17,14 @@ type RemoveOpts struct {
 	// all versions of the rock (the `version` positional).
 	Version string
 	// Force maps to --force: remove even if it would break dependencies.
+	// Only the lua backend checks dependents; the native Remove removes
+	// regardless and ignores Force.
 	Force bool
 	// ForceFast maps to --force-fast: forced removal without reporting
-	// dependency issues.
+	// dependency issues. The native Remove ignores it, as it does Force.
 	ForceFast bool
-	// Deps maps to --deps-mode {all,one,order,none}.
+	// Deps maps to --deps-mode {all,one,order,none} on the lua backend
+	// (depsModeArg). The native Remove ignores it.
 	Deps DepsPolicy
 }
 

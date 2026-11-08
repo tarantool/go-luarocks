@@ -30,30 +30,30 @@ import (
 // readRockManifest parses the rock_manifest of name/version in treeRoot and
 // flattens it into slash path → md5, the shape upstream make_rock_manifest
 // builds by walking the install dir.
-func readRockManifest(t *testing.T, treeRoot, name, version string) map[string]string {
-	t.Helper()
+func readRockManifest(tb testing.TB, treeRoot, name, version string) map[string]string {
+	tb.Helper()
 
 	p := filepath.Join(tree.Paths{Tree: treeRoot}.InstallDir(name, version), "rock_manifest")
 	b, err := os.ReadFile(p) //nolint:gosec // test temp path
-	require.NoError(t, err, "read %s", p)
+	require.NoError(tb, err, "read %s", p)
 
 	v, err := manif.Parse(b)
-	require.NoError(t, err, "parse %s", p)
+	require.NoError(tb, err, "parse %s", p)
 
 	top, ok := v.(map[string]any)
-	require.True(t, ok, "%s: top level is %T", p, v)
+	require.True(tb, ok, "%s: top level is %T", p, v)
 
 	inner, ok := top["rock_manifest"].(map[string]any)
-	require.True(t, ok, "%s: rock_manifest is %T", p, top["rock_manifest"])
+	require.True(tb, ok, "%s: rock_manifest is %T", p, top["rock_manifest"])
 
 	out := map[string]string{}
-	flattenRockManifest(t, "", inner, out)
+	flattenRockManifest(tb, "", inner, out)
 
 	return out
 }
 
-func flattenRockManifest(t *testing.T, prefix string, m map[string]any, dst map[string]string) {
-	t.Helper()
+func flattenRockManifest(tb testing.TB, prefix string, m map[string]any, dst map[string]string) {
+	tb.Helper()
 
 	for k, v := range m {
 		full := k
@@ -65,9 +65,9 @@ func flattenRockManifest(t *testing.T, prefix string, m map[string]any, dst map[
 		case string:
 			dst[full] = x
 		case map[string]any:
-			flattenRockManifest(t, full, x, dst)
+			flattenRockManifest(tb, full, x, dst)
 		default:
-			t.Errorf("rock_manifest entry %q is %T", full, v)
+			tb.Errorf("rock_manifest entry %q is %T", full, v)
 		}
 	}
 }
@@ -77,50 +77,63 @@ func flattenRockManifest(t *testing.T, prefix string, m map[string]any, dst map[
 // differ in their digest only: a compiled .so, which two compilations do not
 // reproduce byte for byte, and the rockspec, whose source.url names a
 // per-test path; each of those must still match the file it describes.
-func compareRockManifests(t *testing.T, label, treeNative, treeLua, name, version string) {
-	t.Helper()
+func compareRockManifests(tb testing.TB, label, treeNative, treeLua, name, version string) {
+	tb.Helper()
 
-	rmN := readRockManifest(t, treeNative, name, version)
-	rmL := readRockManifest(t, treeLua, name, version)
+	compareRockManifestsOf(tb, label, manifestSide{"native", treeNative}, manifestSide{"lua", treeLua}, name, version)
+}
 
-	for _, only := range symmetricDiff(setOf(rmN), setOf(rmL)) {
-		_, inN := rmN[only]
-		side := "lua"
-		if inN {
-			side = "native"
+// manifestSide is one of the two trees a comparison takes, under the name its
+// messages call it by.
+type manifestSide struct {
+	name string
+	tree string
+}
+
+// compareRockManifestsOf is compareRockManifests over two trees named a and b.
+func compareRockManifestsOf(tb testing.TB, label string, a, b manifestSide, name, version string) {
+	tb.Helper()
+
+	rmA := readRockManifest(tb, a.tree, name, version)
+	rmB := readRockManifest(tb, b.tree, name, version)
+
+	for _, only := range symmetricDiff(setOf(rmA), setOf(rmB)) {
+		side := b.name
+		if _, inA := rmA[only]; inA {
+			side = a.name
 		}
 
-		t.Errorf("[%s] rock_manifest of %s %s: %q listed only by the %s backend", label, name, version, only, side)
+		tb.Errorf("[%s] rock_manifest of %s %s: %q listed only by the %s tree", label, name, version, only, side)
 	}
 
 	specKey := name + "-" + version + ".rockspec"
 
-	for key, sumN := range rmN {
-		sumL, ok := rmL[key]
-		if !ok || sumN == sumL {
+	for key, sumA := range rmA {
+		sumB, ok := rmB[key]
+		if !ok || sumA == sumB {
 			continue
 		}
 
 		switch {
 		case strings.HasSuffix(key, ".so"):
-			t.Logf("[%s] note: rock_manifest digest of compiled %q differs (non-reproducible build)", label, key)
+			tb.Logf("[%s] note: rock_manifest digest of compiled %q differs (non-reproducible build)", label, key)
 		case key == specKey:
-			installN := tree.Paths{Tree: treeNative}.InstallDir(name, version)
-			installL := tree.Paths{Tree: treeLua}.InstallDir(name, version)
+			installA := tree.Paths{Tree: a.tree}.InstallDir(name, version)
+			installB := tree.Paths{Tree: b.tree}.InstallDir(name, version)
 
-			assert.Equal(t, fileMD5(t, filepath.Join(installN, key)), sumN, "[%s] native rock_manifest digest of %s", label, key)
-			assert.Equal(t, fileMD5(t, filepath.Join(installL, key)), sumL, "[%s] lua rock_manifest digest of %s", label, key)
+			assert.Equal(tb, fileMD5(tb, filepath.Join(installA, key)), sumA, "[%s] %s rock_manifest digest of %s", label, a.name, key)
+			assert.Equal(tb, fileMD5(tb, filepath.Join(installB, key)), sumB, "[%s] %s rock_manifest digest of %s", label, b.name, key)
 		default:
-			t.Errorf("[%s] rock_manifest of %s %s: %q digest native=%s lua=%s", label, name, version, key, sumN, sumL)
+			tb.Errorf("[%s] rock_manifest of %s %s: %q digest %s=%s %s=%s", label, name, version, key, a.name, sumA, b.name, sumB)
 		}
 	}
 }
 
-func fileMD5(t *testing.T, p string) string {
-	t.Helper()
+func fileMD5(tb testing.TB, p string) string {
+	tb.Helper()
 
 	b, err := os.ReadFile(p) //nolint:gosec // test temp path
-	require.NoError(t, err, "read %s", p)
+	require.NoError(tb, err, "read %s", p)
 
 	sum := md5.Sum(b)
 
@@ -131,26 +144,26 @@ func fileMD5(t *testing.T, p string) string {
 // the same rocks, the same modules and commands per rock, the same provider
 // lists in the same order (index 0 is the active provider), and the same
 // dependencies.
-func compareTreeManifests(t *testing.T, label, treeNative, treeLua string) {
-	t.Helper()
+func compareTreeManifests(tb testing.TB, label, treeNative, treeLua string) {
+	tb.Helper()
 
-	mN := readTreeManifestOf(t, treeNative)
-	mL := readTreeManifestOf(t, treeLua)
+	mN := readTreeManifestOf(tb, treeNative)
+	mL := readTreeManifestOf(tb, treeLua)
 
-	assert.Equal(t, mL.Repository, mN.Repository, "[%s] tree manifest repository", label)
-	assert.Equal(t, mL.Modules, mN.Modules, "[%s] tree manifest modules", label)
-	assert.Equal(t, mL.Commands, mN.Commands, "[%s] tree manifest commands", label)
-	assert.Equal(t, mL.Dependencies, mN.Dependencies, "[%s] tree manifest dependencies", label)
+	assert.Equal(tb, mL.Repository, mN.Repository, "[%s] tree manifest repository", label)
+	assert.Equal(tb, mL.Modules, mN.Modules, "[%s] tree manifest modules", label)
+	assert.Equal(tb, mL.Commands, mN.Commands, "[%s] tree manifest commands", label)
+	assert.Equal(tb, mL.Dependencies, mN.Dependencies, "[%s] tree manifest dependencies", label)
 }
 
 // readTreeManifestOf reads the tree manifest of treeRoot with nil and empty
 // maps folded together, since the two writers differ in whether they emit
 // an empty table.
-func readTreeManifestOf(t *testing.T, treeRoot string) *rocks.Manifest {
-	t.Helper()
+func readTreeManifestOf(tb testing.TB, treeRoot string) *rocks.Manifest {
+	tb.Helper()
 
 	m, err := manif.FileStore{}.ReadTree(tree.Paths{Tree: treeRoot}.RocksDir())
-	require.NoError(t, err, "read tree manifest of %s", treeRoot)
+	require.NoError(tb, err, "read tree manifest of %s", treeRoot)
 
 	out := &rocks.Manifest{
 		Repository:   map[string]map[string]rocks.RepoEntry{},

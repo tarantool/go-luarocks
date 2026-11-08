@@ -29,7 +29,10 @@ package client
 // make_defaults (core/cfg.lua) and, because our hardcoded sets FORCE_HARDCODED,
 // deep-merges the whole table into cfg.variables afterwards. Keeping the engine
 // free of on-disk state is why: a generated file needs a temp dir, an owner and
-// a cleanup path, and the engine has no public Close to hang one on.
+// a cleanup path, and the engine has no public Close to hang one on. The one
+// setting a typed method takes from rocks.Config past cfg.init is
+// cfg.rocks_trees, which extra/wrapper.lua's exec_typed replaces with what
+// glr_rocks_trees serves.
 //
 // VM lifecycle: newLuaEngine creates no VM. Each dispatch takes a warm VM from
 // the pool (or warms one inline), runs on it alone and closes it, so
@@ -500,9 +503,14 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 		return nil, errors.New("luaEngine: os table missing from Lua environment")
 	}
 
+	// The functions a VM holds must not reference e: a warm VM waits in
+	// e.pool, and a cycle through e, which carries a finalizer, is never
+	// collected (runtime.SetFinalizer), so every engine would keep its VM.
+	envOverride := e.envOverride
+
 	L.SetField(osTbl, "getenv", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckString(1)
-		if v, ok := e.envOverride[key]; ok {
+		if v, ok := envOverride[key]; ok {
 			L.Push(lua.LString(v))
 
 			return 1
@@ -519,44 +527,7 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 		return 1
 	}))
 
-	L.SetGlobal("glr_getwd", L.NewFunction(func(L *lua.LState) int {
-		L.Push(lua.LString(e.cfg.WorkingDir))
-
-		return 1
-	}))
-
-	// glr_pwd_command backs hardcoded.PWD. The shell-out fs backend
-	// (luarocks.fs.tools) resolves the base directory for every `cd <dir> && cmd`
-	// it runs by RUNNING cfg.variables.PWD (default "pwd"), which would report
-	// the host process cwd — wrong for an in-process engine whose logical cwd is
-	// cfg.WorkingDir. Handing it an echo of WorkingDir makes relative build paths
-	// (e.g. builtin `cp src/foo.lua`) resolve there, which replaces a host
-	// os.Chdir (forbidden: the host process is shared) with a per-command cd.
-	L.SetGlobal("glr_pwd_command", L.NewFunction(func(L *lua.LState) int {
-		L.Push(lua.LString("echo " + shellSingleQuote(e.cfg.WorkingDir)))
-
-		return 1
-	}))
-
-	// glr_servers backs hardcoded.ROCKS_SERVERS. Returning nil for an empty
-	// Config.Servers lets hardcoded.lua keep its own default visible in Lua
-	// rather than duplicating it here.
-	L.SetGlobal("glr_servers", L.NewFunction(func(L *lua.LState) int {
-		if len(e.cfg.Servers) == 0 {
-			L.Push(lua.LNil)
-
-			return 1
-		}
-
-		servers := L.NewTable()
-		for _, s := range e.cfg.Servers {
-			servers.Append(lua.LString(s))
-		}
-
-		L.Push(servers)
-
-		return 1
-	}))
+	e.setConfigGlobals(L)
 
 	// Normalize io.open mode strings. LuaRocks' luarocks/fs/lua.lua opens files
 	// with PUC-Lua-5.1 mode strings of the form "<mode>+b" (e.g. "r+b", "w+b",
@@ -689,6 +660,71 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 	return L, nil
 }
 
+// setConfigGlobals installs the glr_* globals extra/hardcoded.lua and
+// extra/wrapper.lua read rocks.Config through.
+func (e *luaEngine) setConfigGlobals(L *lua.LState) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
+	// A copy, not e: see the comment on os.getenv in newVM.
+	cfg := e.cfg
+
+	L.SetGlobal("glr_getwd", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LString(cfg.WorkingDir))
+
+		return 1
+	}))
+
+	// glr_pwd_command backs hardcoded.PWD. The shell-out fs backend
+	// (luarocks.fs.tools) resolves the base directory for every `cd <dir> && cmd`
+	// it runs by RUNNING cfg.variables.PWD (default "pwd"), which would report
+	// the host process cwd — wrong for an in-process engine whose logical cwd is
+	// cfg.WorkingDir. Handing it an echo of WorkingDir makes relative build paths
+	// (e.g. builtin `cp src/foo.lua`) resolve there, which replaces a host
+	// os.Chdir (forbidden: the host process is shared) with a per-command cd.
+	L.SetGlobal("glr_pwd_command", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LString("echo " + shellSingleQuote(cfg.WorkingDir)))
+
+		return 1
+	}))
+
+	// glr_servers backs hardcoded.ROCKS_SERVERS. Returning nil for an empty
+	// Config.Servers lets hardcoded.lua keep its own default visible in Lua
+	// rather than duplicating it here.
+	L.SetGlobal("glr_servers", L.NewFunction(func(L *lua.LState) int {
+		if len(cfg.Servers) == 0 {
+			L.Push(lua.LNil)
+
+			return 1
+		}
+
+		servers := L.NewTable()
+		for _, s := range cfg.Servers {
+			servers.Append(lua.LString(s))
+		}
+
+		L.Push(servers)
+
+		return 1
+	}))
+
+	// glr_rocks_trees backs cfg.rocks_trees for the typed methods (see
+	// rocksTrees): extra/wrapper.lua's exec_typed puts it in place of the list
+	// cfg.init built, so the --tree every typed method passes is always one of
+	// the rock trees. Upstream assumes it is: a tree outside the list is
+	// installed into, but never searched, by every deps mode but "one", so an
+	// installed dependency is not found again (deps.lua fulfill_dependency's
+	// assert). It also keeps a host config file's rocks_trees from changing
+	// what a typed method does.
+	L.SetGlobal("glr_rocks_trees", L.NewFunction(func(L *lua.LState) int {
+		trees := L.NewTable()
+		for _, tree := range rocksTrees(cfg) {
+			trees.Append(lua.LString(tree))
+		}
+
+		L.Push(trees)
+
+		return 1
+	}))
+}
+
 // warmVM returns a VM that has both booted and run cfg.init, so a dispatch on
 // it costs only the command itself. The warm-up is a real `help` dispatch
 // rather than a direct cfg.init call: cmd.run_command initializes cfg with the
@@ -704,7 +740,7 @@ func (e *luaEngine) warmVM() (*lua.LState, error) {
 	}
 
 	restore := redirectIO(L, io.Discard, io.Discard)
-	doErr := L.DoString(dispatchString("go-luarocks", []string{"help"}))
+	doErr := L.DoString(dispatchString(wrapperExec, "go-luarocks", []string{"help"}))
 
 	restore()
 
@@ -804,8 +840,8 @@ func (e *luaEngine) call(argv []string) error {
 	return err
 }
 
-// callViaState dispatches argv through extra/wrapper.lua's exec() on a VM taken
-// from the pool and retired afterwards, so no state this command leaves behind
+// callViaState dispatches argv through extra/wrapper.lua's exec_typed() — exec()
+// over the engine's rock trees (glr_rocks_trees) — on a VM taken from the pool and retired afterwards, so no state this command leaves behind
 // can reach the next one. progname is fixed to the default value. Each arg is
 // single-quote-escaped for embedding in the Lua single-quoted dispatch string.
 //
@@ -833,7 +869,7 @@ func (e *luaEngine) callViaState(argv []string) (string, error) {
 	restore := redirectIO(L, &stdout, &stderr)
 	defer restore()
 
-	doErr := L.DoString(dispatchString("go-luarocks", argv))
+	doErr := L.DoString(dispatchString(wrapperExecTyped, "go-luarocks", argv))
 
 	// Drain whatever the command printed into the logger before interpreting
 	// the result, so even a failing command's diagnostics reach the caller.
@@ -885,11 +921,22 @@ func failureMessage(stderr string) string {
 	return ": " + strings.Join(lines[from:], " ")
 }
 
-// dispatchString builds the Lua one-liner that invokes extra/wrapper.lua's
-// exec() with the given program name and the single-quote-escaped argv. It is
-// shared by callViaState (capturing, with the default progname) and callRaw
-// (passthrough, caller-supplied progname so `tt rocks` can show its own usage).
-func dispatchString(progname string, argv []string) string {
+// The entry points of extra/wrapper.lua a dispatch string calls.
+const (
+	// wrapperExec runs a command as the host's LuaRocks would: over the
+	// configuration cfg.init read. It backs Exec and the warm-up.
+	wrapperExec = "exec"
+	// wrapperExecTyped runs a command for a typed method: over the rock
+	// trees of the engine's Config instead of the configured ones.
+	wrapperExecTyped = "exec_typed"
+)
+
+// dispatchString builds the Lua one-liner that invokes the entry point entry
+// of extra/wrapper.lua (wrapperExec or wrapperExecTyped) with the given
+// program name and the single-quote-escaped argv. It is shared by callViaState
+// (capturing, with the default progname) and callRaw (passthrough,
+// caller-supplied progname so `tt rocks` can show its own usage).
+func dispatchString(entry, progname string, argv []string) string {
 	parts := make([]string, 0, len(argv)+1)
 	parts = append(parts, quoteLua(progname))
 
@@ -897,7 +944,7 @@ func dispatchString(progname string, argv []string) string {
 		parts = append(parts, quoteLua(arg))
 	}
 
-	return fmt.Sprintf("t=require('extra.wrapper').exec(%s)", strings.Join(parts, ", "))
+	return fmt.Sprintf("t=require('extra.wrapper').%s(%s)", entry, strings.Join(parts, ", "))
 }
 
 // quoteLua wraps s in single quotes, escaping embedded single quotes, for
@@ -927,7 +974,7 @@ func (e *luaEngine) callRaw(progname string, argv []string) error {
 
 	defer e.release(L)
 
-	doErr := L.DoString(dispatchString(progname, argv))
+	doErr := L.DoString(dispatchString(wrapperExec, progname, argv))
 	if doErr == nil {
 		return nil
 	}
@@ -1181,15 +1228,17 @@ func (e *luaEngine) globalArgs(servers []string) []string {
 // {all, one, order, none}. DepsAll→"all", DepsNone→"none". DepsOnlyNew has no
 // exact upstream equivalent; "order" (use the current tree plus those below it
 // on rocks_trees) is the closest match to the "only new" documented intent.
+// No policy maps to "one", upstream's default, which Build and Make run in,
+// since they pass no --deps-mode.
 func depsModeArg(p DepsPolicy) string {
 	switch p {
-	case DepsAll:
-		return "all"
 	case DepsNone:
 		return "none"
 	case DepsOnlyNew:
 		// Closest upstream match to "only new" — see DepsPolicy doc.
 		return "order"
+	case DepsAll:
+		fallthrough
 	default:
 		return "all"
 	}
@@ -1210,6 +1259,9 @@ func (e *luaEngine) Install(ctx context.Context, name string, opts InstallOpts) 
 	return err
 }
 
+// Build runs `luarocks build`. BuildOpts.Keep is passed as --keep, which
+// upstream takes to keep the other installed versions of the rock; the
+// native backend takes it to keep its staging dir.
 func (e *luaEngine) Build(ctx context.Context, specPath string, opts BuildOpts) error {
 	argv := e.globalArgs(nil)
 

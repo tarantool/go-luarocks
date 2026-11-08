@@ -219,8 +219,8 @@ func installedSet(t *testing.T, r *client.Rocks) map[string]struct{} {
 
 // treeDigest walks root and returns map[relpath]md5hex for every regular file.
 // Relative paths use forward slashes for stable comparison/keying.
-func treeDigest(t *testing.T, root string) map[string]string {
-	t.Helper()
+func treeDigest(tb testing.TB, root string) map[string]string {
+	tb.Helper()
 	out := map[string]string{}
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -248,7 +248,7 @@ func treeDigest(t *testing.T, root string) map[string]string {
 		out[filepath.ToSlash(rel)] = hex.EncodeToString(h.Sum(nil))
 		return nil
 	})
-	require.NoError(t, err, "walk %s", root)
+	require.NoError(tb, err, "walk %s", root)
 	return out
 }
 
