@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // parityTarantoolVersion is handed to both backends as
@@ -88,7 +89,7 @@ func TestBackendParity_Search(t *testing.T) {
 	// path would make the two backends agree for the wrong reason.
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; search parity needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; search parity needs a real interpreter: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>
@@ -161,7 +162,7 @@ func TestBackendParity_Search(t *testing.T) {
 func TestBackendParity_Search_ProvidedRocks(t *testing.T) {
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; search parity needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; search parity needs a real interpreter: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin))

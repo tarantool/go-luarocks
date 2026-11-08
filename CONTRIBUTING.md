@@ -23,8 +23,8 @@ There is no Makefile; run `go test` directly against the root package and
 every internal package:
 
 ```sh
-go test ./build/... ./client/... ./deps/... ./fetch/... ./manif/... \
-  ./remote/... ./rockspec/... ./tree/... .
+go test ./build/... ./client/... ./deps/... ./fetch/... ./internal/... \
+  ./manif/... ./remote/... ./rockspec/... ./tree/... .
 ```
 
 A single package, e.g. `deps`:
@@ -33,13 +33,80 @@ A single package, e.g. `deps`:
 go test ./deps/...
 ```
 
-Some `client` tests require a real `tarantool` binary and its `lua.h` on the
-build path; they are gated behind the `integration_luaengine` build tag and
-skipped otherwise:
+Tests that need more than Go are gated behind build tags. The `integration`
+tag enables the `build`, `fetch`, and native `client` tests that run `cc`,
+`make`, `cmake`, `git`, and `tarantool` or reach `luarocks.org` and GitHub.
+The `integration_luaengine` tag enables the `client` tests of the lua backend
+and the backend-parity harness (`TestBackendParity_*`); they need a real
+`tarantool` on `PATH` and its `lua.h` at `<prefix>/include/tarantool/lua.h`,
+where `<prefix>` is the directory above the one holding `tarantool` (the
+`tarantool-dev` package puts it at `/usr/include/tarantool/lua.h`):
 
 ```sh
 go test ./client/ -tags integration_luaengine -run TestBackendParity -v
 ```
+
+A tagged test whose prerequisite is missing is skipped, so the suite runs on
+a machine that has only some of them. Set `GO_LUAROCKS_INTEGRATION_STRICT=1`
+to make a missing prerequisite fail the test instead, so a run that is meant
+to exercise the whole suite cannot pass by skipping it. The network is the
+exception: `GO_LUAROCKS_OFFLINE=1` declares a run offline by design, and the
+tests that need the network are then skipped even in strict mode. The CI `integration`
+job runs exactly this:
+
+```sh
+GO_LUAROCKS_INTEGRATION_STRICT=1 go test -tags integration,integration_luaengine \
+  ./build/... ./client/... ./deps/... ./fetch/... ./internal/... \
+  ./manif/... ./remote/... ./rockspec/... ./tree/... .
+```
+
+The tests keep LuaRocks out of your home and system configuration: the
+`client` package runs with `HOME` (and `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME` inside it) and `LUAROCKS_SYSCONFDIR` pointing at fresh empty
+directories, set up by its `TestMain`, and the tagged `build` tests do the
+same per test. So nothing lands in `~/.cache/luarocks`, and neither
+`~/.luarocks` nor `/etc/luarocks` changes what a test sees. `TMPDIR`, `PATH`,
+and the toolchain variables (`CC`, `CFLAGS`, …) are passed through. The helpers
+are in `internal/testenv`; `TestLuaEngine_Install_LeavesRealHomeAlone`
+(`integration_luaengine`, which also needs `unzip`) checks that a lua-backend
+install leaves the real home alone.
+
+### Sandboxed runner
+
+The integration and lua-engine suites run real build tools and LuaRocks
+code. `scripts/test-in-docker.sh` runs them in a Docker container built from
+`test/docker/Dockerfile`, which pins Go, Tarantool (with its headers), CMake,
+make, a C compiler, and git. The sandbox protects your machine and turns
+stray writes into test failures:
+
+- the root filesystem and the source tree are read-only, and `HOME` points
+  to a read-only directory, so writing there fails with `EROFS` or `EACCES`;
+- tests run as an unprivileged user without capabilities;
+- the only writable places are `/tmp` (a tmpfs that holds `TMPDIR`) and the
+  Go build cache volume; anything left in `/tmp` or `/dev/shm` after the run
+  fails it with a list of the leftovers;
+- there is no network unless you pass `--net`; the module cache volume is
+  filled by a separate `go mod download` step, the only one ever given
+  network for that. An offline run sets `GO_LUAROCKS_OFFLINE=1`, so the
+  tests that need luarocks.org or GitHub are skipped rather than failed;
+- `GO_LUAROCKS_INTEGRATION_STRICT=1` is set, since the image provides every
+  prerequisite of the integration tests.
+
+A canary test in `internal/sandbox` checks these guarantees from the inside,
+so a weakened sandbox fails the run; outside the sandbox it skips.
+
+Without a command, the script runs `go test -count=1 -tags
+integration,integration_luaengine` over every package; `-count=1` keeps
+results from coming out of the test cache instead of running in the sandbox.
+
+```sh
+scripts/test-in-docker.sh                # the whole suite, offline
+scripts/test-in-docker.sh --net          # also the tests that reach luarocks.org
+scripts/test-in-docker.sh go test -count=1 -v ./build/...   # a custom command
+```
+
+Override the pinned versions with `GO_VERSION`, `DEBIAN_SUITE`, or
+`TARANTOOL_VERSION`, e.g. `GO_VERSION=1.26.8 scripts/test-in-docker.sh`.
 
 ## Examples
 
@@ -56,8 +123,8 @@ The project uses [golangci-lint](https://golangci-lint.run/), configured in
 `.golangci.yml` at the repository root:
 
 ```sh
-golangci-lint run ./build/... ./client/... ./deps/... ./fetch/... ./manif/... \
-  ./remote/... ./rockspec/... ./tree/... .
+golangci-lint run ./build/... ./client/... ./deps/... ./fetch/... \
+  ./internal/... ./manif/... ./remote/... ./rockspec/... ./tree/... .
 ```
 
 ## Formatting

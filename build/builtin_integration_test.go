@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // TestBuiltin_RealCC actually invokes cc against a no-op C source that
@@ -22,8 +23,10 @@ import (
 // if not found.
 func TestBuiltin_RealCC(t *testing.T) {
 	if _, err := exec.LookPath("cc"); err != nil {
-		t.Skipf("cc not on PATH")
+		testenv.Missingf(t, "cc not on PATH")
 	}
+
+	testenv.Hermetic(t)
 
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")
