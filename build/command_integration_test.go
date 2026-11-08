@@ -10,9 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 func TestCommand_TrivialShell(t *testing.T) {
+	testenv.Hermetic(t)
+
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "log")
 	spec := &rocks.Rockspec{

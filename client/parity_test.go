@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // TestBackendParity_Make_Purelua installs one pure-Lua fixture two ways and
@@ -45,13 +46,13 @@ func TestBackendParity_Make_Purelua(t *testing.T) {
 	// its prefix, require its headers; skip otherwise (we must not fake a path).
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; backend-parity test needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; backend-parity test needs a real interpreter: %v", err)
 	}
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>
 
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s; backend-parity make needs Lua headers: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s; backend-parity make needs Lua headers: %v", incDir, err)
 	}
 
 	// stageFixture writes the foo-1.0-1 pure-Lua rockspec + modules under a fresh

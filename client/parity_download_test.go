@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // parityDownloadManifest is the fixture server. alpha carries every arch
@@ -93,7 +94,7 @@ func TestBackendParity_Download(t *testing.T) {
 	// the wrong reason.
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; download parity needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; download parity needs a real interpreter: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>

@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // reachable reports whether a TCP connection to host:port succeeds within
@@ -59,14 +60,14 @@ func TestNative_Install_RealRock_EndToEnd(t *testing.T) {
 
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; native real-rock install needs a real interpreter to verify require: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; native real-rock install needs a real interpreter to verify require: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>
 	incDir := filepath.Join(prefix, "include", "tarantool")
 
 	if !reachable(ctx, "luarocks.org:443", 5*time.Second) {
-		t.Skip("luarocks.org:443 not reachable; native real-rock install is network-gated")
+		testenv.NoNetworkf(t, "luarocks.org:443 not reachable; native real-rock install is network-gated")
 	}
 
 	tree := t.TempDir()
@@ -142,13 +143,13 @@ func TestNative_Install_SrcRock_EndToEnd(t *testing.T) {
 
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 
 	if !reachable(ctx, "luarocks.org:443", 5*time.Second) {
-		t.Skip("luarocks.org:443 not reachable; network-gated")
+		testenv.NoNetworkf(t, "luarocks.org:443 not reachable; network-gated")
 	}
 
 	tree := t.TempDir()

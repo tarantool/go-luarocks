@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // parityFixture is one rockspec shape plus the source files it needs.
@@ -134,12 +135,12 @@ build = {
 func TestBackendParity_Fixtures(t *testing.T) {
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; backend-parity needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; backend-parity needs a real interpreter: %v", err)
 	}
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s; backend-parity needs Lua headers: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s; backend-parity needs Lua headers: %v", incDir, err)
 	}
 
 	for _, fx := range parityFixtures() {

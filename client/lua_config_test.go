@@ -144,12 +144,14 @@ func TestLuaEngine_PwdAnchoredToWorkingDir(t *testing.T) {
 // absent, guesses from cfg.lua's chunk name; the embedded tree is compiled
 // under its embed path, so the guess was the relative "src/src" and
 // /etc/luarocks/config-5.1.lua was silently never loaded.
+//
+// LUAROCKS_SYSCONFDIR overrides that default, and TestMain sets it to keep
+// the package away from the real /etc/luarocks, so the test unsets it for its
+// own duration. t.Setenv restores the hermetic value afterwards and keeps the
+// test from running in parallel with the others, which read it.
 func TestLuaEngine_SysconfdirIsEtcLuarocks(t *testing.T) {
-	if os.Getenv("LUAROCKS_SYSCONFDIR") != "" {
-		t.Skip("LUAROCKS_SYSCONFDIR overrides the hardcoded default")
-	}
-
-	t.Parallel()
+	t.Setenv("LUAROCKS_SYSCONFDIR", "")
+	require.NoError(t, os.Unsetenv("LUAROCKS_SYSCONFDIR"), "unset LUAROCKS_SYSCONFDIR")
 
 	e := bootedEngine(t, luaTestCfg(t))
 

@@ -1,0 +1,41 @@
+#!/bin/sh
+# sandbox-run CMD [ARG...]
+#
+# Entrypoint of the test sandbox image. Runs CMD, then fails the run if CMD
+# left anything behind in the container's writable scratch space: /tmp (which
+# holds TMPDIR) and /dev/shm. Go removes t.TempDir directories and its own
+# build directories when it is done, so a leftover means a test or a build
+# script it ran wrote outside its temp dir. The exit status is that of CMD,
+# or 1 if CMD succeeded but left files behind.
+set -eu
+
+: "${TMPDIR:?TMPDIR must be set}"
+mkdir -p "$TMPDIR"
+
+if [ "$#" -eq 0 ]; then
+	echo "sandbox-run: no command given" >&2
+	exit 2
+fi
+
+rc=0
+"$@" || rc=$?
+
+# Everything under /tmp and /dev/shm except TMPDIR itself. Errors (e.g. a
+# leftover directory without read permission) are part of the report.
+leftovers=$(find /tmp /dev/shm -mindepth 1 ! -path "$TMPDIR" 2>&1 | sort)
+if [ -n "$leftovers" ]; then
+	{
+		echo
+		echo "sandbox: FAIL: the command left files outside its temp dirs:"
+		echo "$leftovers" | head -n 100 | sed 's/^/  /'
+		count=$(echo "$leftovers" | wc -l)
+		if [ "$count" -gt 100 ]; then
+			echo "  ... and $((count - 100)) more"
+		fi
+	} >&2
+	if [ "$rc" -eq 0 ]; then
+		rc=1
+	fi
+fi
+
+exit "$rc"

@@ -11,12 +11,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 func TestMake_TrivialMakefile(t *testing.T) {
 	if _, err := exec.LookPath("make"); err != nil {
-		t.Skipf("make not on PATH")
+		testenv.Missingf(t, "make not on PATH")
 	}
+
+	testenv.Hermetic(t)
 
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")

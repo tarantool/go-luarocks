@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // TestLuaEngine_Make_PureLuaFixture_EndToEnd stages a small pure-Lua rockspec
@@ -35,7 +36,7 @@ func TestLuaEngine_Make_PureLuaFixture_EndToEnd(t *testing.T) {
 	// a real tarantool and derive its prefix; skip when none is installed.
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH; lua-backend end-to-end test needs a real interpreter: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH; lua-backend end-to-end test needs a real interpreter: %v", err)
 	}
 	prefix := filepath.Dir(filepath.Dir(ttBin)) // <prefix>/bin/tarantool -> <prefix>
 
@@ -45,7 +46,7 @@ func TestLuaEngine_Make_PureLuaFixture_EndToEnd(t *testing.T) {
 	// genuinely cannot proceed without them — we must not fake a path).
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s; lua-backend make needs Lua headers: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s; lua-backend make needs Lua headers: %v", incDir, err)
 	}
 
 	src := t.TempDir()
@@ -122,12 +123,12 @@ build = {
 func TestLuaEngine_Make_TarantoolDependency_Resolves(t *testing.T) {
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH: %v", err)
 	}
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s: %v", incDir, err)
 	}
 
 	src := t.TempDir()
@@ -173,12 +174,12 @@ build = { type = "builtin", modules = { ["dep"] = "dep.lua" } }
 func TestLuaEngine_ReusedLState_SequentialMakes(t *testing.T) {
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH: %v", err)
 	}
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s: %v", incDir, err)
 	}
 
 	work := t.TempDir()
@@ -222,14 +223,14 @@ func TestLuaEngine_Make_CustomBuildTypeFromTree(t *testing.T) {
 
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
-		t.Skipf("tarantool not found on PATH: %v", err)
+		testenv.Missingf(t, "tarantool not found on PATH: %v", err)
 	}
 
 	prefix := filepath.Dir(filepath.Dir(ttBin))
 
 	incDir := filepath.Join(prefix, "include", "tarantool")
 	if _, err := os.Stat(filepath.Join(incDir, "lua.h")); err != nil {
-		t.Skipf("tarantool lua.h not found at %s: %v", incDir, err)
+		testenv.Missingf(t, "tarantool lua.h not found at %s: %v", incDir, err)
 	}
 
 	work := t.TempDir()

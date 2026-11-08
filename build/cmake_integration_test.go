@@ -11,12 +11,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 func TestCMake_TrivialProject(t *testing.T) {
 	if _, err := exec.LookPath("cmake"); err != nil {
-		t.Skipf("cmake not on PATH")
+		testenv.Missingf(t, "cmake not on PATH")
 	}
+
+	testenv.Hermetic(t)
 
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")

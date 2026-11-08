@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tarantool/go-luarocks/fetch"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 )
 
 // repoBuilder constructs a real git repository on disk using go-git (no `git`
@@ -227,7 +228,7 @@ func TestGitBackend_MatchesGitBinary(t *testing.T) {
 
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
-		t.Skip("git not on PATH")
+		testenv.Missingf(t, "git not on PATH")
 	}
 
 	b := newRepoBuilder(t)
@@ -339,7 +340,7 @@ func TestGitBackend_ChecksIsSourceRoot(t *testing.T) {
 	res, err := fetch.Sources(ctx, "git+https://github.com/tarantool/checks.git", dst,
 		fetch.Options{Tag: "3.3.0"})
 	if err != nil && networkErr(err) {
-		t.Skipf("network unavailable: %v", err)
+		testenv.NoNetworkf(t, "network unavailable: %v", err)
 	}
 
 	require.NoError(t, err, "clone tarantool/checks")
