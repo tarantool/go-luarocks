@@ -282,6 +282,26 @@ func TestWriteFormatNumberSpecialValues(t *testing.T) {
 	assert.Contains(t, got, "nonzero = 3.25")
 }
 
+// TestWriteFormatNumberAsTostring checks the float forms where Lua's "%.14g"
+// differs from printing the integer: the exponent from 1e14 on and the sign
+// of -0.
+func TestWriteFormatNumberAsTostring(t *testing.T) {
+	t.Parallel()
+
+	for f, want := range map[float64]string{
+		99999999999999:       "99999999999999",
+		1e14:                 "1e+14",
+		1e15 + 2:             "1e+15",
+		-2.5e15:              "-2.5e+15",
+		math.Copysign(0, -1): "-0",
+	} {
+		var buf bytes.Buffer
+
+		require.NoError(t, manif.Write(&buf, map[string]any{"x": f}))
+		assert.Equal(t, "x = "+want+"\n", buf.String(), "Write(%v)", f)
+	}
+}
+
 // TestWriteTopLevelErrors covers Write's top-level validation: a non-table
 // value, a numeric top-level key, and an invalid plain-identifier top-level
 // key (including a bare Lua keyword).

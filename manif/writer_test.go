@@ -77,3 +77,17 @@ func stripReturnPrefix(src []byte) []byte {
 
 	return []byte(s)
 }
+
+// TestWriteKeysAfterGapInArrayPart checks that a numeric key past a gap in
+// the array part is written with its key, as upstream does, so that reading
+// the text back keeps it at its index.
+func TestWriteKeysAfterGapInArrayPart(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	require.NoError(t, manif.Write(&buf, map[string]any{
+		"x": map[any]any{int64(1): "a", int64(3): "c", int64(4): 4, "k": "v"},
+	}))
+	assert.Equal(t, "x = {\n   \"a\",\n   [3] = \"c\",\n   [4] = 4, k = \"v\"\n}\n", buf.String())
+}

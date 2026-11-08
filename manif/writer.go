@@ -198,7 +198,7 @@ func writeValue(out *bufWriter, v any, level int) {
 	}
 }
 
-// writeTable mirrors persist.lua:115-147.
+// writeTable mirrors persist.lua:99-131.
 // Key ordering: numeric keys first (ascending), then string keys
 // (ascending lexicographic) — matching util.default_sort.
 func writeTable(out *bufWriter, t *table, level int) {
@@ -206,6 +206,11 @@ func writeTable(out *bufWriter, t *table, level int) {
 
 	sep := "\n"
 	indent := true
+
+	// next is the array index a numeric key must equal to go without its
+	// key: upstream writes `[k] = ` for every key once one is missing
+	// (persist.lua:111-115, `if k == i then i = i + 1 else ...`).
+	next := int64(1)
 
 	emit := func(k any, v any) {
 		out.write(sep)
@@ -216,8 +221,9 @@ func writeTable(out *bufWriter, t *table, level int) {
 			}
 		}
 
-		if _, isNum := k.(int64); !isNum {
-			// String key (numeric keys produce no key assignment).
+		if n, isNum := k.(int64); isNum && n == next {
+			next++
+		} else {
 			writeTableKeyAssignment(out, k, level)
 		}
 
@@ -373,11 +379,15 @@ func luaQ(s string) string {
 	return b.String()
 }
 
+// luaNumberPrecision is the %g precision of Lua's number format, "%.14g".
+const luaNumberPrecision = 14
+
 // formatNumber mirrors Lua 5.1 / LuaJIT's tostring on a number.
 //
-// LuaJIT tostring uses "%.14g" by default. For integer-valued doubles in
-// safe-integer range it omits the decimal point (e.g. tostring(3) == "3",
-// not "3.0").
+// LuaJIT tostring uses "%.14g", which omits the decimal point of an
+// integer-valued double (tostring(3) == "3", not "3.0"), keeps the sign of
+// -0 and switches to the exponent form from 1e14 on (tostring(1e14) ==
+// "1e+14"). strconv's 'g' with precision 14 does the same.
 func formatNumber(f float64) string {
 	if math.IsNaN(f) {
 		return "nan"
@@ -391,11 +401,7 @@ func formatNumber(f float64) string {
 		return "-inf"
 	}
 
-	if f == math.Trunc(f) && math.Abs(f) < 1e16 {
-		return strconv.FormatInt(int64(f), 10)
-	}
-
-	return strconv.FormatFloat(f, 'g', 14, 64)
+	return strconv.FormatFloat(f, 'g', luaNumberPrecision, 64)
 }
 
 // isValidPlainKey mirrors persist.lua:64-94.

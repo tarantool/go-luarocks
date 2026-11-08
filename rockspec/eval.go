@@ -1,6 +1,7 @@
 package rockspec
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -210,10 +211,19 @@ func harvest(l *lua.LState, spec *rocks.Rockspec) error {
 	// repository key, filename consistency) off that lowercased name. We fold
 	// the two into a single lowercased Package so every downstream consumer
 	// (tree.InstallDir, the manifest key) gets the upstream-compatible layout.
-	spec.Package = strings.ToLower(pkg)
+	// string.lower maps ASCII letters only, byte by byte, in the C locale
+	// LuaJIT runs in; strings.ToLower would fold other letters too and turn
+	// bytes that are not UTF-8 into U+FFFD.
+	spec.Package = asciiLower(pkg)
 
 	if spec.RockspecFormat, err = stringGlobal(l, "rockspec_format"); err != nil {
 		return err
+	}
+
+	// RockspecFormat "" means the field is absent (format 1.0); a format
+	// written as "" names no schema, so upstream rejects it as unknown.
+	if spec.RockspecFormat == "" && l.GetGlobal("rockspec_format") != lua.LNil {
+		return errors.New("rockspec: unknown rockspec format ")
 	}
 
 	if spec.Version, err = stringGlobal(l, "version"); err != nil {
@@ -229,7 +239,7 @@ func harvest(l *lua.LState, spec *rocks.Rockspec) error {
 	if tbl, err := tableGlobal(l, "source"); err != nil {
 		return err
 	} else if tbl != nil {
-		spec.Source = harvestSource(tbl)
+		spec.Source = harvestSource(tbl, false)
 	}
 
 	for _, dep := range []struct {
@@ -250,14 +260,22 @@ func harvest(l *lua.LState, spec *rocks.Rockspec) error {
 			continue
 		}
 
-		ds, err := harvestDeps(dep.name, tbl)
+		// The schema of a dependency string allows a namespace from format
+		// 3.0, the one that introduced build_ and test_dependencies.
+		namespaced := dep.name != "dependencies" || formatAtLeast(spec.RockspecFormat, "3.0")
+
+		ds, err := harvestDeps(dep.name, tbl, namespaced)
 		if err != nil {
 			return err
 		}
 
 		*dep.dst = ds
 
-		plats, err := harvestDepPlatforms(dep.name, tbl)
+		// The per-platform dependencies keep the 1.0 schema even in format
+		// 3.0: upstream expands dependencies.platforms from the 1.0 schema
+		// and the 3.0 one overrides only the base list (type/rockspec.lua,
+		// type_check.declare_schemas).
+		plats, err := harvestDepPlatforms(dep.name, tbl, dep.name != "dependencies")
 		if err != nil {
 			return err
 		}
@@ -283,7 +301,7 @@ func harvest(l *lua.LState, spec *rocks.Rockspec) error {
 	if tbl, err := tableGlobal(l, "build"); err != nil {
 		return err
 	} else if tbl != nil {
-		b, err := harvestBuild(tbl)
+		b, err := harvestBuild(tbl, false)
 		if err != nil {
 			return err
 		}
@@ -299,6 +317,19 @@ func harvest(l *lua.LState, spec *rocks.Rockspec) error {
 	}
 
 	return nil
+}
+
+// asciiLower lowercases the ASCII letters of s and leaves every other byte
+// as it is, as Lua's string.lower does in the C locale.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+
+	return string(b)
 }
 
 // harvestDeploy reads the top-level `deploy = {...}` table. wrap_bin_scripts
@@ -380,7 +411,9 @@ func harvestDescription(tbl *lua.LTable) rocks.Description {
 	}
 }
 
-func harvestSource(tbl *lua.LTable) rocks.Source {
+// harvestSource reads a source table. An overlay, the table of one platform
+// under source.platforms, has no overlays of its own: see harvestBuild.
+func harvestSource(tbl *lua.LTable, overlay bool) rocks.Source {
 	s := rocks.Source{
 		URL:    optString(tbl.RawGetString("url")),
 		Tag:    optString(tbl.RawGetString("tag")),
@@ -392,7 +425,7 @@ func harvestSource(tbl *lua.LTable) rocks.Source {
 	}
 
 	// Per-platform source overrides (source.platforms.<name> = { url = ... }).
-	if plats, ok := tbl.RawGetString("platforms").(*lua.LTable); ok {
+	if plats, ok := tbl.RawGetString("platforms").(*lua.LTable); ok && !overlay {
 		out := map[string]rocks.Source{}
 
 		plats.ForEach(func(k, v lua.LValue) {
@@ -400,7 +433,7 @@ func harvestSource(tbl *lua.LTable) rocks.Source {
 
 			sub, sok := v.(*lua.LTable)
 			if nok && sok {
-				out[string(name)] = harvestSource(sub)
+				out[string(name)] = harvestSource(sub, true)
 			}
 		})
 
@@ -418,7 +451,12 @@ func harvestSource(tbl *lua.LTable) rocks.Source {
 // Constraint parsing here is intentionally minimal: it splits on commas and
 // then on whitespace to extract op+version pairs, leaving Version.Components
 // empty. The version-string parser in deps/version.go refines this further.
-func harvestDeps(field string, tbl *lua.LTable) ([]rocks.Dep, error) {
+//
+// Each string must match upstream's schema pattern for the field, checked
+// when the rockspec is loaded, before any dependency is parsed
+// (type/rockspec.lua): namespaced selects the pattern of format 3.0, which
+// allows a "user/" prefix, over that of 1.0.
+func harvestDeps(field string, tbl *lua.LTable, namespaced bool) ([]rocks.Dep, error) {
 	if tbl == nil {
 		return nil, nil
 	}
@@ -448,6 +486,13 @@ func harvestDeps(field string, tbl *lua.LTable) ([]rocks.Dep, error) {
 			return
 		}
 
+		if !depStringMatchesSchema(string(s), namespaced) {
+			ferr = fmt.Errorf("rockspec: Type mismatch on field %s: invalid value '%s' does not match a valid dependency string",
+				field, string(s))
+
+			return
+		}
+
 		d, ok := parseDepString(string(s))
 		if !ok {
 			ferr = fmt.Errorf("rockspec: Parse error processing dependency '%s'", string(s))
@@ -463,7 +508,7 @@ func harvestDeps(field string, tbl *lua.LTable) ([]rocks.Dep, error) {
 
 // harvestDepPlatforms reads the per-platform overlays from a dependency table's
 // `platforms` sub-table (e.g. dependencies.platforms.unix = { "posix" }).
-func harvestDepPlatforms(field string, tbl *lua.LTable) (map[string][]rocks.Dep, error) {
+func harvestDepPlatforms(field string, tbl *lua.LTable, namespaced bool) (map[string][]rocks.Dep, error) {
 	plats, ok := tbl.RawGetString("platforms").(*lua.LTable)
 	if !ok {
 		return nil, nil //nolint:nilnil // no platforms overlay: nil map, no error
@@ -485,7 +530,7 @@ func harvestDepPlatforms(field string, tbl *lua.LTable) (map[string][]rocks.Dep,
 			return
 		}
 
-		ds, err := harvestDeps(field, sub)
+		ds, err := harvestDeps(field, sub, namespaced)
 		if err != nil {
 			ferr = err
 
@@ -530,7 +575,7 @@ func harvestExternalDepPlatforms(tbl *lua.LTable) map[string]map[string]rocks.Ex
 // table data so the caller drops the entry. (Validation surfaces missing
 // dependencies via Validate later.)
 func parseDepString(s string) (rocks.Dep, bool) {
-	s = strings.TrimSpace(s)
+	s = strings.Trim(s, luaSpace)
 	if s == "" {
 		return rocks.Dep{}, false
 	}
@@ -545,7 +590,7 @@ func parseDepString(s string) (rocks.Dep, bool) {
 	}
 
 	name := s[:i]
-	rest := strings.TrimSpace(s[i:])
+	rest := strings.Trim(s[i:], luaSpace)
 
 	if name == "" || !isValidDepName(name) {
 		// A leading operator like ">=" yields no name and is a parse error, not
@@ -582,6 +627,60 @@ func parseDepString(s string) (rocks.Dep, bool) {
 	}
 
 	return dep, true
+}
+
+// luaSpace is Lua's %s class in the C locale.
+const luaSpace = " \t\n\v\f\r"
+
+// depStringMatchesSchema reports whether s matches upstream's schema
+// pattern for a dependency string, anchored at both ends as type_check_item
+// anchors it. Before format 3.0 (namespaced false) that is
+//
+//	%s*([a-zA-Z0-9][a-zA-Z0-9%.%-%_]*)%s*([^/]*)
+//
+// and from 3.0
+//
+//	%s*([a-zA-Z0-9%.%-%_]*/?[a-zA-Z0-9][a-zA-Z0-9%.%-%_]*)%s*([^/]*)
+//
+// Since the tail matches anything without a "/", the 1.0 pattern asks for an
+// alphanumeric first byte after the spaces and no "/" at all; the 3.0 one
+// asks that the name chars after the spaces include an alphanumeric, or,
+// for at most one "/", that only name chars precede it and an alphanumeric
+// follows it.
+func depStringMatchesSchema(s string, namespaced bool) bool {
+	t := strings.TrimLeft(s, luaSpace)
+	slash := strings.IndexByte(t, '/')
+
+	if !namespaced {
+		return t != "" && isAlnum(t[0]) && slash < 0
+	}
+
+	if slash < 0 {
+		for i := 0; i < len(t) && isDepNameChar(t[i]) && t[i] != '/'; i++ {
+			if isAlnum(t[i]) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	if strings.IndexByte(t[slash+1:], '/') >= 0 || slash+1 == len(t) || !isAlnum(t[slash+1]) {
+		return false
+	}
+
+	for i := range slash {
+		if !isDepNameChar(t[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isAlnum reports whether b is in Lua's %w class in the C locale.
+func isAlnum(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 // isDepNameChar reports whether b is a dependency-name character
@@ -667,6 +766,20 @@ func stringArray(v lua.LValue) []string {
 	return out
 }
 
+// stringOrList returns the strings of an array, or a lone string as a list
+// of one; nil when there are none.
+func stringOrList(v lua.LValue) []string {
+	if s, ok := v.(lua.LString); ok {
+		return []string{string(s)}
+	}
+
+	if out := stringArray(v); len(out) > 0 {
+		return out
+	}
+
+	return nil
+}
+
 func stringMap(v lua.LValue) map[string]string {
 	tbl, ok := v.(*lua.LTable)
 	if !ok {
@@ -693,7 +806,12 @@ func stringMap(v lua.LValue) map[string]string {
 	return out
 }
 
-func harvestBuild(tbl *lua.LTable) (rocks.Build, error) {
+// harvestBuild reads a build table. An overlay, the table of one platform
+// under build.platforms, has no overlays of its own: MergePlatforms applies
+// one level, and reading further would never end on a table that holds
+// itself (local b = {}; b.platforms = { unix = b }), which a rockspec can
+// build without reading a global.
+func harvestBuild(tbl *lua.LTable, overlay bool) (rocks.Build, error) {
 	b := rocks.Build{
 		Type:             optString(tbl.RawGetString("type")),
 		Makefile:         optString(tbl.RawGetString("makefile")),
@@ -719,10 +837,15 @@ func harvestBuild(tbl *lua.LTable) (rocks.Build, error) {
 	}
 
 	if installTbl, ok := tbl.RawGetString("install").(*lua.LTable); ok {
-		b.Install = harvestBuildInstall(installTbl)
+		inst, err := harvestBuildInstall(installTbl)
+		if err != nil {
+			return rocks.Build{}, err
+		}
+
+		b.Install = inst
 	}
 
-	if platsTbl, ok := tbl.RawGetString("platforms").(*lua.LTable); ok {
+	if platsTbl, ok := tbl.RawGetString("platforms").(*lua.LTable); ok && !overlay {
 		plats, err := harvestPlatforms(platsTbl)
 		if err != nil {
 			return rocks.Build{}, err
@@ -736,8 +859,8 @@ func harvestBuild(tbl *lua.LTable) (rocks.Build, error) {
 	return b, nil
 }
 
-// harvestPlatforms recurses into a build.platforms table, returning one
-// rocks.Build per named platform overlay.
+// harvestPlatforms reads a build.platforms table, returning one rocks.Build
+// per named platform overlay.
 func harvestPlatforms(platsTbl *lua.LTable) (map[string]rocks.Build, error) {
 	plats := map[string]rocks.Build{}
 
@@ -758,7 +881,7 @@ func harvestPlatforms(platsTbl *lua.LTable) (map[string]rocks.Build, error) {
 			return
 		}
 
-		pb, err := harvestBuild(sub)
+		pb, err := harvestBuild(sub, true)
 		if err != nil {
 			harvestErr = err
 
@@ -788,21 +911,24 @@ func harvestModules(tbl *lua.LTable) map[string]rocks.Module {
 		case lua.LString:
 			out[string(name)] = rocks.Module{Path: string(vv)}
 		case *lua.LTable:
-			m := rocks.Module{}
-			// String shorthand for sources: `{"src/foo.c"}` (array form).
-			if arr := stringArray(vv); len(arr) > 0 && vv.RawGetString("sources") == lua.LNil {
-				m.Sources = arr
+			// The builtin backend compiles the array part of the module table
+			// when it has one, else its sources field, and takes a string
+			// for a list of one, there and in the flag lists
+			// (build/builtin.lua: `if info[1] then sources = info end`,
+			// `if type(sources) == "string" then sources = {sources} end`,
+			// and add_flags).
+			sources := vv.RawGetString("sources")
+			if vv.RawGetInt(1) != lua.LNil {
+				sources = vv
 			}
 
-			if s := stringArray(vv.RawGetString("sources")); len(s) > 0 {
-				m.Sources = s
+			out[string(name)] = rocks.Module{
+				Sources:   stringOrList(sources),
+				Incdirs:   stringOrList(vv.RawGetString("incdirs")),
+				Libdirs:   stringOrList(vv.RawGetString("libdirs")),
+				Libraries: stringOrList(vv.RawGetString("libraries")),
+				Defines:   stringOrList(vv.RawGetString("defines")),
 			}
-
-			m.Incdirs = stringArray(vv.RawGetString("incdirs"))
-			m.Libdirs = stringArray(vv.RawGetString("libdirs"))
-			m.Libraries = stringArray(vv.RawGetString("libraries"))
-			m.Defines = stringArray(vv.RawGetString("defines"))
-			out[string(name)] = m
 		}
 	})
 
@@ -813,11 +939,132 @@ func harvestModules(tbl *lua.LTable) map[string]rocks.Module {
 	return out
 }
 
-func harvestBuildInstall(tbl *lua.LTable) rocks.BuildInstall {
-	return rocks.BuildInstall{
-		Lua:  stringMap(tbl.RawGetString("lua")),
-		Lib:  stringMap(tbl.RawGetString("lib")),
-		Bin:  stringMap(tbl.RawGetString("bin")),
-		Conf: stringMap(tbl.RawGetString("conf")),
+func harvestBuildInstall(tbl *lua.LTable) (rocks.BuildInstall, error) {
+	var (
+		bi  rocks.BuildInstall
+		err error
+	)
+
+	for _, g := range []struct {
+		name         string
+		dst          *map[string]string
+		isModulePath bool
+	}{
+		{"lua", &bi.Lua, true},
+		{"lib", &bi.Lib, true},
+		{"bin", &bi.Bin, false},
+		{"conf", &bi.Conf, false},
+	} {
+		if *g.dst, err = installGroup(g.name, tbl.RawGetString(g.name), g.isModulePath); err != nil {
+			return rocks.BuildInstall{}, err
+		}
 	}
+
+	return bi, nil
+}
+
+// installGroup reads one table of build.install. A string key names the
+// destination, as rocks.BuildInstall documents. A number key, an entry of
+// the array part, installs the file under its own base name right in the
+// group's directory (build.lua install_to: `dest = location` and
+// `filename = dir.base_name(file)`); it is stored under the key that names
+// that destination for the consumers of rocks.BuildInstall:
+//
+//   - bin, conf: the base name itself;
+//   - lua, lib: a key without dots, so that no subdirectory is derived from
+//     it. For a .lua file that is the base name without ".lua", which the
+//     consumers turn back into <key>.lua; another file keeps its base name
+//     whatever the key, which is "[<index>]". A .lua file whose name has
+//     more dots has no such key and is an error.
+//
+// The array part goes first and a string key naming the same destination
+// wins, the order in which upstream's pairs visits and copies them.
+func installGroup(group string, v lua.LValue, isModulePath bool) (map[string]string, error) {
+	tbl, ok := v.(*lua.LTable)
+	if !ok {
+		return nil, nil //nolint:nilnil // absent group: nil map, no error
+	}
+
+	type arrayEntry struct {
+		index float64
+		file  string
+	}
+
+	var array []arrayEntry
+
+	out := map[string]string{}
+
+	tbl.ForEach(func(k, vv lua.LValue) {
+		file, ok := vv.(lua.LString)
+		if !ok {
+			return
+		}
+
+		switch kk := k.(type) {
+		case lua.LString:
+			out[string(kk)] = string(file)
+		case lua.LNumber:
+			array = append(array, arrayEntry{float64(kk), string(file)})
+		}
+	})
+
+	sort.Slice(array, func(i, j int) bool { return array[i].index < array[j].index })
+
+	for _, e := range array {
+		key, err := arrayInstallKey(group, e.index, e.file, isModulePath)
+		if err != nil {
+			return nil, err
+		}
+
+		if _, taken := out[key]; !taken {
+			out[key] = e.file
+		}
+	}
+
+	if len(out) == 0 {
+		return nil, nil //nolint:nilnil // empty group: nil map, no error
+	}
+
+	return out, nil
+}
+
+// arrayInstallKey returns the key that stores the array entry file of a
+// build.install group; see installGroup.
+func arrayInstallKey(group string, index float64, file string, isModulePath bool) (string, error) {
+	base := luaBaseName(file)
+	if base == "" || base == "." || base == ".." || strings.ContainsAny(base, `/\`) {
+		return "", fmt.Errorf("rockspec: build.install.%s[%v] = %q: no file name to install it under", group, index, file)
+	}
+
+	if !isModulePath {
+		return base, nil
+	}
+
+	if stem, isLua := strings.CutSuffix(base, ".lua"); isLua {
+		if stem == "" || strings.Contains(stem, ".") {
+			return "", fmt.Errorf("rockspec: build.install.%s[%v] = %q: a Lua file with dots in its name "+
+				"cannot be installed under it", group, index, file)
+		}
+
+		return stem, nil
+	}
+
+	if strings.HasSuffix(strings.ToLower(base), ".lua") {
+		return "", fmt.Errorf("rockspec: build.install.%s[%v] = %q: a file named *.lua in another case "+
+			"cannot be installed under its name", group, index, file)
+	}
+
+	return fmt.Sprintf("[%v]", index), nil
+}
+
+// luaBaseName mirrors upstream dir.base_name (dir.lua:15-20): the part after
+// the last "/" or "\", trailing separators dropped, or the whole path when
+// it has no separator but at its end.
+func luaBaseName(p string) string {
+	s := strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(s, `/\`); i >= 0 {
+		return s[i+1:]
+	}
+
+	return p
 }

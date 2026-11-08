@@ -3,6 +3,7 @@ package manif
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -46,6 +47,9 @@ const (
 //
 // A bare nil literal in value position is a hard error, not a dropped entry —
 // upstream persist.lua never emits one, so Parse never has to represent it.
+// So is a table key that is neither a string nor a number (Lua allows
+// booleans and tables), two keys that a stringified map would merge (1.5 and
+// "1.5"), and tables nested more than 100 deep.
 //
 // Parse intentionally supports only the subset emitted by upstream
 // persist.lua: table constructors, string literals (short and long form),
@@ -57,6 +61,17 @@ const (
 // — is a hard error: the parser never silently drops input. Every such
 // error wraps [ErrParse].
 func Parse(b []byte) (any, error) {
+	v, _, err := parse(b)
+
+	return v, err
+}
+
+// parse is Parse, and also reports whether a table has a positional entry
+// and an explicit key naming the same index, as in { "a", [1] = "b" }. Parse
+// keeps the value given last, as LuaJIT does; PUC Lua and gopher-lua store
+// the positional entries after the explicit ones, so the differential test,
+// whose reference runs in gopher-lua, cannot judge such a table.
+func parse(b []byte) (any, bool, error) {
 	p := &parser{src: b}
 	p.skipWS()
 	// Top-level form: a sequence of `key = value` assignments. We
@@ -67,20 +82,20 @@ func Parse(b []byte) (any, error) {
 	for p.pos < len(p.src) {
 		key, err := p.parseTopLevelKey()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
 		p.skipWS()
 
 		if !p.consume('=') {
-			return nil, p.errorf("expected '=' after key %q", key)
+			return nil, false, p.errorf("expected '=' after key %q", key)
 		}
 
 		p.skipWS()
 
 		v, err := p.parseValue()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
 		out[key] = v
@@ -88,12 +103,22 @@ func Parse(b []byte) (any, error) {
 		p.skipWS()
 	}
 
-	return out, nil
+	return out, p.overlap, nil
 }
 
+// maxNesting bounds how deeply tables may nest. Persisted manifests nest a
+// handful of levels; the bound keeps a hostile one from exhausting the stack,
+// and stays below what LuaJIT accepts (LJ_MAX_XLEVEL, 200 syntax levels), so
+// Parse never accepts a nesting upstream rejects.
+const maxNesting = 100
+
 type parser struct {
-	src []byte
-	pos int
+	src   []byte
+	pos   int
+	depth int
+	// overlap is set when a table has a positional entry and an explicit
+	// key naming the same index; see parse.
+	overlap bool
 }
 
 func (p *parser) errorf(format string, args ...any) error {
@@ -136,7 +161,8 @@ func (p *parser) skipWS() {
 			}
 
 			p.pos += 2
-			for p.pos < len(p.src) && p.src[p.pos] != '\n' {
+			// A CR ends the line as LF does (LuaJIT lex_iseol).
+			for p.pos < len(p.src) && p.src[p.pos] != '\n' && p.src[p.pos] != '\r' {
 				p.pos++
 			}
 		default:
@@ -168,7 +194,17 @@ func (p *parser) parseTopLevelKey() (string, error) {
 		return "", p.errorf("expected identifier at start of top-level assignment, got %q", string(p.peek()))
 	}
 
-	return p.parseIdent(), nil
+	start := p.pos
+
+	// A keyword is no name in Lua: "end = 1" does not load.
+	name := p.parseIdent()
+	if luaKeywords[name] {
+		p.pos = start
+
+		return "", p.errorf("keyword %q cannot be assigned", name)
+	}
+
+	return name, nil
 }
 
 func isIdentStart(c byte) bool {
@@ -256,7 +292,9 @@ func (p *parser) parseShortString() (string, error) {
 			return b.String(), nil
 		}
 
-		if c == '\n' {
+		// A raw CR is a line break to Lua as much as LF, and a short string
+		// cannot span one (LuaJIT read_string: "unfinished string").
+		if c == '\n' || c == '\r' {
 			return "", p.errorf("unterminated short string (newline before closing quote)")
 		}
 
@@ -482,6 +520,13 @@ func (p *parser) parseNumber() (any, error) {
 		return nil, p.errorf("malformed number %q", lit)
 	}
 
+	// The Lua lexer reads every identifier byte and dot that follows into
+	// the number, so "0X" or "1a" is one malformed number, not a number and
+	// a name (LuaJIT lex_number).
+	if c := p.peek(); isIdentPart(c) || c == '.' {
+		return nil, p.errorf("malformed number near %q", lit+string(c))
+	}
+
 	if !isFloat {
 		n, err := strconv.ParseInt(lit, 10, 64)
 		if err == nil {
@@ -508,6 +553,13 @@ func (p *parser) parseTable() (any, error) {
 	if !p.consume('{') {
 		return nil, p.errorf("expected '{' starting table")
 	}
+
+	if p.depth >= maxNesting {
+		return nil, p.errorf("tables nested deeper than %d", maxNesting)
+	}
+
+	p.depth++
+	defer func() { p.depth-- }()
 
 	var entries []entry
 
@@ -575,7 +627,7 @@ func (p *parser) parseTable() (any, error) {
 				return nil, err
 			}
 
-			ent = entry{key: autoIdx, value: v}
+			ent = entry{key: autoIdx, value: v, positional: true}
 			autoIdx++
 		}
 
@@ -596,7 +648,7 @@ func (p *parser) parseTable() (any, error) {
 		return nil, p.errorf("expected ',' or '}' in table")
 	}
 
-	return entriesToValue(entries), nil
+	return p.entriesToValue(entries)
 }
 
 // identKeyLookahead returns true if the position starts with an identifier
@@ -607,6 +659,14 @@ func (p *parser) identKeyLookahead() bool {
 
 	for p.pos < len(p.src) && isIdentPart(p.src[p.pos]) {
 		p.pos++
+	}
+
+	// A keyword is no key: { end = 1 } does not load, and true/false/nil
+	// start a value.
+	if luaKeywords[string(p.src[save:p.pos])] {
+		p.pos = save
+
+		return false
 	}
 	// Skip whitespace but not newlines beyond — actually allow any WS.
 	for p.pos < len(p.src) {
@@ -639,89 +699,148 @@ func (p *parser) identKeyLookahead() bool {
 //     distinction so the writer can pack numeric
 //     entries inline and emit string entries
 //     multi-line, matching persist.lua.
-func entriesToValue(entries []entry) any {
-	hasNum := false
-	hasStr := false
-	denseArray := true
-	maxIdx := int64(0)
+//
+// A key of any other type — a boolean or a table, which Lua allows but no
+// manifest uses — is an error: the Go shapes have no place for it.
+func (p *parser) entriesToValue(entries []entry) (any, error) {
+	// Lua keys a table by value, whatever the order or the spelling of the
+	// keys: [1.0] is the key 1, { [2] = "b", [1] = "a" } is an array, and a
+	// key given twice keeps the value given last.
+	var keys []any
+
+	vals := map[any]any{}
+	positional := map[any]bool{}
 
 	for _, e := range entries {
-		switch k := e.key.(type) {
+		k := e.key
+
+		switch kk := k.(type) {
+		case int64, string:
+		case float64:
+			if kk == math.Trunc(kk) && math.Abs(kk) < int64Bound {
+				k = int64(kk)
+			}
+		default:
+			return nil, p.errorf("unsupported table key of type %s", luaTypeName(kk))
+		}
+
+		if was, seen := positional[k]; !seen {
+			keys = append(keys, k)
+		} else if was != e.positional {
+			p.overlap = true
+		}
+
+		vals[k] = e.value
+		positional[k] = e.positional
+	}
+
+	hasNum, hasStr, hasFloat := false, false, false
+	dense := true
+
+	for _, k := range keys {
+		switch kk := k.(type) {
 		case int64:
 			hasNum = true
-
-			if k != maxIdx+1 {
-				denseArray = false
-			}
-
-			maxIdx++
+			// The keys are distinct, so len(keys) of them in 1..len(keys)
+			// are exactly 1..N.
+			dense = dense && kk >= 1 && kk <= int64(len(keys))
 		case string:
 			hasStr = true
-			denseArray = false
-		default:
-			_ = k
-			denseArray = false
+		case float64:
+			hasFloat = true
 		}
 	}
 
-	if hasNum && !hasStr && denseArray {
-		arr := make([]any, len(entries))
-		for i, e := range entries {
-			arr[i] = e.value
+	if hasNum && !hasStr && !hasFloat && dense {
+		arr := make([]any, len(keys))
+		for _, k := range keys {
+			i, _ := k.(int64)
+			arr[i-1] = vals[k]
 		}
 
-		return arr
+		return arr, nil
 	}
 
-	if hasNum && hasStr {
+	if hasNum && hasStr && !hasFloat {
 		t := newTable()
 
-		for _, e := range entries {
-			switch k := e.key.(type) {
+		for _, k := range keys {
+			switch kk := k.(type) {
 			case string:
-				if _, ok := t.str[k]; !ok {
-					t.strKeys = append(t.strKeys, k)
-				}
-
-				t.str[k] = e.value
+				t.strKeys = append(t.strKeys, kk)
+				t.str[kk] = vals[k]
 			case int64:
-				if _, ok := t.num[k]; !ok {
-					t.numKeys = append(t.numKeys, k)
-				}
-
-				t.num[k] = e.value
-			default:
-				panic(fmt.Sprintf("manif: unexpected key type %T", e.key))
+				t.numKeys = append(t.numKeys, kk)
+				t.num[kk] = vals[k]
 			}
 		}
 
 		sort.Strings(t.strKeys)
 		slices.Sort(t.numKeys)
 
-		return t
+		return t, nil
 	}
 
 	m := map[string]any{}
+	orig := map[string]any{}
 
-	for _, e := range entries {
-		switch k := e.key.(type) {
+	for _, k := range keys {
+		var key string
+
+		switch kk := k.(type) {
 		case string:
-			m[k] = e.value
+			key = kk
 		case int64:
-			m[strconv.FormatInt(k, 10)] = e.value
+			key = strconv.FormatInt(kk, 10)
 		case float64:
-			m[strconv.FormatFloat(k, 'g', -1, 64)] = e.value
-		default:
-			panic(fmt.Sprintf("manif: unexpected key type %T", e.key))
+			key = strconv.FormatFloat(kk, 'g', -1, 64)
 		}
+
+		// Two keys Lua tells apart, such as 1.5 and "1.5", cannot share one
+		// stringified key: keeping either would silently drop the other.
+		if prev, ok := orig[key]; ok {
+			return nil, p.errorf("table keys %s and %s collide as %q", keyString(prev), keyString(k), key)
+		}
+
+		orig[key] = k
+		m[key] = vals[k]
 	}
 
-	return m
+	return m, nil
+}
+
+// int64Bound is 2^63: a float64 below it in magnitude converts to int64
+// exactly when it is integral.
+const int64Bound = 1 << 63
+
+// keyString renders a table key for an error message: a string quoted, a
+// number as is.
+func keyString(k any) string {
+	if s, ok := k.(string); ok {
+		return strconv.Quote(s)
+	}
+
+	return fmt.Sprint(k)
+}
+
+// luaTypeName names the Lua type of a parsed value, for error messages.
+func luaTypeName(v any) string {
+	switch v.(type) {
+	case bool:
+		return "boolean"
+	case string:
+		return "string"
+	case int64, float64:
+		return "number"
+	default:
+		return "table"
+	}
 }
 
 type entry struct {
-	key   any
-	value any
+	key        any
+	value      any
+	positional bool
 }
 
 // ErrParse is wrapped by every error Parse returns; test for it with

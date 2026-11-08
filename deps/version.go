@@ -58,7 +58,8 @@ var revisionRe = regexp.MustCompile(`^(.*)-([0-9]+)$`)
 //
 // The semantics match upstream `core/vers.parse_version`:
 //
-//   - Strip surrounding whitespace.
+//   - Strip surrounding whitespace (Lua's %s: ASCII space, \t, \n, \v, \f,
+//     \r).
 //   - Strip a trailing `-N` digit revision and store as Version.Revision.
 //   - Walk the remainder splitting on `.`, `-`, `_`. Numeric tokens become
 //     components; recognized keywords are mapped via keywordDeltas and
@@ -69,7 +70,7 @@ var revisionRe = regexp.MustCompile(`^(.*)-([0-9]+)$`)
 func ParseVersion(s string) (rocks.Version, error) {
 	raw := s
 
-	trimmed := strings.TrimSpace(s)
+	trimmed := strings.Trim(s, luaSpace)
 	if trimmed == "" {
 		return rocks.Version{}, errors.New("deps: empty version string")
 	}
@@ -156,12 +157,8 @@ func ParseVersion(s string) (rocks.Version, error) {
 		cur = m[2]
 	}
 
-	if len(v.Components) == 0 {
-		// All-keyword input ("scm") still needs a placeholder slot to
-		// participate in comparisons. Upstream would have appended the delta.
-		v.Components = append(v.Components, 0)
-	}
-
+	// A version that is only a revision ("-1") has no components, as
+	// upstream's: every token fills a slot, so nothing else comes out empty.
 	return v, nil
 }
 

@@ -6,6 +6,8 @@ package deps_test
 // `go test -run '^$' -fuzz FuzzXxx ./deps/` explores further.
 
 import (
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,6 +60,38 @@ func tooLong(in ...string) bool {
 	return false
 }
 
+// Accepted divergences. An input that hits one skips the comparison it would
+// fail, and only that one; the IDs name the entries of the divergence list.
+//
+//   - V1: an empty or all-whitespace version. ParseVersion rejects it;
+//     upstream parses it, silently, to a version without components.
+//   - V2: a version with trailing whitespace. Upstream's "^%s*(.*)%s*$"
+//     leaves it in the greedy capture and then cannot parse it;
+//     ParseVersion trims it, as the comment upstream says it means to.
+//   - V4: a run of digits beyond int64. ParseVersion rejects it; upstream
+//     reads a rounded float.
+//   - V6: a constraint version starting with ".", "_" or "-". Upstream warns
+//     that it cannot parse it and goes on with a 0 component; the parsers
+//     reject it. Only the constraint parsers differ: ParseVersion rejects
+//     what parse_version warns about.
+
+// emptyVersion reports V1.
+func emptyVersion(s string) bool {
+	return strings.Trim(s, luaSpace) == ""
+}
+
+// trailingSpace reports V2.
+func trailingSpace(s string) bool {
+	t := strings.TrimLeft(s, luaSpace)
+
+	return t != "" && strings.IndexByte(luaSpace, t[len(t)-1]) >= 0
+}
+
+// intOverflow reports V4 from the Go error.
+func intOverflow(err error) bool {
+	return errors.Is(err, strconv.ErrRange)
+}
+
 // newVM boots the reference for one fuzz target.
 func newVM(f *testing.F) *luaref.VM {
 	f.Helper()
@@ -92,6 +126,15 @@ func FuzzParseVersion(f *testing.F) {
 		lv, err := vm.ParseVersion(s)
 		if err != nil {
 			t.Fatalf("reference: %v", err)
+		}
+
+		switch {
+		case gerr != nil && !lv.Warned && emptyVersion(s): // V1
+			return
+		case gerr == nil && lv.Warned && trailingSpace(s): // V2
+			return
+		case !lv.Warned && intOverflow(gerr): // V4
+			return
 		}
 
 		if (gerr == nil) == lv.Warned {
@@ -190,9 +233,15 @@ func FuzzParseConstraints(f *testing.F) {
 
 		gcs, gerr := deps.ParseConstraints(s)
 
+		vm.ResetWarnings()
+
 		lcs, ok, msg, err := vm.ParseConstraints(strings.TrimLeft(s, luaSpace))
 		if err != nil {
 			t.Fatalf("reference: %v", err)
+		}
+
+		if gerr != nil && ok && (len(vm.Warnings()) > 0 || intOverflow(gerr)) { // V6, V4
+			return
 		}
 
 		if (gerr == nil) != ok {

@@ -6,6 +6,7 @@ package client_test
 // ./client/` explores further.
 
 import (
+	"strings"
 	"testing"
 
 	lua "github.com/yuin/gopher-lua"
@@ -31,6 +32,43 @@ func newVM(f *testing.F) *luaref.VM {
 	return vm
 }
 
+// Accepted divergences. An input that hits one skips the comparison it would
+// fail, and only that one; the IDs name the entries of the divergence list.
+// All of them come from Go library functions the helpers use where upstream
+// has its own, and none arises from a real source URL or rock name.
+//
+//   - B1: a URL that is empty or only slashes. filepath.Base gives "." or
+//     "/"; upstream's dir.base_name gives the URL back.
+//   - B2: a URL whose only slashes end it ("foo/"). filepath.Base drops
+//     them; dir.base_name, finding no slash before the name, gives the URL
+//     back, slashes and all.
+//   - B3: a URL with a backslash. dir.base_name splits at it too;
+//     filepath.Base on Unix does not.
+//   - S1: a rock argument that strings.ToLower changes beyond ASCII: it
+//     folds Unicode letters and turns invalid UTF-8 into U+FFFD, where Lua's
+//     string.lower maps ASCII letters only.
+
+// baseNameException reports B1, B2 or B3.
+func baseNameException(url string) bool {
+	trimmed := strings.TrimRight(url, "/")
+
+	return trimmed == "" || // B1
+		(trimmed != url && !strings.Contains(trimmed, "/")) || // B2
+		strings.Contains(url, `\`) // B3
+}
+
+// lowersBeyondASCII reports S1: strings.ToLower changes a byte beyond ASCII.
+func lowersBeyondASCII(s string) bool {
+	ascii := []byte(s)
+	for i, c := range ascii {
+		if c >= 'A' && c <= 'Z' {
+			ascii[i] = c + 'a' - 'A'
+		}
+	}
+
+	return strings.ToLower(s) != string(ascii)
+}
+
 // FuzzDeduceBaseDir checks the source-directory guess against
 // dir.deduce_base_dir, which upstream applies to every source URL.
 func FuzzDeduceBaseDir(f *testing.F) {
@@ -48,7 +86,7 @@ func FuzzDeduceBaseDir(f *testing.F) {
 	vm := newVM(f)
 
 	f.Fuzz(func(t *testing.T, url string) {
-		if len(url) > maxInput {
+		if len(url) > maxInput || baseNameException(url) {
 			return
 		}
 
@@ -100,7 +138,7 @@ func FuzzSplitNamespacedName(f *testing.F) {
 	fn := res[0]
 
 	f.Fuzz(func(t *testing.T, arg string) {
-		if len(arg) > maxInput {
+		if len(arg) > maxInput || lowersBeyondASCII(arg) {
 			return
 		}
 

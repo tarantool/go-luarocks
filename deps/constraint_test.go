@@ -69,6 +69,24 @@ func TestParseConstraints_WhitespaceSeparated(t *testing.T) {
 	}
 }
 
+// TestParseConstraints_LuaWhitespace checks that whitespace means Lua's %s:
+// the vertical tab separates too, the tail may span lines, and a Unicode
+// space is no whitespace at all.
+func TestParseConstraints_LuaWhitespace(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]int{">=\v1": 1, "\v>= 1\v": 1, ">= 1\v< 2": 2, "1 x\ny": 3} {
+		cs, err := deps.ParseConstraints(in)
+		require.NoError(t, err, "ParseConstraints(%q)", in)
+		assert.Len(t, cs, want, "ParseConstraints(%q)", in)
+	}
+
+	for _, in := range []string{">= 1\u00a0", "\u00a0>= 1", ">=\u00851"} {
+		_, err := deps.ParseConstraints(in)
+		require.Error(t, err, "ParseConstraints(%q)", in)
+	}
+}
+
 func TestParseConstraints_Empty(t *testing.T) {
 	t.Parallel()
 
@@ -169,6 +187,10 @@ func TestMatch_TwiddleWakka(t *testing.T) {
 		// glr-wik: an explicit "-0" revision is enforced (0 is truthy upstream).
 		{"1.2-0", "~> 1.2-0", true},
 		{"1.2-5", "~> 1.2-0", false},
+		// A candidate without a revision fails a requested one, even -0
+		// (vers.lua:172-173: nil ~= 0).
+		{"1.2", "~> 1.2-0", false},
+		{"1.2.3", "~> 1.2.3-1", false},
 	}
 	for _, tc := range cases {
 		v, _ := deps.ParseVersion(tc.v)

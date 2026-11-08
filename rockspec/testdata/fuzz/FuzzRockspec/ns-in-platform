@@ -1,0 +1,9 @@
+go test fuzz v1
+string("3.0")
+string("foo")
+string("1.0-1")
+string("https://example.com/foo-1.0.tar.gz")
+string("user/bar")
+string("builtin")
+string("foo")
+byte('\x09')

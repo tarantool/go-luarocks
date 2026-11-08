@@ -6,6 +6,9 @@ import rocks "github.com/tarantool/go-luarocks"
 // package so white-box tests can exercise them while the test files
 // themselves stay in `_test` packages (testpackage).
 
+// ParseReportingOverlap exposes parse for the differential tests.
+func ParseReportingOverlap(b []byte) (any, bool, error) { return parse(b) }
+
 // LoadDepList exposes loadDepList for external tests.
 func LoadDepList(v any) ([]rocks.Dep, error) { return loadDepList(v) }
 

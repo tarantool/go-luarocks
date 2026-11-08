@@ -19,6 +19,41 @@ func TestParseVersion_Numeric(t *testing.T) {
 	require.Equal(t, []float64{1, 2, 3}, v.Components)
 }
 
+// TestParseVersion_UnicodeSpaceIsNoSpace checks that only Lua's %s
+// whitespace is trimmed: upstream cannot parse a version with a Unicode
+// space around it.
+func TestParseVersion_UnicodeSpaceIsNoSpace(t *testing.T) {
+	t.Parallel()
+
+	for _, in := range []string{"1.0\u00a0", "\u00851.0", "1.0\u3000"} {
+		_, err := deps.ParseVersion(in)
+		require.Error(t, err, "ParseVersion(%q)", in)
+	}
+
+	v, err := deps.ParseVersion("\v\f1.0")
+	require.NoError(t, err)
+	assert.Equal(t, []float64{1, 0}, v.Components)
+}
+
+// TestParseVersion_RevisionOnly checks that "-1" parses to no components and
+// revision 1, as upstream parses it, so it neither equals "0-1" nor differs
+// from "-1".
+func TestParseVersion_RevisionOnly(t *testing.T) {
+	t.Parallel()
+
+	v, err := deps.ParseVersion("-1")
+	require.NoError(t, err)
+	assert.Empty(t, v.Components)
+	assert.True(t, v.HasRevision)
+	assert.Equal(t, 1, v.Revision)
+
+	zero, err := deps.ParseVersion("0-1")
+	require.NoError(t, err)
+	assert.False(t, deps.Equal(v, zero), "-1 vs 0-1")
+	assert.Equal(t, 0, deps.Compare(v, zero), "-1 vs 0-1 orders equal")
+	assert.True(t, deps.Equal(v, v))
+}
+
 func TestParseVersion_NoRevision(t *testing.T) {
 	t.Parallel()
 
