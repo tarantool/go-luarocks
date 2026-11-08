@@ -54,9 +54,9 @@ const (
 	// default (zero value) and serves all eight currently-implemented write
 	// operations.
 	BackendNative Backend = iota
-	// BackendLua selects the gopher-lua backend, which boots an embedded
-	// LuaRocks VM lazily on the first write call and serves every upstream
-	// LuaRocks command.
+	// BackendLua selects the gopher-lua backend, which runs each write call
+	// in a fresh embedded LuaRocks VM and serves every upstream LuaRocks
+	// command.
 	BackendLua
 )
 

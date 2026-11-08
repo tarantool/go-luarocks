@@ -7,11 +7,12 @@
 // regardless of backend; the write set is the Engine interface (engine.go).
 //
 // Construct via New(cfg, opts...): the default backend is BackendNative,
-// WithBackend(BackendLua) selects the embedded gopher-lua VM (booted lazily on
-// the first write operation). Per-operation option structs (InstallOpts,
-// BuildOpts, SearchOpts, ...) mirror the upstream CLI flags; Exec is the raw
-// escape hatch that runs an arbitrary `luarocks` argv through the embedded
-// dispatcher (BackendLua only).
+// WithBackend(BackendLua) selects the embedded gopher-lua backend, which runs
+// each write operation in a fresh VM (none exists until the first one).
+// Per-operation option structs (InstallOpts, BuildOpts, SearchOpts, ...)
+// mirror the upstream CLI flags; Exec is the raw escape hatch that runs an
+// arbitrary `luarocks` argv through the embedded dispatcher (BackendLua
+// only).
 //
 // Why this lives in a sub-package rather than at the module root:
 //
@@ -27,12 +28,12 @@
 // Subsystem references:
 //
 //   - rockspec.Eval / MergePlatforms / RuntimePlatforms / Validate
-//   - fetch.Fetch / FetchWith
+//   - fetch.FetchWith / Sources / File
 //   - build.RunBackend
 //   - tree.Open / tree.Tree.Deploy / tree.Tree.Which
 //   - manif.FileStore (default ManifestStore)
 //   - deps.Resolve
-//   - remote.NewIndex / remote.NewOrderedIndex (default RemoteIndex): each
+//   - remote.NewIndexes / remote.NewOrderedIndex (default RemoteIndex): each
 //     entry of Config.Servers is dispatched by its own form, so a rock server
 //     may be a local directory (`/srv/rocks`, `file:///srv/rocks`) as well as
 //     an HTTP(S) URL, and the list is queried in configuration order,

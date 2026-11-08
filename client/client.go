@@ -141,8 +141,8 @@ func New(cfg rocks.Config, opts ...Option) (*Rocks, error) {
 
 	switch r.backend {
 	case BackendLua:
-		// The gopher-lua backend. Boot is lazy: newLuaEngine does not
-		// touch the VM here; the LState is created on first write call. The
+		// The gopher-lua backend. newLuaEngine does not create a VM here;
+		// the first write call warms one, and every call gets its own. The
 		// native engine is still constructed above (reads use r.store
 		// regardless of backend) — harmless if its write methods go
 		// unused for the lua backend.

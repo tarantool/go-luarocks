@@ -102,9 +102,11 @@ backend. Two backends exist:
   plus `List`/`Show`/`Which`, and returns `rocks.ErrNotImplemented` for the
   other upstream commands.
 - **lua** — `client.New(cfg, client.WithBackend(client.BackendLua))`. Runs
-  vendored upstream LuaRocks 3.9.2 through `gopher-lua` (the `LState` boots
-  lazily on first use), giving full upstream command coverage. This is the
-  reference for correct behavior.
+  vendored upstream LuaRocks 3.9.2 through `gopher-lua`, running each
+  operation in a fresh VM that is discarded afterwards (the embedded modules
+  are compiled once per process and the next VM is warmed in the background),
+  giving full upstream command coverage. This is the reference for correct
+  behavior.
 
 Reads (`List`/`Show`/`Which`) always go through the native tree reader
 regardless of backend.
@@ -175,12 +177,12 @@ and linters locally.
 This project is licensed under the BSD 2-Clause License – see the
 [LICENSE](LICENSE) file for details.
 
-[ci-badge]: https://github.com/tarantool/go-luarocks/actions/workflows/ci.yml/badge.svg?branch=develop
+[ci-badge]: https://github.com/tarantool/go-luarocks/actions/workflows/ci.yml/badge.svg?branch=master
 [ci-url]: https://github.com/tarantool/go-luarocks/actions/workflows/ci.yml
 [godoc-badge]: https://pkg.go.dev/badge/github.com/tarantool/go-luarocks.svg
 [godoc-url]: https://pkg.go.dev/github.com/tarantool/go-luarocks
-[coverage-badge]: https://coveralls.io/repos/github/tarantool/go-luarocks/badge.svg?branch=develop
-[coverage-url]: https://coveralls.io/github/tarantool/go-luarocks?branch=develop
+[coverage-badge]: https://coveralls.io/repos/github/tarantool/go-luarocks/badge.svg?branch=master
+[coverage-url]: https://coveralls.io/github/tarantool/go-luarocks?branch=master
 [telegram-badge]: https://img.shields.io/badge/Telegram-join%20chat-blue.svg
 [telegram-en-url]: http://telegram.me/tarantool
 [telegram-ru-url]: http://telegram.me/tarantoolru

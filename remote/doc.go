@@ -24,10 +24,11 @@
 // zipped and plain manifest-<lua_version>, then manifest, then the
 // Go-specific manifest-<lua_version>.json), decoding, the arch filter, the
 // artifact preference (.rock over .src.rock over bare .rockspec), manifest
-// caching per (server, namespace) for the life of the value, and — because
-// callers branch on it — error classification: a rock the manifest does not
-// list is an empty, error-free result, while an unusable server is a non-nil
-// error.
+// caching per (server, namespace) for the life of the value — and beyond it
+// when IndexOptions.Cache hands several indexes one ManifestCache, as the
+// client does for its lifetime — and, because callers branch on it, error
+// classification: a rock the manifest does not list is an empty, error-free
+// result, while an unusable server is a non-nil error.
 //
 // The package lives outside the root rocks package because it consumes
 // manif (Lua-source manifest parser) which itself imports rocks for the

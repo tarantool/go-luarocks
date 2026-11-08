@@ -8,6 +8,9 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ## [Unreleased]
 
+Requires Go 1.26 or later, which `golang.org/x/crypto` v0.56.0 declares; that
+version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
+
 ### Added
 
 - deps: Version parsing, dependency constraint matching, and a transitive
@@ -17,150 +20,61 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 - manif: A manifest reader and writer compatible with the upstream LuaRocks
   manifest format.
 - fetch: Source fetch backends for `http(s)`, `git`/`git+https`/`git+ssh`,
-  and `file://` sources.
+  and `file://` sources. `Sources` returns a `Result` that says whether the
+  path is already the source root. `File` retrieves a single file into a
+  directory without unpacking it (upstream `download.lua`'s `get_file`).
+- fetch, remote: HTTP requests share process-wide transports, cloned from
+  `http.DefaultTransport`, so connections are reused and `HTTP_PROXY`,
+  `HTTPS_PROXY` and `NO_PROXY` are honoured.
 - tree: On-disk rock tree layout, deployment, conflict detection, and
-  `which`-style lookup.
+  `which`-style lookup. A `lua`/`lib` subtree installed by any build backend
+  is relocated into the deploy dirs, and `ModuleIndex` derives a rock's
+  modules from its `rock_manifest`, as upstream `repos.package_modules` does.
 - build: Build backends — `builtin`, `cmake`, `make`, and `command`.
-- remote: An HTTP client for the LuaRocks remote manifest index.
-- client: A `Rocks` facade with a pure-Go native engine and a vendored
-  upstream LuaRocks 3.9.2 engine (driven through `gopher-lua`), selectable
-  per client, exposing `Install`, `Build`, `Make`, `Pack`, `Unpack`, `List`,
-  `Show`, and `Which`.
-- remote: A file-backed registry index, so a rock server may be a local
-  directory (`/srv/rocks` or `file:///srv/rocks`) as well as an HTTP(S)
-  endpoint — the offline case upstream serves with
-  `luarocks --only-server=/path/to/repo`. `NewIndex` picks the index a
-  server's form implies, `NewIndexes` does it for a whole configured server
-  list, and `OrderedIndex` queries any mix of the two in order.
-- client: `Config.Servers` and `InstallOpts.Servers` accept a local directory
-  wherever they accept an HTTP(S) URL, so `Install` can resolve and install
-  entirely offline from a mirror on disk.
+  `LUA_BINDIR` is derived from `Tarantool.Executable` when it has a
+  directory component, so a flat Tarantool SDK with no `bin/` works.
+- remote: Indexes for rock servers that are HTTP(S) endpoints or local
+  directories (`/srv/rocks` or `file:///srv/rocks`) — the offline case
+  upstream serves with `luarocks --only-server=/path/to/repo`. `NewIndex`
+  picks the index a server's form implies, `NewIndexes` does it for a whole
+  server list, and `OrderedIndex` queries any mix of the two in order,
+  first-found-wins. A `ManifestCache`, set through `IndexOptions.Cache`,
+  shares fetched manifests between indexes.
 - remote: `Search`, a port of upstream `search.search_repos` over the same
   manifest loaders the indexes use — substring or exact name matching,
   version constraints, the arch filter, a cross-server merge, the
   exact-version early stop, and the rocks the Lua VM provides.
+- client: A `Rocks` facade with a pure-Go native engine (the default) and a
+  vendored upstream LuaRocks 3.9.2 engine (driven through `gopher-lua`),
+  selectable per client, exposing `Install`, `Build`, `Make`, `Pack`,
+  `Unpack`, `Remove`, `List`, `Show`, and `Which` on both. The lua engine
+  also serves `Purge`, `Lint`, `NewVersion`, `WriteRockspec`, `Doc`,
+  `Test`, `Config`, `Upload`, `InitProject`, `Admin`, and `Exec` (the full
+  upstream CLI); the native engine returns `rocks.ErrNotImplemented` for
+  them.
+- client: `Config.Servers` and `InstallOpts.Servers` accept a local
+  directory wherever they accept an HTTP(S) URL, so `Install` can work
+  entirely offline from a mirror on disk. A server list is queried in
+  configuration order, first-found-wins, and a client fetches the manifest
+  of each server once for its lifetime.
+- client: The native backend installs a rock from the artifact the index
+  chose, as upstream `install` does: a `.all.rock` or host-arch `.rock` is
+  deployed as built, a `.src.rock` is built from its bundled sources, and
+  only a bare `.rockspec` fetches `source.url`. The tree manifest's
+  `modules` index is derived from each rock's deployed `rock_manifest`, so
+  it lists the modules of `cmake`, `make` and `command` rocks too.
+- client: The lua backend runs each operation in its own VM, so no state
+  carries over between calls. It honours `Config.Servers`, reads
+  `/etc/luarocks/config-5.1.lua` (`LUAROCKS_SYSCONFDIR` overrides it), and
+  loads Lua modules only from its embedded copy and the rock trees, never
+  from the current directory, `$LUA_PATH` or system directories. The error
+  of a failed command carries the message LuaRocks printed.
 - client: `Search` on the native backend (upstream `luarocks search`), with
   `--source` / `--binary` / `--all` and results identical to the lua
-  backend's. `SearchResult` gains `Arch` and `Namespace`, both filled by
-  either backend, so a caller can tell a rockspec from an installable
-  binary rock.
-- fetch: `File`, a raw single-file retrieval (upstream `download.lua`'s
-  `get_file`) that copies or downloads one file into a directory under its
-  own basename and never unpacks it. `Fetch` and `Sources` expand every
-  recognized archive, so they cannot deliver a `.rock` — a zip under another
-  extension — as a file.
+  backend's. `SearchResult` carries `Arch` and `Namespace`, so a caller can
+  tell a rockspec from an installable binary rock.
 - client: `Download` on the native backend (upstream `luarocks download`),
   with `--source` / `--rockspec` / `--arch` / `--all` and the same files,
   bytes and returned paths as the lua backend. The three arch flags are
   mutually exclusive, as upstream's parser makes them.
 - Runnable, godoc-rendered examples across all public packages.
-
-### Changed
-
-- Minimum Go version is 1.26. `golang.org/x/crypto` v0.56.0, which fixes
-  GO-2026-6354 and GO-2026-6355 (ssh channel deadlock DoS, reachable through
-  go-git's ssh transport), declares `go 1.26.0`. `go-git` is bumped to
-  v5.19.2 for GO-2026-6213 and GO-2026-6214 (worktree symlink following and
-  reference-name path traversal).
-- fetch: `Backend.Fetch` returns a `Result` (the path plus a `SourceRoot`
-  flag) instead of a bare path, and `fetch.Sources` exposes it. `Fetch` and
-  `FetchWith` keep their path-only signatures.
-- client: A multi-server `Config.Servers` / `InstallOpts.Servers` list is now
-  queried in configuration order, first-found-wins, instead of merging every
-  server's offering of a version before picking an arch. A merge cannot span
-  transports, and first-found-wins is the rule tt's resolver already applies
-  over the same list. Behaviour for a single configured server is unchanged.
-
-### Fixed
-
-- build: `LUA_BINDIR` is derived from `Tarantool.Executable` when that carries
-  a directory component, instead of always being `<Prefix>/bin`. A Tarantool
-  SDK is flat — the binary sits at the SDK root and there is no `bin/` under
-  the prefix — so upstream Lua that runs `<LUA_BINDIR>/tarantool` failed and
-  carried on: `bin` scripts were deployed unwrapped and the LuaJIT version
-  read as nil, letting a pack report success with a changed result.
-- client: The lua backend no longer carries state between operations. It ran
-  every command in one long-lived VM, where upstream's per-command state
-  outlived the call that set it: configuration flags that could only be
-  switched on, a server list that grew with each call, rollbacks that fired
-  again during a later command, and manifest caches that never invalidated —
-  including the one for the local tree, which the native backend can change
-  underneath. Each operation now runs in its own VM.
-- client: The lua backend honours `Config.Servers`. It previously queried only
-  its built-in default plus whatever a single call passed in, so two clients
-  built from the same configuration reached different servers depending on
-  which backend they used. A configured list now replaces the default rather
-  than being prepended to it, and the backend no longer writes a generated
-  configuration file into a temporary directory.
-- client: The lua backend reads the system configuration from
-  `/etc/luarocks/config-5.1.lua` again. The embedded tree is compiled under
-  its embed path, and upstream `cfg.init`, given no hardcoded `SYSCONFDIR`,
-  derives the directory from `cfg.lua`'s chunk name — which made it the
-  relative `src/src`, so the file was never read. `hardcoded.lua` now names
-  `/etc/luarocks`, as an upstream installer would; `LUAROCKS_SYSCONFDIR`
-  still overrides it.
-- tree: Relocation of a backend-installed `lua`/`lib` subtree now runs for every
-  `build.type`, not only `make`. A `cmake` or `command` rock installing into
-  `$(LUADIR)`/`$(LIBDIR)` left its modules under
-  `share/tarantool/rocks/<name>/<version>/lua/`, where no loader looks, and
-  recorded nothing in the `rock_manifest`.
-- client: The tree manifest's `modules` index is derived from the deployed
-  `rock_manifest` (`tree.ModuleIndex`, mirroring upstream
-  `repos.package_modules`) instead of the rockspec's `build.modules`, which only
-  the `builtin` backend populates. A `cmake`, `make` or `command` rock was
-  written to the manifest with `modules = {}`, so neither this library nor
-  `luarocks` could tell what it provided. A `build.install.lua` entry is now
-  indexed as a module too, matching upstream.
-- client: Building a rock whose source is a git repository no longer descends
-  into a subdirectory of the checkout. The archive base-directory heuristic
-  (upstream `fetch.find_base_dir`) was applied to every fetch result, so a
-  clone holding a directory named like the repository — `tarantool/checks`
-  ships `checks/` next to its `CMakeLists.txt` — was entered one level too
-  deep and the build failed. Backends now report whether the path they return
-  is already the source root, which also covers a `file://` source that copies
-  a local tree.
-- client: The native backend installs a rock from the artifact the index
-  chose for it, as upstream `install` does. It read only the rockspec out of
-  every `.rock` and `.src.rock` and built from `source.url`, so a binary rock
-  was rebuilt from its repository and a source rock ignored the sources it
-  carries: a directory server mirroring rock files still went to the network
-  for every rock, and a cmake rock shipped as `.all.rock` needed cmake. A
-  `.all.rock` or a host-arch `.rock` is now deployed as built, a `.src.rock`
-  is built from its bundled checkout or archive, and only a bare `.rockspec`
-  fetches `source.url`. The artifact the resolver fetched to read the
-  rockspec is reused rather than downloaded again.
-- client: A client fetches the manifest of a server once. Every `Install`
-  that named its own `Servers`, and every `Search` and `Download`, built a
-  fresh index and downloaded every manifest of the list again, so installing
-  a resolved closure rock by rock — what tt does — fetched the registry
-  manifests once per rock. The indexes of a client now share a
-  `remote.ManifestCache`, which `remote.IndexOptions.Cache` exposes to other
-  callers.
-- fetch, remote: HTTP requests share two process-wide transports, one
-  verifying TLS and one skipping it for `InsecureServers`, cloned from
-  `http.DefaultTransport`. Each request used to build a zero
-  `http.Transport`, so every manifest, rockspec and source download opened a
-  new TCP connection and TLS handshake — to rocks.tarantool.org and to the S3
-  bucket it redirects to — and `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` were
-  ignored. An error response is now read before its body is closed, so a 404
-  of a manifest probe no longer drops the connection either.
-- client: The error of a failed lua backend command carries the message
-  LuaRocks printed, from its last `Error:` line on. The captured output went
-  only to the logger, so the error said `exited with code 1` and not why —
-  whether no server had the rock, a header was missing or a download failed.
-- client: The lua backend no longer loads Lua modules from the current
-  directory, `$LUA_PATH` or `/usr/local/share/lua/5.1`, nor the optional
-  ones LuaRocks probes for from a rock tree. Its VM kept gopher-lua's default
-  `package.path`, and LuaRocks requires modules the engine does not embed —
-  `luarocks.fs.linux`, `lfs`, `socket.http` and every
-  `luarocks.cmd.external.*` it finds on the path — so a file of that name in
-  the directory a command ran in was executed, and a system LuaRocks under
-  `/usr/local` broke the backend (tarantool/tt#847). The VM now starts with
-  an empty `package.path`, and the optional modules (`lfs`, `socket.http`,
-  `md5`, the platform fs modules, ...) are preloaded stubs that fail the way
-  a missing module does, so a repository's committed `.rocks` cannot supply
-  them either. An external command is loaded only when it is the command
-  being run (or the subject of `help`), not during every command, and plain
-  `help` no longer lists external commands. LuaRocks still appends the rock
-  trees to the path, so a build backend or an external command installed
-  into a tree keeps working, and `path` prints the same `LUA_PATH` as before.

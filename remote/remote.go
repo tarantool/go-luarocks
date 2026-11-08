@@ -35,15 +35,16 @@ const (
 // HTTPRemoteIndex is the default rocks.RemoteIndex backed by one or more
 // rock servers reachable over HTTP/HTTPS.
 //
-// Manifest filename probe order, per server:
+// Manifest filename probe order, per server (see manifestProbes):
 //
-//  1. manifest-<lua_version>.json   (parsed as JSON)
-//  2. manifest-<lua_version>         (Lua-source via manif.Parse)
-//  3. manifest                        (Lua-source)
+//  1. manifest-<lua_version>.zip    (zipped Lua-source manifest-<lua_version>)
+//  2. manifest-<lua_version>        (Lua-source via manif.Parse)
+//  3. manifest                      (Lua-source)
+//  4. manifest-<lua_version>.json   (parsed as JSON; Go-specific, kept last)
 //
-// HTTPRemoteIndex caches the parsed manifest per (server, lua-version)
-// pair for the lifetime of the struct so the resolver does not re-fetch
-// for every Query call.
+// HTTPRemoteIndex caches the parsed manifest per (server, namespace) pair
+// for the lifetime of the struct so the resolver does not re-fetch for
+// every Query call; a shared Cache extends that across indexes.
 type HTTPRemoteIndex struct {
 	// Servers is the ordered list of base URLs (with or without trailing
 	// slash) to consult. Empty is an error from Query.
