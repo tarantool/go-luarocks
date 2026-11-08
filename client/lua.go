@@ -1,8 +1,9 @@
 package client
 
 // luaEngine is the gopher-lua backend (BackendLua). It boots the embedded
-// Tarantool LuaRocks fork (3.9.2) into a single, long-lived gopher-lua VM and
-// dispatches write operations through extra/wrapper.lua's exec() entry point.
+// Tarantool LuaRocks fork (3.9.2) into a fresh gopher-lua VM for every
+// dispatch and runs write operations through extra/wrapper.lua's exec() entry
+// point.
 //
 // Environment-override policy:
 //
@@ -30,12 +31,14 @@ package client
 // free of on-disk state is why: a generated file needs a temp dir, an owner and
 // a cleanup path, and the engine has no public Close to hang one on.
 //
-// Boot is lazy: newLuaEngine does not touch the VM; the LState is created
-// and populated on the first call() via bootOnce. The LState is single-threaded:
-// concurrent call()s serialize through e.mu. Only Lua that arrived via
-// the embedded FS is executed — embedded module bytes via LoadString plus the
-// fixed wrapper dispatch string via DoString; no caller-supplied Lua source and
-// no loadfile/dofile exposure.
+// VM lifecycle: newLuaEngine creates no VM. Each dispatch takes a warm VM from
+// the pool (or warms one inline), runs on it alone and closes it, so
+// concurrent dispatches never share a VM; see the luaEngine type comment.
+//
+// Only Lua that arrived via the embedded FS is executed — embedded modules,
+// compiled once per process and preloaded into each VM (compiledModules),
+// plus the fixed wrapper dispatch string via DoString; no caller-supplied Lua
+// source and no loadfile/dofile exposure.
 
 import (
 	"bytes"
@@ -150,8 +153,7 @@ type luaEngine struct {
 }
 
 // newLuaEngine constructs the engine and populates the env-override map from
-// cfg.Tarantool. It does NOT boot the LState — boot is lazy on first
-// call().
+// cfg.Tarantool. It creates no VM: the first dispatch warms one (acquire).
 func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logger) *luaEngine {
 	envOverride := map[string]string{}
 	// Only add an entry when the source value is non-empty so the host-env
@@ -609,8 +611,8 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 
 	// Intercept os.exit. The vendored LuaRocks CLI terminates every command
 	// path with os.exit (luarocks/cmd.lua), which gopher-lua maps to Go's
-	// os.Exit — fatal for our in-process VM (one long-lived LState for the
-	// engine lifetime). Replace it with a function that raises a Lua error
+	// os.Exit — fatal for our in-process VM, which would take the host
+	// process down with it. Replace it with a function that raises a Lua error
 	// carrying the requested exit code (prefixed with osExitSentinel) so the
 	// surrounding DoString unwinds back into call() instead of killing the
 	// process. call() maps code 0 to a nil error and any non-zero code to a
@@ -910,11 +912,11 @@ func quoteLua(s string) string {
 // must reproduce upstream's terminal output verbatim; the capturing
 // callViaState exists for programmatic methods that parse the output.
 //
-
 // progname is the program name LuaRocks prints in its own usage/help, letting
 // the caller (e.g. tt) show "tt rocks" instead of the default progname.
 //
-// Like callViaState it serializes on e.mu and lazily boots on first use.
+// Like callViaState it runs on a VM of its own from acquire and retires it
+// afterwards.
 // Exit-code handling matches callViaState: os.exit(0) and a clean return
 // are success, any other code is surfaced as an error.
 func (e *luaEngine) callRaw(progname string, argv []string) error {

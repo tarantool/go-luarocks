@@ -129,9 +129,9 @@ func ExampleRocks_Purge() {
 	// Output: not implemented: true
 }
 
-// ExampleWithBackend selects the gopher-lua backend, which boots an embedded
-// LuaRocks VM lazily on the first write operation. Construction itself never
-// touches the VM, so it succeeds before the tree even exists.
+// ExampleWithBackend selects the gopher-lua backend, which runs each write
+// operation in a fresh embedded LuaRocks VM. Construction itself creates no
+// VM, so it succeeds before the tree even exists.
 func ExampleWithBackend() {
 	r, err := client.New(
 		rocks.Config{Tree: "/opt/tt/.rocks", WorkingDir: "."},

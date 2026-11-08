@@ -1,10 +1,13 @@
-// Package rocks is a pure-Go implementation of the LuaRocks subset needed
-// to manage rocks inside a Tarantool installation.
+// Package rocks is the root of go-luarocks, a Go library that manages rocks
+// inside a Tarantool installation. It ships two backends, selectable per
+// client: a pure-Go native engine (the default) implementing the LuaRocks
+// subset Tarantool needs, and vendored upstream LuaRocks 3.9.2 run through
+// gopher-lua.
 //
-// The library produces on-disk artifacts (tree layout, manifest files,
-// .rock archives) that are byte-equal to what upstream LuaRocks 3.9.2 would
-// produce for the same rock at the same version against a Tarantool target.
-// A rock installed by lib/luarocks is queryable by upstream
+// The native backend deploys the same files as upstream LuaRocks 3.9.2
+// would for the same rock at the same version against a Tarantool target:
+// everything outside share/tarantool/rocks/ is byte-equal, compiled modules
+// aside. A rock installed by this library is queryable by upstream
 // LuaRocks's `luarocks show` and vice versa.
 //
 // This root package holds the shared vocabulary the sub-packages exchange:

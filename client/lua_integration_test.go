@@ -164,13 +164,12 @@ build = { type = "builtin", modules = { ["dep"] = "dep.lua" } }
 	require.True(t, ok, "Which(dep) after tarantool-dep make")
 }
 
-// TestLuaEngine_ReusedLState_SequentialMakes validates the reused-LState design: unlike tt
-// (which opens a fresh lua.NewState per command), our engine reuses one cached
-// LState for the *Rocks lifetime. The tarantool/luarocks fork caches cfg
-// after first init (cfg.initialized), so a reused LState could leak state across
-// calls. This runs two Makes of different rocks on ONE engine and asserts both
-// deploy — the cross-call check the original MutexSerializes test (two identical
-// `help` calls) never exercised.
+// TestLuaEngine_ReusedLState_SequentialMakes runs two Makes of different rocks
+// on ONE engine and asserts both deploy. The name predates the current design:
+// the engine once reused one LState for the *Rocks lifetime, where cfg cached
+// after first init (cfg.initialized) could leak across calls. Each dispatch now
+// gets its own VM, and this stays as the cross-call check the
+// MutexSerializes test (two identical `help` calls) never exercised.
 func TestLuaEngine_ReusedLState_SequentialMakes(t *testing.T) {
 	ttBin, err := exec.LookPath("tarantool")
 	if err != nil {
