@@ -39,9 +39,16 @@ func (r RockRef) String() string {
 // the tree manifest does not list.
 var ErrNotInstalled = errors.New("rock is not installed")
 
-// ErrLocked is wrapped by the error of Update, and of the client's writes to
-// a tree, when another change holds the tree's lock until the context ends.
+// ErrLocked is wrapped by the error of an operation that takes a tree's lock
+// — Update and Rebuild, exclusive; Inspect, Tree.View, Check and Tx.Graft,
+// of its source, shared; and the client's writes to a tree — when another
+// holds it until the context ends: a change, or for a change, a reader.
 var ErrLocked = errors.New("rock tree is locked by another change")
+
+// ErrConflict is wrapped by the error of Tx.Graft when a rock version it is to
+// install is installed already with other contents: a rock_manifest that
+// differs from the one it brings.
+var ErrConflict = errors.New("rock version is installed with other contents")
 
 // lockError is the error of taking a tree's lock: one wrapping ErrLocked when
 // the lock stayed held.
@@ -59,6 +66,10 @@ func lockError(err error) error {
 type Tx struct {
 	tree *Tree
 	m    *rocks.Manifest
+
+	// ctx is the context of the Update, which bounds the waits for another
+	// tree's lock a Tx method takes.
+	ctx context.Context //nolint:containedctx // a Tx lives only while its Update runs
 
 	// view is the View of m, until m changes.
 	view *View
@@ -87,23 +98,29 @@ type Tx struct {
 // the client's writes to it: they would wait for the lock fn holds, until
 // ctx ends, or for ever; tx.View is the view fn has.
 func (t *Tree) Update(ctx context.Context, fn func(tx *Tx) error) error {
+	return t.update(ctx, "tree.Update", t.readManifest, fn)
+}
+
+// update runs fn as Update does, over the manifest load returns, under the
+// exclusive lock; op names the operation in its errors.
+func (t *Tree) update(ctx context.Context, op string, load func() (*rocks.Manifest, error), fn func(tx *Tx) error) error {
 	if err := os.MkdirAll(t.RocksDir(), dirPerm); err != nil {
-		return fmt.Errorf("tree.Update: mkdir %q: %w", t.RocksDir(), err)
+		return fmt.Errorf("%s: mkdir %q: %w", op, t.RocksDir(), err)
 	}
 
 	lock, err := treelock.Exclusive(ctx, t.RocksDir())
 	if err != nil {
-		return fmt.Errorf("tree.Update: %w", lockError(err))
+		return fmt.Errorf("%s: %w", op, lockError(err))
 	}
 
 	defer lock.Unlock()
 
-	m, err := t.readManifest()
+	m, err := load()
 	if err != nil {
 		return err
 	}
 
-	tx := &Tx{tree: t, m: m}
+	tx := &Tx{tree: t, m: m, ctx: ctx}
 	fnErr := fn(tx)
 	tx.done = true
 
@@ -144,7 +161,9 @@ func (tx *Tx) treeFor() *Tree {
 // the new one's files; then it runs deploy, which puts the rock's files into
 // the tree — tree.Deploy, after a build — given a copy of the tree whose
 // Providers follow the transaction; then it writes the rock_manifest deploy
-// returns and records the rock in the tree manifest.
+// returns and records the rock in the tree manifest. The copy has no BinWrap
+// when the rockspec sets deploy.wrap_bin_scripts = false, so its commands are
+// copied verbatim, as upstream repos.should_wrap_bin_scripts decides.
 //
 // The entry recorded indexes the modules and commands of the rock_manifest
 // (ModuleIndex, CommandIndex), adds the rock to the provider list of each in
@@ -158,6 +177,9 @@ func (tx *Tx) Deploy(spec *rocks.Rockspec, deploy func(t *Tree) (*rocks.RockMani
 	}
 
 	t := tx.treeFor()
+	if !wrapsCommands(spec) {
+		t.BinWrap = nil
+	}
 
 	if _, err := os.Stat(t.InstallDir(spec.Package, spec.Version)); err == nil {
 		if err := tx.deleteVersion(spec.Package, spec.Version); err != nil {

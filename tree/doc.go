@@ -38,6 +38,16 @@
 // holds its plain path follows the manifest's provider lists, as Deploy and
 // DeleteVersion decide it.
 //
+// The changes a tool used to make to a tree by hand have a Tx method each:
+// InstallStaged deploys a directory laid out as an unpacked binary rock as
+// the native client installs a .rock, Graft installs the rocks another tree
+// has on disk as their binary rocks would install, without trusting its
+// manifest, and Rewrap rewrites the command wrappers for the tree's root and
+// BinWrap. Tree.Rebuild rewrites the tree manifest from the rocks on disk,
+// and Tree.Check reports, without changing anything, what is wrong with a
+// tree: files missing, modified or at the wrong spot, rock dirs and manifest
+// entries without each other, files no rock owns, and stale wrappers.
+//
 // This package uses forward-slash Unix paths exclusively via
 // path/filepath; no Windows-specific handling.
 package tree

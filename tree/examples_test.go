@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/rockspec"
 	"github.com/tarantool/go-luarocks/tree"
 )
 
@@ -153,4 +154,95 @@ func ExampleTree_Update() {
 	// demo/1.0-1 demo.lua at share/tarantool/demo_1_0_1-demo.lua plain: false
 	// pruned: [demo/1.0-1]
 	// installed: [demo/2.0-1]
+}
+
+// exampleRockspec is the rockspec of the rock the examples stage.
+const exampleRockspec = `package = "app"
+version = "1.0-1"
+source = { url = "file://localhost/app.tar.gz" }
+build = { type = "none" }
+`
+
+// ExampleTx_InstallStaged installs files laid out as an unpacked binary rock
+// as a rock of their own, so the tree's manifest knows them, checks the tree,
+// and grafts the rock into another tree, which reports a file no rock owns.
+func ExampleTx_InstallStaged() {
+	dir, err := os.MkdirTemp("", "rocks")
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	stage := filepath.Join(dir, "stage")
+	for rel, body := range map[string]string{"lua/app/init.lua": "return {}\n", "lua/app/version.lua": "return '1.0'\n"} {
+		p := filepath.Join(stage, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			panic(err)
+		}
+
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			panic(err)
+		}
+	}
+
+	spec, err := rockspec.EvalSource("app-1.0-1.rockspec", []byte(exampleRockspec), rocks.RockspecConfig{})
+	if err != nil {
+		panic(err)
+	}
+
+	project, err := tree.Open(rocks.Config{Tree: filepath.Join(dir, "project")})
+	if err != nil {
+		panic(err)
+	}
+
+	ctx := context.Background()
+
+	err = project.Update(ctx, func(tx *tree.Tx) error {
+		rm, err := tx.InstallStaged(spec, stage, tree.StagedOpts{RequirePlain: true})
+		fmt.Println("modules:", tree.ModuleIndex(rm))
+
+		return err
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	stray := filepath.Join(project.DeployLuaDir(), "stray.lua")
+	if err := os.WriteFile(stray, []byte("return 1\n"), 0o600); err != nil {
+		panic(err)
+	}
+
+	report, err := project.Check(ctx, tree.CheckOpts{})
+	if err != nil {
+		panic(err)
+	}
+
+	for _, issue := range report.Issues {
+		rel, _ := filepath.Rel(project.Tree, issue.Path)
+		fmt.Println(issue.Kind, filepath.ToSlash(rel))
+	}
+
+	other, err := tree.Open(rocks.Config{Tree: filepath.Join(dir, "other")})
+	if err != nil {
+		panic(err)
+	}
+
+	err = other.Update(ctx, func(tx *tree.Tx) error {
+		grafted, err := tx.Graft(project.Tree, tree.GraftOpts{})
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("grafted:", grafted.Grafted, "untracked:", len(grafted.Untracked))
+
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	// Output:
+	// modules: map[app.init:app/init.lua app.version:app/version.lua]
+	// untracked share/tarantool/stray.lua
+	// grafted: [app/1.0-1] untracked: 1
 }

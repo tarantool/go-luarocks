@@ -237,6 +237,55 @@ func TestOps_StayInsideRoot(t *testing.T) {
 	assertOutsideUntouched(t, outside)
 }
 
+// TestWalkDir walks the root, reporting a link as an entry it does not
+// descend into, walks through a link that stays inside, and refuses one that
+// leads out.
+func TestWalkDir(t *testing.T) {
+	t.Parallel()
+
+	root, outside := layout(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "in", "f"), []byte("x"), 0o600))
+
+	walk := func(dir string) ([]string, error) {
+		var seen []string
+
+		err := safepath.WalkDir(root, dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			rel, err := filepath.Rel(root, p)
+			require.NoError(t, err)
+
+			if d.IsDir() {
+				rel += "/"
+			}
+
+			seen = append(seen, filepath.ToSlash(rel))
+
+			return nil
+		})
+
+		return seen, err
+	}
+
+	seen, err := walk(root)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"./", "in/", "in/f", "inlink", "out"}, seen)
+
+	seen, err = walk(filepath.Join(root, "inlink"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inlink/", "inlink/f"}, seen, "through a link that stays inside")
+
+	_, err = walk(filepath.Join(root, "out"))
+	require.ErrorIs(t, err, safepath.ErrEscapes, "through a link that leads out")
+
+	_, err = walk(outside)
+	require.ErrorIs(t, err, safepath.ErrEscapes, "a dir outside")
+
+	assertOutsideUntouched(t, outside)
+}
+
 // TestMkdirAll_CreatesRoot checks MkdirAll creates a missing root, which is
 // the caller's own directory.
 func TestMkdirAll_CreatesRoot(t *testing.T) {
