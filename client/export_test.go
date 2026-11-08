@@ -241,3 +241,9 @@ func PreloadPaths() []string {
 // AbsentModules returns the modules the engine answers with a failing stub
 // instead of their source.
 func AbsentModules() []string { return slices.Clone(luaAbsentModules) }
+
+// DeduceBaseDir exposes deduceBaseDir for the differential tests.
+func DeduceBaseDir(url string) string { return deduceBaseDir(url) }
+
+// SplitNamespacedName exposes splitNamespacedName for the differential tests.
+func SplitNamespacedName(arg string) (string, string) { return splitNamespacedName(arg) }

@@ -51,8 +51,8 @@ a machine that has only some of them. Set `GO_LUAROCKS_INTEGRATION_STRICT=1`
 to make a missing prerequisite fail the test instead, so a run that is meant
 to exercise the whole suite cannot pass by skipping it. The network is the
 exception: `GO_LUAROCKS_OFFLINE=1` declares a run offline by design, and the
-tests that need the network are then skipped even in strict mode. The CI `integration`
-job runs exactly this:
+tests that need the network are then skipped even in strict mode. The CI
+`integration` job runs exactly this:
 
 ```sh
 GO_LUAROCKS_INTEGRATION_STRICT=1 go test -tags integration,integration_luaengine \
@@ -107,6 +107,28 @@ scripts/test-in-docker.sh go test -count=1 -v ./build/...   # a custom command
 
 Override the pinned versions with `GO_VERSION`, `DEBIAN_SUITE`, or
 `TARANTOOL_VERSION`, e.g. `GO_VERSION=1.26.8 scripts/test-in-docker.sh`.
+
+### Differential tests
+
+The pure functions are checked against upstream LuaRocks itself: the
+`diff_fuzz_test.go` files in `deps`, `rockspec`, `manif` and `client` run each
+input through the Go implementation and through the vendored upstream Lua code
+(version and constraint parsing, dependency strings, rockspec loading,
+manifest reading and writing, source-directory and rock-name parsing), and the
+two must agree. The upstream side runs in a bare gopher-lua VM set up by
+`internal/luaref`, offline; its package comment lists the stubs it uses.
+
+Every target is a Go fuzz target, so a plain `go test` runs its seed corpus.
+To explore, fuzz one target at a time:
+
+```sh
+go test ./deps/ -run '^$' -fuzz '^FuzzParseVersion$' -fuzztime 60s -fuzzminimizetime 10s
+```
+
+A failing input is written to `<package>/testdata/fuzz/<target>/` and from
+then on runs with the seeds; commit it with the fix as the regression test.
+The `fuzz` workflow fuzzes every target weekly. `go test ./internal/luaref/`
+checks the harness itself.
 
 ## Examples
 
