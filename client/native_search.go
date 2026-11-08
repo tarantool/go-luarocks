@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -28,10 +27,6 @@ const luaDialect = "5.1"
 // result rather than a source one (cmd/search.lua
 // split_source_and_binary_results).
 const archAll = "all"
-
-// defaultLuaBinDir is hardcoded.lua's fallback for LUA_BINDIR when no
-// Tarantool prefix is configured.
-const defaultLuaBinDir = "/usr/bin"
 
 // luajitProbeTimeout bounds the one interpreter invocation used to learn the
 // LuaJIT version. It is deliberately short: the answer is a nicety (it names
@@ -206,10 +201,11 @@ func (e *nativeEngine) rocksProvided() map[string]string {
 		provided["luajit"] = ljv + "-1"
 	}
 
-	// Upstream reads TT_CLI_TARANTOOL_VERSION and keeps everything before the
-	// first dash, so a bare "3.9.0" with no revision yields no entry at all.
-	if before, _, ok := strings.Cut(e.cfg.Tarantool.Version, "-"); ok && before != "" {
-		provided["tarantool"] = before + "-1"
+	// The version Install resolves dependencies against, so a bare "3.9.0"
+	// provides tarantool 3.9.0-1 here too; upstream, which needs a dash after
+	// the version, provides none for it.
+	if v, ok := e.providedTarantool(); ok {
+		provided["tarantool"] = v.Raw
 	}
 
 	return provided
@@ -227,12 +223,7 @@ func (e *nativeEngine) rocksProvided() map[string]string {
 // context, so a cancelled search cannot poison the cached answer.
 func (e *nativeEngine) luajitVersion() string {
 	e.luajitOnce.Do(func() {
-		binDir := defaultLuaBinDir
-		if e.cfg.Tarantool.Prefix != "" {
-			binDir = filepath.Join(e.cfg.Tarantool.Prefix, "bin")
-		}
-
-		interp := filepath.Join(binDir, luaInterpreter)
+		interp := luaInterpreterPath(e.cfg)
 
 		ctx, cancel := context.WithTimeout(context.Background(), luajitProbeTimeout)
 		defer cancel()

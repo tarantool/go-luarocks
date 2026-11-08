@@ -58,6 +58,35 @@ const unpackDirMode = 0o750
 // wrappers, matching the tarantool/luarocks fork's hardcoded.LUA_INTERPRETER.
 const luaInterpreter = "tarantool"
 
+// defaultLuaBinDir is hardcoded.lua's fallback for LUA_BINDIR when neither a
+// Tarantool executable nor a prefix is configured.
+const defaultLuaBinDir = "/usr/bin"
+
+// luaInterpreterPath is the interpreter the native backend runs and bakes
+// into the command wrappers it deploys: Config.Tarantool.Executable when it
+// names a file by a path (made absolute, since a wrapper runs from anywhere),
+// else <Prefix>/bin/tarantool, else /usr/bin/tarantool. A flat Tarantool SDK
+// has its executable at <sdk>/tarantool and no bin/ at all, and tt may point
+// Executable outside the prefix, so <Prefix>/bin/tarantool alone named a file
+// that does not exist there. A bare command name ("tarantool", resolved
+// through PATH) names no file a wrapper could exec and falls through to the
+// prefix, as build.LuaBinDir does.
+func luaInterpreterPath(cfg rocks.Config) string {
+	if exe := cfg.Tarantool.Executable; exe != "" && filepath.Dir(exe) != "." {
+		if abs, err := filepath.Abs(exe); err == nil {
+			return abs
+		}
+
+		return exe
+	}
+
+	if cfg.Tarantool.Prefix != "" {
+		return filepath.Join(cfg.Tarantool.Prefix, "bin", luaInterpreter)
+	}
+
+	return filepath.Join(defaultLuaBinDir, luaInterpreter)
+}
+
 // defaultSysconfDir is upstream LuaRocks' cfg.sysconfdir fallback on Unix
 // (luarocks/core/cfg.lua) when neither LUAROCKS_SYSCONFDIR nor a detected
 // install prefix applies.
@@ -186,11 +215,9 @@ func (e *nativeEngine) resolvePlan(
 
 	resolveOpts := []deps.Option{deps.WithSpecFetcher(fetchSpec)}
 
-	if e.cfg.Tarantool.Version != "" {
-		if ttVer, verr := deps.ParseVersion(e.cfg.Tarantool.Version + "-1"); verr == nil {
-			resolveOpts = append(resolveOpts,
-				deps.WithProvided(map[string]rocks.Version{"tarantool": ttVer}))
-		}
+	if ttVer, ok := e.providedTarantool(); ok {
+		resolveOpts = append(resolveOpts,
+			deps.WithProvided(map[string]rocks.Version{"tarantool": ttVer}))
 	}
 
 	// Only Config.Tree is consulted: a rock installed in another rock tree
@@ -200,6 +227,54 @@ func (e *nativeEngine) resolvePlan(
 	}
 
 	return deps.Resolve(ctx, rootSpec, idx, resolveOpts...)
+}
+
+// tarantoolRockVersion returns the version of the `tarantool` rock the VM
+// provides for a Config.Tarantool.Version: its x.y.z part, everything before
+// the first dash, at revision 1. So every form tt passes — the tail of
+// `tarantool --version` ("3.9.0-0-g1a2b3c4", Enterprise's
+// "2.11.1-0-g57f5f6e-r579", a development build's
+// "3.3.0-entrypoint-31-g9eb3974") as well as a bare "3.9.0" or a "3.9.0-1" —
+// provides tarantool 3.9.0-1. ok is false for an empty version, which
+// provides no rock; err says that the x.y.z part is missing or does not parse
+// as a rock version.
+func tarantoolRockVersion(version string) (v rocks.Version, ok bool, err error) {
+	if version == "" {
+		return rocks.Version{}, false, nil
+	}
+
+	xyz, _, _ := strings.Cut(version, "-")
+	if xyz == "" {
+		return rocks.Version{}, false, fmt.Errorf("tarantool version %q has no x.y.z before its first dash", version)
+	}
+
+	v, err = deps.ParseVersion(xyz + "-1")
+	if err != nil {
+		return rocks.Version{}, false, fmt.Errorf("tarantool version %q: %w", version, err)
+	}
+
+	return v, true, nil
+}
+
+// providedTarantool is the version of the `tarantool` rock the VM provides,
+// tarantoolRockVersion of the configured Tarantool.Version, for every native
+// operation that consults the provided rocks: the dependency resolution of
+// Install, Search and Download.
+//
+// A version it cannot read provides no rock and is logged as a warning
+// rather than failing the operation. Tarantool.Version is read by every one
+// of those operations, while only one that meets a dependency on tarantool
+// needs it, so failing them all would turn a string tt copies verbatim from
+// `tarantool --version` into a hard error for the many rocks that never
+// mention tarantool; a dependency that does need it still fails to resolve,
+// and the warning says why.
+func (e *nativeEngine) providedTarantool() (rocks.Version, bool) {
+	v, ok, err := tarantoolRockVersion(e.cfg.Tarantool.Version)
+	if err != nil {
+		e.logger.Warn("rocks: the VM provides no tarantool rock", "err", err)
+	}
+
+	return v, ok
 }
 
 // Build evaluates the rockspec at specPath, fetches its declared source,
@@ -1157,8 +1232,9 @@ func (e *nativeEngine) deployRock(
 	}
 
 	// Match upstream's command-wrapper deploy (repos.deploy_files →
-	// fs.wrap_script): the interpreter path is LUA_BINDIR/lua_interpreter
-	// (prefix/bin/tarantool), and LUAROCKS_SYSCONFDIR mirrors cfg.sysconfdir.
+	// fs.wrap_script): the interpreter is the configured Tarantool
+	// executable (luaInterpreterPath), and LUAROCKS_SYSCONFDIR mirrors
+	// cfg.sysconfdir.
 	// repos.should_wrap_bin_scripts wraps unless the rockspec sets
 	// deploy.wrap_bin_scripts = false; when it does, leave BinWrap nil so
 	// Deploy copies scripts verbatim. (Upstream also honors a cfg-level
@@ -1166,7 +1242,7 @@ func (e *nativeEngine) deployRock(
 	// wrapper's package.path lists Config.Tree alone.
 	if wrapBinScripts(spec) {
 		t.BinWrap = &tree.BinWrap{
-			Interpreter: filepath.Join(e.cfg.Tarantool.Prefix, "bin", luaInterpreter),
+			Interpreter: luaInterpreterPath(e.cfg),
 			Sysconfdir:  sysconfDir(),
 		}
 	}

@@ -7,7 +7,10 @@ import (
 	rocks "github.com/tarantool/go-luarocks"
 )
 
-// RunBackend dispatches to the build backend selected by spec.Build.Type.
+// RunBackend builds spec from the sources in srcDir: it writes the
+// build.extra_files and applies the build.patches to the sources, as
+// upstream build.apply_patches does, then dispatches to the build backend
+// selected by spec.Build.Type.
 //
 // Supported types:
 //
@@ -16,7 +19,7 @@ import (
 //   - "cmake"   → cmake
 //   - "make"    → make
 //   - "command" → command
-//   - "none"    → no-op (returns nil immediately)
+//   - "none"    → no backend (the patches are still applied)
 //
 // Any other value yields ErrUnsupportedRockspecFeature wrapped with the
 // observed type string (typed errors callers can branch on).
@@ -31,6 +34,16 @@ import (
 // (the `<tree>/.../build/` working area handed to tree.Deploy).
 func RunBackend(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string, cfg rocks.Config) error {
 	switch spec.Build.Type {
+	case "", "builtin", "cmake", "make", "command", "none":
+	default:
+		return fmt.Errorf("build: type %q: %w", spec.Build.Type, rocks.ErrUnsupportedRockspecFeature)
+	}
+
+	if err := applyPatches(spec, srcDir); err != nil {
+		return err
+	}
+
+	switch spec.Build.Type {
 	case "", "builtin":
 		return runBuiltin(ctx, spec, srcDir, destDir, cfg)
 	case "cmake":
@@ -39,9 +52,7 @@ func RunBackend(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir strin
 		return runMake(ctx, spec, srcDir, destDir, cfg)
 	case "command":
 		return runCommand(ctx, spec, srcDir, destDir, cfg)
-	case "none":
+	default: // "none"
 		return nil
-	default:
-		return fmt.Errorf("build: type %q: %w", spec.Build.Type, rocks.ErrUnsupportedRockspecFeature)
 	}
 }

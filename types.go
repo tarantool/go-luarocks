@@ -124,6 +124,13 @@ type Build struct {
 	BuildCommand   string
 	InstallCommand string
 
+	// ExtraFiles are the build.extra_files written into the sources before
+	// the build, file name → contents.
+	ExtraFiles map[string]string
+	// Patches are the build.patches applied to the sources before the build,
+	// in name order, patch name → unified diff.
+	Patches map[string]string
+
 	Platforms map[string]Build
 }
 

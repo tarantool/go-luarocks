@@ -296,26 +296,47 @@ func TestNativeSearch_ProvidedRocks(t *testing.T) {
 	assert.Equal(t, remote.ProvidedRepo, found[0].Server)
 }
 
-// TestNativeSearch_ProvidedTarantoolNeedsARevision — upstream keeps
-// everything before the first dash of TT_CLI_TARANTOOL_VERSION, so a version
-// with no revision at all yields no entry rather than a fabricated one.
-func TestNativeSearch_ProvidedTarantoolNeedsARevision(t *testing.T) {
+// fakeLuaJITInterpreter writes, as dir/tarantool, a stand-in interpreter that
+// answers the LuaJIT version probe with "LuaJIT <version>".
+func fakeLuaJITInterpreter(t *testing.T, dir, version string) string {
+	t.Helper()
+
+	exe := filepath.Join(dir, "tarantool")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	//nolint:gosec // the stand-in interpreter must be executable
+	require.NoError(t, os.WriteFile(exe, []byte("#!/bin/sh\nprintf 'LuaJIT "+version+"'\n"), 0o700))
+
+	return exe
+}
+
+// TestNativeSearch_ProvidedLuaJITFromFlatSDK — the probe behind the provided
+// luajit and luabitop rocks ran <Prefix>/bin/tarantool, which a flat SDK
+// (<sdk>/tarantool, no bin/) does not have, so both rocks vanished from the
+// results. It must run Tarantool.Executable.
+func TestNativeSearch_ProvidedLuaJITFromFlatSDK(t *testing.T) {
 	t.Parallel()
+
+	sdk := t.TempDir()
 
 	r, err := client.New(rocks.Config{
 		Tree:       t.TempDir(),
 		WorkingDir: t.TempDir(),
 		Servers:    []string{newSearchServer(t, searchRepoManifest)},
 		Tarantool: rocks.TarantoolConfig{
-			Prefix:  filepath.Join(t.TempDir(), "no-such-prefix"),
-			Version: "3.9.0",
+			Executable: fakeLuaJITInterpreter(t, sdk, "2.1.0-beta3"),
+			Prefix:     sdk,
+			IncludeDir: filepath.Join(sdk, "include", "tarantool"),
 		},
 	})
 	require.NoError(t, err, "New")
 
-	found, err := r.Search(context.Background(), "tarantool", client.SearchOpts{})
+	found, err := r.Search(context.Background(), "lua", client.SearchOpts{})
 	require.NoError(t, err, "Search")
-	assert.Empty(t, found, "a version with no revision provides no tarantool rock")
+	assert.Equal(t, []string{
+		"lua 5.1-1 installed",
+		"luabitop 2.1.0-beta3-1 installed",
+		"luajit 2.1.0-beta3-1 installed",
+	}, searchTriples(found), "the LuaJIT version comes from <sdk>/tarantool")
 }
 
 // TestNativeSearch_NamespacedPattern — an "owner/rock" pattern selects the

@@ -205,6 +205,37 @@ func TestEval_PlatformsHarvested(t *testing.T) {
 	assert.NotContains(t, spec.Build.Modules, "platformer.linux", "Eval should not auto-merge platforms; linux module should not yet be folded in")
 }
 
+// TestEval_PatchesAndExtraFiles — build.patches and build.extra_files were
+// not read at all, so the native backend built a rock that needs its patches
+// from unpatched sources. Both are read, their platform overrides merged by
+// name.
+func TestEval_PatchesAndExtraFiles(t *testing.T) {
+	t.Parallel()
+
+	spec, err := rockspec.Eval(writeTempRockspec(t, `package = "p"
+version = "1.0-1"
+source = { url = "file:///p.tar.gz" }
+build = {
+   type = "none",
+   patches = { ["fix.diff"] = "--- a/x\n+++ b/x\n" },
+   extra_files = { ["extra.lua"] = "return 1\n", ["other.lua"] = "return 2\n" },
+   platforms = {
+      linux = {
+         patches = { ["linux.diff"] = "linux" },
+         extra_files = { ["other.lua"] = "return 3\n" },
+      },
+   },
+}
+`), rocks.RockspecConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"fix.diff": "--- a/x\n+++ b/x\n"}, spec.Build.Patches)
+	assert.Equal(t, map[string]string{"extra.lua": "return 1\n", "other.lua": "return 2\n"}, spec.Build.ExtraFiles)
+
+	rockspec.MergePlatforms(spec, []string{"unix", "linux"})
+	assert.Equal(t, map[string]string{"fix.diff": "--- a/x\n+++ b/x\n", "linux.diff": "linux"}, spec.Build.Patches)
+	assert.Equal(t, map[string]string{"extra.lua": "return 1\n", "other.lua": "return 3\n"}, spec.Build.ExtraFiles)
+}
+
 // glr-ak3: os.getenv is unreachable in the all-nil rockspec environment — a
 // rockspec calling it fails to load, matching upstream (which loads rockspecs
 // via persist.load_into_table with no host env access).
