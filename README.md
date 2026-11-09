@@ -146,6 +146,16 @@ own, which the cancellation kills whole, the compilers a `make` started
 included. Ctrl-C no longer reaches that group, so without the cancellation
 the tools would outlive the caller.
 
+The lua backend honours the context of every method and of `Exec` too.
+Cancelling it stops the Lua code at its next instruction and kills the shell
+of each command LuaRocks runs through `os.execute` and `io.popen` — the
+downloader, `unzip`, the build tools — in the same two ways: in the caller's
+process group the shell alone, and with `Config.IsolateBuilds` its whole
+process group. LuaRocks' own cleanup then runs, as it does when a command
+fails, removing its temporary directories and the partial install of a
+cancelled build, and the call fails with an error wrapping `ctx.Err()`. The
+VM it ran on is discarded, as every VM is after its call.
+
 #### Backend Parity
 
 The native backend reproduces what upstream LuaRocks — the lua backend —
@@ -194,10 +204,25 @@ and the tree `manifest` record the same contents. Run it (needs a real
 go test ./client/ -tags integration_luaengine -run 'TestBackendParity|TestBackendDivergence' -v
 ```
 
+The same holds for what a failure leaves. `TestBackendParity_Failures`
+(`client/parity_fail_test.go`) injects one into a build or a deploy — a C
+module that does not compile, a `make install` that fails after it wrote
+into `$(LUADIR)`, a command script the rockspec names that is missing, a
+regular file where a module directory must go, an upgrade and a reinstall
+that fail — and runs it through both backends, with `Make` and with
+`Install`, on trees set up alike: both must fail and leave the tree exactly
+as it was, every file, mode and manifest, as upstream rolls back, but for
+the copy of the reinstalled version, which both remove for good before they
+build. A build whose context is cancelled and a deploy into a read-only
+directory run through the native backend alone. `Tree.Check` finds nothing
+wrong with any tree afterwards.
+
 Documented, non-failing differences: the formatting of the manifest files
 (`share/tarantool/rocks/manifest` and each `rock_manifest`), the `build/`
 staging directory the native backend keeps in each rock's install dir under
-`share/tarantool/rocks/` (not listed in its `rock_manifest`), and compiled
+`share/tarantool/rocks/` (not listed in its `rock_manifest`, and not packed
+by the native `Pack` nor grafted by `Tx.Graft`, where upstream's `pack`, which
+copies the install dir whole, packs it), and compiled
 `.so` modules (not byte-reproducible across two compilations — asserted by
 presence, not bytes).
 
@@ -386,6 +411,24 @@ err = t.Update(ctx, func(tx *tree.Tx) error {
   `BinWrap` gives. The other directories at the tree's root are a tool's
   own, as `tt` keeps its metadata in one. Problems are the report; the error
   is for I/O.
+
+A change to a tree is all or nothing, as upstream rolls back a deploy, a
+build or an install that fails (`repos.deploy_files`' rollback, the
+functions `build.lua` and `cmd/install.lua` schedule): a `Tx` journals every
+file it creates, overwrites, renames or removes, keeping a removed or
+overwritten one aside in a `.tx-*` directory of the rocks dir until the
+change ends, and a `Tx` method or an `Update` that fails undoes them all —
+the files of every rock, demoted or promoted ones included, the
+`rock_manifest`s and the tree manifest are as they were, and the install
+dir a build wrote into is removed. `Tx.Commit` keeps the changes made so
+far whatever fails next. The native `Install`, `Build` and `Make` deploy
+each rock in one, so a failed one leaves the tree as upstream's does: as it
+was, but for an installed copy of the very version, which both remove for
+good before they build, and the dependencies an `Install` installed before
+the rock that failed. What `fn` changes by itself, other than through
+the `Tx`, is not undone, and a process killed half-way undoes nothing: it
+leaves the tree as it was then, the files it set aside in the `.tx-*`
+directory.
 
 A change to a tree takes the tree's lock: an advisory `flock(2)` on
 `share/tarantool/rocks/.lock` (Linux, macOS and the BSDs; elsewhere the lock

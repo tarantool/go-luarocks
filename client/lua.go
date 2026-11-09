@@ -38,6 +38,11 @@ package client
 // the pool (or warms one inline), runs on it alone and closes it, so
 // concurrent dispatches never share a VM; see the luaEngine type comment.
 //
+// Cancellation: a dispatch runs under the caller's context (luaVM.run), which
+// the VM checks at every instruction and the engine's os.execute and io.popen
+// run their processes under (lua_proc.go), so a cancelled call returns at
+// once, with an error wrapping ctx.Err(), after LuaRocks' cleanup has run.
+//
 // Only Lua that arrived via the embedded FS is executed — embedded modules,
 // compiled once per process and preloaded into each VM (compiledModules),
 // plus the fixed wrapper dispatch string via DoString; no caller-supplied Lua
@@ -57,6 +62,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/build"
@@ -142,7 +148,7 @@ type luaEngine struct {
 	// to serve exactly one dispatch. A VM is never reused: see the type comment
 	// for why. Capacity is luaPoolSize, so an idle engine holds the same single
 	// VM the old reuse model did.
-	pool chan *lua.LState
+	pool chan *luaVM
 
 	// callImpl, when non-nil, replaces callViaState as the dispatch backend.
 	// It exists solely as a test seam so dispatch tests can assert the exact
@@ -187,7 +193,7 @@ func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 		store:       store,
 		logger:      logger,
 		envOverride: envOverride,
-		pool:        make(chan *lua.LState, luaPoolSize),
+		pool:        make(chan *luaVM, luaPoolSize),
 	}
 	// Best-effort close of any warm VM still parked in the pool when the engine
 	// is garbage-collected. The engine has no public Close (adding one would
@@ -204,8 +210,8 @@ func newLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 func (e *luaEngine) cleanup() {
 	for {
 		select {
-		case L := <-e.pool:
-			L.Close()
+		case vm := <-e.pool:
+			vm.Close()
 		default:
 			return
 		}
@@ -452,12 +458,77 @@ func compiledModules() (map[string]*lua.FunctionProto, error) {
 	return luaProtos, errLuaProto
 }
 
+// luaVM is a VM of the engine together with the processes its os.execute and
+// io.popen start (lua_proc.go).
+type luaVM struct {
+	*lua.LState
+
+	procs *luaProcs
+}
+
+// Close kills and collects the processes of the pipes the Lua code left open
+// and closes the VM.
+func (vm *luaVM) Close() {
+	vm.procs.reap()
+	vm.LState.Close()
+}
+
+// luaCleanupTimeout bounds the cleanup luaVM.run runs after a cancelled
+// chunk.
+const luaCleanupTimeout = 5 * time.Second
+
+// luaCancelCleanup runs the functions LuaRocks scheduled to undo a command
+// that did not finish — removing its temporary directories, rolling back a
+// partial install — the way cmd.lua's die runs them when a command fails.
+const luaCancelCleanup = `local util = package.loaded["luarocks.util"]
+if util then util.run_scheduled_functions() end`
+
+// run runs chunk on the VM under ctx: once ctx is done, the VM raises an
+// error at its next instruction, and os.execute and io.popen kill their
+// processes and raise it at once. A chunk the cancellation cut short gets
+// LuaRocks' cleanup run on it, which the cancelled VM can no longer run
+// itself, under a context of its own bounded by luaCleanupTimeout. Either
+// way no process of the chunk outlives run (luaProcs.reap).
+func (vm *luaVM) run(ctx context.Context, chunk string) error {
+	err := vm.runUnder(ctx, chunk)
+	if err != nil && ctx.Err() != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), luaCleanupTimeout)
+		_ = vm.runUnder(cleanupCtx, luaCancelCleanup)
+
+		cancel()
+	}
+
+	vm.procs.reap()
+
+	return err
+}
+
+// runUnder runs chunk with the VM's context set to one derived from ctx,
+// which run cancels once the chunk is done, so the contexts gopher-lua
+// derives from it for the chunk's coroutines go with it, and removed
+// afterwards, so a pooled VM holds none. A ctx that cannot be cancelled is not
+// set at all: the VM checks a context at every instruction.
+func (vm *luaVM) runUnder(ctx context.Context, chunk string) error {
+	if ctx.Done() == nil {
+		return vm.DoString(chunk)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	vm.SetContext(runCtx)
+	defer vm.RemoveContext()
+
+	return vm.DoString(chunk)
+}
+
 // newVM creates a gopher-lua VM with an empty package.path, installs the custom
-// os.getenv and the glr_* globals, and preloads every embedded module. The
-// caller owns the returned LState and must Close it; nothing is cached on the
-// engine. cfg.init has NOT run yet at this point — that happens inside the
-// first dispatch, which is what warmVM adds on top.
-func (e *luaEngine) newVM() (*lua.LState, error) {
+// os.getenv, os.execute, io.popen, io.open and io.output and the glr_* globals,
+// and preloads every embedded module. The caller owns the returned VM and must
+// Close it; nothing is cached on the engine. cfg.init has NOT run yet at this
+// point — that happens inside the first dispatch, which is what warmVM adds on
+// top.
+func (e *luaEngine) newVM() (*luaVM, error) {
 	L := lua.NewState() // full stdlibs; do NOT skip OpenLibs
 
 	pkgTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "package").(*lua.LTable)
@@ -525,14 +596,6 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 
 	e.setConfigGlobals(L)
 
-	// Normalize io.open mode strings. LuaRocks' luarocks/fs/lua.lua opens files
-	// with PUC-Lua-5.1 mode strings of the form "<mode>+b" (e.g. "r+b", "w+b",
-	// "a+b") for fs.is_writable / fs.copy_binary. gopher-lua's io.open accepts
-	// only the "<mode>b+" ordering ("rb+", "wb+", "ab+") and raises "invalid
-	// option" otherwise, crashing the command (exit 99). Wrap the original
-	// io.open to rewrite the "+b" tail to "b+" before delegating; every other
-	// mode passes through untouched. This is a VM-compatibility shim, not a
-	// behavior change — the resulting file is opened in the identical mode.
 	ioTbl, ok := L.GetField(L.Get(lua.EnvironIndex), "io").(*lua.LTable)
 	if !ok {
 		L.Close()
@@ -540,41 +603,19 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 		return nil, errors.New("luaEngine: io table missing from Lua environment")
 	}
 
-	origOpen, ok := L.GetField(ioTbl, "open").(*lua.LFunction)
-	if !ok {
+	// Run child processes under the VM's context; see lua_proc.go.
+	procs := newLuaProcs(e.cfg.IsolateBuilds)
+	if err := procs.install(L, osTbl, ioTbl); err != nil {
 		L.Close()
 
-		return nil, errors.New("luaEngine: io.open missing from Lua environment")
+		return nil, err
 	}
 
-	L.SetField(ioTbl, "open", L.NewFunction(func(L *lua.LState) int {
-		// Collect every argument so we can re-dispatch verbatim, rewriting
-		// only the mode (arg 2) when it uses the unsupported "+b" ordering.
-		top := L.GetTop()
+	if err := installFileOpeners(L, ioTbl); err != nil {
+		L.Close()
 
-		args := make([]lua.LValue, top)
-
-		for i := 1; i <= top; i++ {
-			args[i-1] = L.Get(i)
-		}
-
-		if top >= ioOpenMinArgsForMode {
-			if ls, ok := args[1].(lua.LString); ok {
-				args[1] = lua.LString(normalizeOpenMode(string(ls)))
-			}
-		}
-
-		L.Push(origOpen)
-
-		for _, a := range args {
-			L.Push(a)
-		}
-		// io.open returns (file) on success or (nil, errmsg, errno) on failure;
-		// propagate all of them so LuaRocks' error handling is unchanged.
-		L.Call(len(args), lua.MultRet)
-
-		return L.GetTop() - top
-	}))
+		return nil, err
+	}
 
 	// Intercept os.exit. The vendored LuaRocks CLI terminates every command
 	// path with os.exit (luarocks/cmd.lua), which gopher-lua maps to Go's
@@ -653,7 +694,7 @@ func (e *luaEngine) newVM() (*lua.LState, error) {
 		L.SetField(preload, modName, absent)
 	}
 
-	return L, nil
+	return &luaVM{LState: L, procs: procs}, nil
 }
 
 // setConfigGlobals installs the glr_* globals extra/hardcoded.lua and
@@ -728,29 +769,36 @@ func (e *luaEngine) setConfigGlobals(L *lua.LState) { //nolint:gocritic // L is 
 // any other way would leave the real dispatch with a config built from
 // different inputs. `help` takes no flags, so it leaves none of the sticky
 // cfg state behind that motivates the one-VM-per-dispatch rule. Its output is
-// discarded rather than drained to the logger — nobody asked for it.
-func (e *luaEngine) warmVM() (*lua.LState, error) {
-	L, err := e.newVM()
+// discarded rather than drained to the logger — nobody asked for it. It runs
+// under ctx, and a warm-up ctx cut short yields no VM.
+func (e *luaEngine) warmVM(ctx context.Context) (*luaVM, error) {
+	vm, err := e.newVM() //nolint:contextcheck // the VM's functions take the context of the chunk they run in (luaVM.run), not one of their own
 	if err != nil {
 		return nil, err
 	}
 
-	restore := redirectIO(L, io.Discard, io.Discard)
-	doErr := L.DoString(dispatchString(wrapperExec, "go-luarocks", []string{"help"}))
+	restore := redirectIO(vm.LState, io.Discard, io.Discard)
+	doErr := vm.run(ctx, dispatchString(wrapperExec, "go-luarocks", []string{"help"}))
 
 	restore()
+
+	if err := ctx.Err(); err != nil {
+		vm.Close()
+
+		return nil, fmt.Errorf("luaEngine: warm-up dispatch: %w", err)
+	}
 
 	// `help` unwinds through the os.exit shim, so a sentinel error carrying
 	// exit code 0 is the expected outcome, exactly as in callViaState.
 	if doErr != nil {
 		if code, ok := parseOsExit(doErr.Error()); !ok || code != 0 {
-			L.Close()
+			vm.Close()
 
 			return nil, fmt.Errorf("luaEngine: warm-up dispatch: %w", doErr)
 		}
 	}
 
-	return L, nil
+	return vm, nil
 }
 
 // acquire hands out a VM for exactly one dispatch, taking a warm one when the
@@ -758,36 +806,38 @@ func (e *luaEngine) warmVM() (*lua.LState, error) {
 // very first call on a cold engine). It then starts warming the NEXT one in the
 // background, so that cost overlaps the dispatch about to run instead of
 // landing on the following call. warmed is closed once that warm-up is done;
-// the caller hands it to release.
-func (e *luaEngine) acquire() (*lua.LState, <-chan struct{}, error) {
+// the caller hands it to release. Both warm-ups run under ctx, the caller's,
+// so cancelling the call stops them too.
+func (e *luaEngine) acquire(ctx context.Context) (*luaVM, <-chan struct{}, error) {
 	var (
-		L   *lua.LState
+		vm  *luaVM
 		err error
 	)
 
 	select {
-	case L = <-e.pool:
+	case vm = <-e.pool:
 	default:
-		L, err = e.warmVM()
+		vm, err = e.warmVM(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 
-	return L, e.startWarming(), nil
+	return vm, e.startWarming(ctx), nil
 }
 
 // startWarming prepares a replacement VM concurrently with the dispatch that is
 // about to run, and returns a channel closed once it is done. Failures are
 // dropped: nothing is lost, because the next acquire warms inline and reports
-// the error to whoever actually asked for work.
-func (e *luaEngine) startWarming() <-chan struct{} {
+// the error to whoever actually asked for work. So is a warm-up that ctx cut
+// short: the VM it was warming never reaches the pool.
+func (e *luaEngine) startWarming(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
 
-		warm, err := e.warmVM()
+		warm, err := e.warmVM(ctx)
 		if err != nil {
 			// Nothing is lost: the next acquire warms inline and reports the
 			// failure to whoever actually asked for work.
@@ -805,15 +855,15 @@ func (e *luaEngine) startWarming() <-chan struct{} {
 }
 
 // release retires the VM a dispatch ran on. The VM is closed rather than
-// returned to the pool: whatever state the command left in it is exactly what
-// must not reach the next caller. It then waits for the background warm-up its
-// acquire started, warmed, so a returned call leaves no work of ours still
-// running. Each call waits for its own warm-up only: the calls of one client
+// returned to the pool: whatever state the command left in it, a cancelled
+// command included, is exactly what must not reach the next caller. It then
+// waits for the background warm-up its acquire started, warmed, so a
+// returned call leaves no work of ours still running. Each call waits for its own warm-up only: the calls of one client
 // may run concurrently, and a WaitGroup shared by them was waited on by one
 // while another added to it from zero, which the WaitGroup contract forbids
 // and which panicked.
-func (e *luaEngine) release(L *lua.LState, warmed <-chan struct{}) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
-	L.Close()
+func (e *luaEngine) release(vm *luaVM, warmed <-chan struct{}) {
+	vm.Close()
 	<-warmed
 }
 
@@ -829,19 +879,19 @@ func shellSingleQuote(s string) string {
 // dispatch routes argv to the active dispatch backend. callImpl is a test seam
 // (nil in production); when nil, the real embedded-VM path callViaState runs.
 // It returns the stdout the LuaRocks command printed plus any error.
-func (e *luaEngine) dispatch(argv []string) (string, error) {
+func (e *luaEngine) dispatch(ctx context.Context, argv []string) (string, error) {
 	if e.callImpl != nil {
 		return e.callImpl(argv)
 	}
 
-	return e.callViaState(argv)
+	return e.callViaState(ctx, argv)
 }
 
 // call is a thin error-only wrapper over callViaState, retained for the boot
 // smoke tests in lua_test.go that predate the unified seam. New code uses
 // dispatch/callViaState directly.
 func (e *luaEngine) call(argv []string) error {
-	_, err := e.callViaState(argv)
+	_, err := e.callViaState(context.Background(), argv)
 
 	return err
 }
@@ -862,20 +912,27 @@ func (e *luaEngine) call(argv []string) error {
 // os.Setenv. The
 // captured stdout string is returned so data-returning methods (e.g. Pack) can
 // parse it.
-func (e *luaEngine) callViaState(argv []string) (string, error) {
-	L, warmed, err := e.acquire()
-	if err != nil {
-		return "", err
+//
+// The command runs under ctx (luaVM.run); a command that fails once ctx is
+// done fails with an error wrapping ctx.Err().
+func (e *luaEngine) callViaState(ctx context.Context, argv []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", cancelledError(argv, err)
 	}
 
-	defer e.release(L, warmed)
+	vm, warmed, err := e.acquire(ctx)
+	if err != nil {
+		return "", contextError(ctx, argv, err)
+	}
+
+	defer e.release(vm, warmed)
 
 	var stdout, stderr bytes.Buffer
 
-	restore := redirectIO(L, &stdout, &stderr)
+	restore := redirectIO(vm.LState, &stdout, &stderr)
 	defer restore()
 
-	doErr := L.DoString(dispatchString(wrapperExecTyped, "go-luarocks", argv))
+	doErr := vm.run(ctx, dispatchString(wrapperExecTyped, "go-luarocks", argv))
 
 	// Drain whatever the command printed into the logger before interpreting
 	// the result, so even a failing command's diagnostics reach the caller.
@@ -896,10 +953,27 @@ func (e *luaEngine) callViaState(argv []string) (string, error) {
 			return out, nil
 		}
 
-		return out, fmt.Errorf("luaEngine: %v exited with code %d%s", argv, code, failureMessage(stderr.String()))
+		return out, contextError(ctx, argv,
+			fmt.Errorf("luaEngine: %v exited with code %d%s", argv, code, failureMessage(stderr.String())))
 	}
 
-	return out, doErr
+	return out, contextError(ctx, argv, doErr)
+}
+
+// contextError returns err, the failure of the command argv, or, when ctx is
+// done, an error wrapping ctx.Err() instead: the command failed because it
+// was cancelled, whatever it reported then.
+func contextError(ctx context.Context, argv []string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return cancelledError(argv, ctxErr)
+	}
+
+	return err
+}
+
+// cancelledError is the failure of the command argv cancelled with ctxErr.
+func cancelledError(argv []string, ctxErr error) error {
+	return fmt.Errorf("luaEngine: %v: %w", argv, ctxErr)
 }
 
 // failureMessage returns, prefixed with ": ", what a failed LuaRocks command
@@ -968,19 +1042,23 @@ func quoteLua(s string) string {
 // progname is the program name LuaRocks prints in its own usage/help, letting
 // the caller (e.g. tt) show "tt rocks" instead of the default progname.
 //
-// Like callViaState it runs on a VM of its own from acquire and retires it
-// afterwards.
+// Like callViaState it runs on a VM of its own from acquire, under ctx, and
+// retires it afterwards.
 // Exit-code handling matches callViaState: os.exit(0) and a clean return
 // are success, any other code is surfaced as an error.
-func (e *luaEngine) callRaw(progname string, argv []string) error {
-	L, warmed, err := e.acquire()
-	if err != nil {
-		return err
+func (e *luaEngine) callRaw(ctx context.Context, progname string, argv []string) error {
+	if err := ctx.Err(); err != nil {
+		return cancelledError(argv, err)
 	}
 
-	defer e.release(L, warmed)
+	vm, warmed, err := e.acquire(ctx)
+	if err != nil {
+		return contextError(ctx, argv, err)
+	}
 
-	doErr := L.DoString(dispatchString(wrapperExec, progname, argv))
+	defer e.release(vm, warmed)
+
+	doErr := vm.run(ctx, dispatchString(wrapperExec, progname, argv))
 	if doErr == nil {
 		return nil
 	}
@@ -990,10 +1068,10 @@ func (e *luaEngine) callRaw(progname string, argv []string) error {
 			return nil
 		}
 
-		return fmt.Errorf("luaEngine: %v exited with code %d", argv, code)
+		return contextError(ctx, argv, fmt.Errorf("luaEngine: %v exited with code %d", argv, code))
 	}
 
-	return doErr
+	return contextError(ctx, argv, doErr)
 }
 
 // redirectIO points the given VM's io.stdout and io.stderr at the supplied Go
@@ -1258,14 +1336,15 @@ func (e *luaEngine) dispatchLocked(ctx context.Context, create bool, argv []stri
 		}
 	}
 
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
 
-// luaTreeDirMode is the mode dispatchLocked creates a missing rocks dir with,
-// the one the native backend gives the directories of a tree.
-const luaTreeDirMode = 0o750
+// luaTreeDirMode is the mode dispatchLocked creates a missing rocks dir with:
+// 0777, which the umask narrows, as the mkdir -p upstream runs does and as
+// the native backend creates the directories of a tree.
+const luaTreeDirMode = 0o777
 
 // depsModeArg maps a DepsPolicy to upstream's --deps-mode choices
 // {all, one, order, none}. DepsAll→"all", DepsNone→"none". DepsOnlyNew has no
@@ -1339,7 +1418,7 @@ func (e *luaEngine) Pack(ctx context.Context, target string, opts PackOpts) (str
 	argv := e.globalArgs(nil)
 	argv = append(argv, "pack", target)
 
-	out, err := e.dispatch(argv)
+	out, err := e.dispatch(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -1363,7 +1442,7 @@ func (e *luaEngine) Unpack(ctx context.Context, archive, destDir string) error {
 	_ = destDir
 	argv := e.globalArgs(nil)
 	argv = append(argv, "unpack", archive)
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1440,7 +1519,7 @@ func (e *luaEngine) Search(ctx context.Context, pattern string, opts SearchOpts)
 
 	argv = append(argv, "--porcelain")
 
-	out, err := e.dispatch(argv)
+	out, err := e.dispatch(ctx, argv)
 	if err != nil {
 		return nil, err
 	}
@@ -1487,7 +1566,7 @@ func (e *luaEngine) Download(ctx context.Context, name string, opts DownloadOpts
 	// is a real path, never fabricated; on success the error is always nil.
 	before := dirFiles(e.cfg.WorkingDir)
 
-	if _, err := e.dispatch(argv); err != nil {
+	if _, err := e.dispatch(ctx, argv); err != nil {
 		return "", err
 	}
 
@@ -1536,7 +1615,7 @@ func dirFiles(dir string) map[string]bool {
 func (e *luaEngine) Lint(ctx context.Context, specPath string, opts LintOpts) error {
 	_ = opts // lint has no tunable flags
 	argv := []string{"lint", specPath}
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1562,7 +1641,7 @@ func (e *luaEngine) NewVersion(ctx context.Context, specPath string, opts NewVer
 		argv = append(argv, "--tag", opts.Tag)
 	}
 
-	out, err := e.dispatch(argv)
+	out, err := e.dispatch(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -1631,7 +1710,7 @@ func (e *luaEngine) WriteRockspec(ctx context.Context, url string, opts WriteRoc
 		argv = append(argv, "--lib", opts.Lib)
 	}
 
-	out, err := e.dispatch(argv)
+	out, err := e.dispatch(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -1663,7 +1742,7 @@ func (e *luaEngine) Doc(ctx context.Context, name string, opts DocOpts) error {
 		argv = append(argv, "--list")
 	}
 
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1685,7 +1764,7 @@ func (e *luaEngine) Test(ctx context.Context, specPath string, opts TestOpts) er
 	}
 
 	argv = append(argv, opts.Args...)
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1716,7 +1795,7 @@ func (e *luaEngine) Config(ctx context.Context, opts ConfigOpts) (string, error)
 		argv = append(argv, "--json")
 	}
 
-	out, err := e.dispatch(argv)
+	out, err := e.dispatch(ctx, argv)
 	if err != nil {
 		return "", err
 	}
@@ -1751,7 +1830,7 @@ func (e *luaEngine) Upload(ctx context.Context, specPath string, opts UploadOpts
 		argv = append(argv, "--sign")
 	}
 
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1771,7 +1850,7 @@ func (e *luaEngine) InitProject(ctx context.Context, opts InitProjectOpts) error
 		argv = append(argv, "--reset")
 	}
 
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }
@@ -1794,7 +1873,7 @@ func (e *luaEngine) Admin(ctx context.Context, subCmd string, args []string, opt
 		argv = append(argv, "--force")
 	}
 
-	_, err := e.dispatch(argv)
+	_, err := e.dispatch(ctx, argv)
 
 	return err
 }

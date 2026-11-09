@@ -659,8 +659,8 @@ func TestTx_PruneOrphans(t *testing.T) {
 }
 
 // TestUpdate_Semantics: a Tx refuses a version it does not have and any use
-// after its Update; the manifest is written when fn fails after a change and
-// not at all when nothing changed.
+// after its Update; a change fn made before failing is undone, and the
+// manifest is not written when nothing changed.
 func TestUpdate_Semantics(t *testing.T) {
 	t.Parallel()
 
@@ -684,8 +684,8 @@ func TestUpdate_Semantics(t *testing.T) {
 	require.ErrorIs(t, err, errFn, "Update fails as fn does")
 
 	v := inspect(t, root)
-	assert.Equal(t, []tree.RockRef{alpha1.ref()}, v.Rocks(), "the removal fn made before failing is in the manifest")
-	requireConsistent(t, root, alpha1)
+	assert.Equal(t, []tree.RockRef{alpha1.ref(), beta1.ref()}, v.Rocks(), "the removal fn made before failing is undone")
+	requireConsistent(t, root, alpha1, beta1)
 
 	require.Error(t, kept.Remove(alpha1.ref()), "a Tx after its Update")
 	_, err = kept.Prune(nil, tree.PruneOpts{})

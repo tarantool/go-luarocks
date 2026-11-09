@@ -2,8 +2,10 @@ package build
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -157,8 +159,9 @@ const (
 	// dirPerm is the mode used when creating destination directories, before
 	// the umask, as upstream's mkdir creates them.
 	dirPerm os.FileMode = 0o777
-	// exePerm is the mode applied to installed executable artifacts.
-	exePerm os.FileMode = 0o750
+	// execPerm is the mode installed executable artifacts are created with,
+	// before the umask, upstream's "exec" permissions.
+	execPerm os.FileMode = 0o755
 	// dirOwnerRWX is OR-ed into a copied directory's mode so the owner can
 	// always traverse/write the recreated tree.
 	dirOwnerRWX os.FileMode = 0o700
@@ -413,8 +416,8 @@ func compileModule(ctx context.Context, srcDir, destDir, name string, m rocks.Mo
 // destination layout under destDir is:
 //
 //	install.lua  → destDir/lua/<module_to_path(key)>/<last>.lua
-//	install.lib  → destDir/lib/<module_to_path(key)>/<source-basename>  (mode 0o750)
-//	install.bin  → destDir/bin/<key-as-given>                 (mode 0o750)
+//	install.lib  → destDir/lib/<module_to_path(key)>/<source-basename>  (mode 0o755, less the umask)
+//	install.bin  → destDir/bin/<key-as-given>                 (mode 0o755, less the umask)
 //	install.conf → destDir/conf/<key-as-given>
 //
 // The is_module_path groups (lua, lib) mirror upstream build.lua install_to:
@@ -473,16 +476,14 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
 			}
 
-			err = copyFile(srcDir, src, destDir, dst)
-			if err != nil {
-				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
+			var mode os.FileMode
+			if s.isExe {
+				mode = execPerm
 			}
 
-			if s.isExe {
-				err := safepath.Chmod(destDir, dst, exePerm)
-				if err != nil {
-					return fmt.Errorf("%s[%q]: chmod: %w", s.name, k, err)
-				}
+			err = copyFileMode(srcDir, src, destDir, dst, mode)
+			if err != nil {
+				return fmt.Errorf("%s[%q]: %w", s.name, k, err)
 			}
 		}
 	}
@@ -495,6 +496,12 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 // directories of dst are created with dirPerm (0o777, less the umask). A symlink on the way
 // that leaves its root fails the copy (see safepath).
 func copyFile(srcRoot, src, dstRoot, dst string) error {
+	return copyFileMode(srcRoot, src, dstRoot, dst, 0)
+}
+
+// copyFileMode is copyFile, creating dst afresh with mode, less the umask,
+// when mode is not zero.
+func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode) error {
 	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return err
@@ -507,7 +514,12 @@ func copyFile(srcRoot, src, dstRoot, dst string) error {
 		return err
 	}
 
-	mode := st.Mode().Perm()
+	if mode == 0 {
+		mode = st.Mode().Perm()
+	} else if err := safepath.Remove(dstRoot, dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
 	if mode == 0 {
 		mode = 0o644
 	}

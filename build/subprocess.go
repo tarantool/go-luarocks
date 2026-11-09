@@ -3,6 +3,7 @@ package build
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -61,6 +62,12 @@ func runCmd(ctx context.Context, isolate bool, name string, args []string, cwd s
 		tail := strings.TrimSpace(stderr.String())
 		if len(tail) > stderrTailLimit {
 			tail = tail[len(tail)-stderrTailLimit:]
+		}
+
+		// A cancelled command fails with "signal: killed"; name the context's
+		// error too, so callers can tell a cancellation from a failed build.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = errors.Join(ctxErr, err)
 		}
 
 		return fmt.Errorf("build: %s %s: %w (stderr: %s)",

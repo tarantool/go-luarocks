@@ -37,18 +37,20 @@ type Config struct {
 	// tool — make, cmake, the C compiler, the shell of a command build — in
 	// a process group of its own, and makes cancelling the build's context
 	// kill that whole group, the compilers a make started included, so none
-	// of them runs on after the build is cancelled. Signals sent to the
-	// caller's process group, the terminal's Ctrl-C (SIGINT) among them, no
-	// longer reach the build tools: a caller that sets it must cancel the
-	// context on SIGINT and SIGTERM, e.g. with signal.NotifyContext, or the
-	// build tools survive the caller and keep writing into the tree.
+	// of them runs on after the build is cancelled. The lua backend does the
+	// same for every shell LuaRocks starts through os.execute and io.popen:
+	// the downloader, unzip, the build tools. Signals sent to the caller's
+	// process group, the terminal's Ctrl-C (SIGINT) among them, no longer
+	// reach these processes: a caller that sets it must cancel the context on
+	// SIGINT and SIGTERM, e.g. with signal.NotifyContext, or they survive the
+	// caller and keep writing into the tree.
 	//
 	// By default the build tools stay in the caller's process group, so
 	// Ctrl-C reaches them, and cancelling the context kills only the tool
 	// the build is running, not the processes it started. Either way a
 	// cancelled build returns within about a second, even if a process it
 	// started still holds its output open. IsolateBuilds is a no-op on other
-	// platforms and in the lua backend.
+	// platforms.
 	IsolateBuilds bool
 }
 

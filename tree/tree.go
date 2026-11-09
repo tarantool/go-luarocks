@@ -52,6 +52,12 @@ type Tree struct {
 	// provider: every deployed file takes its plain path. The facade sets this
 	// from the tree manifest as it stands before the operation.
 	Providers func(kind ItemKind, item string) []string
+
+	// j records the changes of the tree's files, to undo them when the
+	// change they are part of fails: a Tx's journal in the Tree a Tx method
+	// works on, the journal of the call in Deploy and DeleteVersion called
+	// on their own.
+	j *journal
 }
 
 // BinWrap carries the two environment-dependent inputs upstream bakes into a

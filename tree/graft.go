@@ -72,8 +72,8 @@ type graftRock struct {
 // .rocks, say — into this one, as the native client would install their
 // binary rocks. Each rock dir src has on disk, <rocks-dir>/<name>/<version>
 // with a version upstream takes for one, that opts.Select picks is staged as
-// the native Pack stages an installed rock: its install dir copied whole, and
-// each lua and lib file its rock_manifest lists copied back from the deploy
+// the native Pack stages an installed rock: its install dir copied whole but
+// for the build/ staging dir of a native build, and each lua and lib file its rock_manifest lists copied back from the deploy
 // dirs, from its versioned or its plain path, whichever has the digest the
 // rock_manifest records. Every file staged must have its digest — a missing
 // or a different one fails Graft with an error wrapping ErrIntegrity — and
@@ -97,6 +97,9 @@ type graftRock struct {
 // While it reads src it holds src's lock, shared, when src has a lock file,
 // waiting for it until the Update's context ends (ErrLocked); src must not be
 // this tree.
+//
+// A rock that fails to install undoes the whole Graft: what it removed and
+// installed before is put back, and it returns no report.
 //
 // The report lists the files of src's deploy dirs no rock of src lists,
 // which Graft does not copy.
@@ -176,26 +179,33 @@ func (tx *Tx) Graft(src string, opts GraftOpts) (*GraftReport, error) {
 		}
 	}
 
-	if opts.RemoveOtherVersions {
-		if err := tx.removeUngrafted(staged); err != nil {
-			return nil, fmt.Errorf("tree.Graft: %w", err)
-		}
-	}
-
-	for _, r := range graftOrder(todo) {
-		// A spelling of the version other than src's is removed by its own
-		// name: Deploy removes the very one it installs only.
-		if installed, ok := installedRef(tx.m, r.ref.Name, r.ref.Version); ok && installed != r.ref {
-			if err := tx.deleteVersion(installed.Name, installed.Version); err != nil {
-				return report, fmt.Errorf("tree.Graft: %w", err)
+	err = tx.atomic(func() error {
+		if opts.RemoveOtherVersions {
+			if err := tx.removeUngrafted(staged); err != nil {
+				return err
 			}
 		}
 
-		if _, err := tx.InstallStaged(r.spec, r.dir, StagedOpts{}); err != nil {
-			return report, fmt.Errorf("tree.Graft: %w", err)
+		for _, r := range graftOrder(todo) {
+			// A spelling of the version other than src's is removed by its own
+			// name: Deploy removes the very one it installs only.
+			if installed, ok := installedRef(tx.m, r.ref.Name, r.ref.Version); ok && installed != r.ref {
+				if err := tx.deleteVersion(installed.Name, installed.Version); err != nil {
+					return err
+				}
+			}
+
+			if _, err := tx.InstallStaged(r.spec, r.dir, StagedOpts{}); err != nil {
+				return err
+			}
+
+			report.Grafted = append(report.Grafted, r.ref)
 		}
 
-		report.Grafted = append(report.Grafted, r.ref)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tree.Graft: %w", err)
 	}
 
 	sortedRefs(report.Grafted)
@@ -304,9 +314,14 @@ func ownDeployed(p Paths, ref RockRef, rm *rocks.RockManifest, owned map[string]
 	}
 }
 
+// buildStagingDir is the directory of a rock's install dir a native build
+// stages the rock in and keeps; no rock_manifest lists it.
+const buildStagingDir = "build"
+
 // stageRock lays the installed rock ref of the tree p out in dir as an
 // unpacked binary rock, as the native Pack does: the rock's install dir
-// copied whole, and the lua and lib files of its rock_manifest rm copied back
+// copied whole but for its build/ staging dir, which is no file of the rock,
+// and the lua and lib files of its rock_manifest rm copied back
 // from the deploy dirs into lua/ and lib/. A file is copied back from its
 // versioned path or from its plain one, whichever holds the digest rm
 // records, so it does not matter which rock held the plain path. Every file
@@ -323,6 +338,10 @@ func stageRock(p Paths, ref RockRef, rm *rocks.RockManifest, dir string) error {
 		rel, err := filepath.Rel(installDir, path)
 		if err != nil {
 			return err
+		}
+
+		if rel == buildStagingDir && d.IsDir() {
+			return filepath.SkipDir
 		}
 
 		if d.IsDir() {

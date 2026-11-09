@@ -38,6 +38,14 @@
 // holds its plain path follows the manifest's provider lists, as Deploy and
 // DeleteVersion decide it.
 //
+// A change is all or nothing, as upstream rolls back a deploy, a build or an
+// install that fails: a Tx journals every file it creates, overwrites,
+// renames or removes — a removed or overwritten one is kept aside in the
+// rocks dir until the change ends — and a Tx method, or the Update, that
+// fails undoes them, leaving the files of every rock, the rock_manifests and
+// the tree manifest as they were. Tx.Commit keeps the changes made so far.
+// Deploy and DeleteVersion called on their own undo theirs too.
+//
 // The changes a tool used to make to a tree by hand have a Tx method each:
 // InstallStaged deploys a directory laid out as an unpacked binary rock as
 // the native client installs a .rock, Graft installs the rocks another tree
