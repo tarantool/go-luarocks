@@ -135,6 +135,17 @@ sets, so the tree they install into is always one of them, as upstream
 assumes; `Exec` runs the command as the host's LuaRocks would, over the
 configured trees.
 
+The native backend runs a rock's build tools (`make`, `cmake`, the C
+compiler, the shell of a `command` build) in the caller's process group, so
+the terminal's Ctrl-C stops them with the caller. Cancelling the context
+kills the running tool, and the call returns within about a second even if a
+process the tool started still holds its output. A caller that cancels the
+context on SIGINT and SIGTERM, e.g. with `signal.NotifyContext`, can set
+`Config.IsolateBuilds`: on unix each tool then runs in a process group of its
+own, which the cancellation kills whole, the compilers a `make` started
+included. Ctrl-C no longer reaches that group, so without the cancellation
+the tools would outlive the caller.
+
 #### Backend Parity
 
 The native backend reproduces what upstream LuaRocks — the lua backend —
@@ -299,12 +310,18 @@ err = t.Update(ctx, func(tx *tree.Tx) error {
 })
 ```
 
+`tree.Open` creates nothing either: a tree that does not exist reads as an
+empty one, and `View`, `Check` and `Rebuild` leave it absent, where `Update`
+creates the rocks dir and its lock file.
+
 A `View` tells which rock versions are installed, which provider of a
 module or command holds its plain path, who owns a deployed file, where
 each file of a rock is and whether it matches the rock's `rock_manifest`.
 `Tx.Remove` and `Tx.Prune` undeploy rocks as the native `Remove` does —
 without a dependents check, a plain path passing to the next provider — and
-update the tree manifest in the same transaction.
+update the tree manifest in the same transaction. A rock whose
+`rock_manifest` cannot be read, which upstream drops from the manifest
+alone, is undeployed by the modules and commands its manifest entry names.
 
 The other changes a tool makes to a tree by hand have one each, every one
 writing the files and the manifest together:
@@ -318,7 +335,9 @@ err = t.Update(ctx, func(tx *tree.Tx) error {
         return err
     }
     // A project's own files, laid out as an unpacked binary rock.
-    _, err = tx.InstallStaged(spec, stageDir, tree.StagedOpts{RequirePlain: true, RemoveOtherVersions: true})
+    _, err = tx.InstallStaged(spec, stageDir, tree.StagedOpts{
+        RequirePlain: true, NoDisplace: true, RemoveOtherVersions: true,
+    })
     return err
 })
 ```
@@ -327,10 +346,14 @@ err = t.Update(ctx, func(tx *tree.Tx) error {
   (`lua/`, `lib/`, `bin/`, and the rest into the rock's install dir) as the
   native client installs a `.rock`: conflict rules, wrappers,
   `rock_manifest` and manifest entry alike. Its `spec.RawSource` becomes the
-  installed rockspec, which the lua backend reads. `RequirePlain` refuses,
+  installed rockspec, which the lua backend reads; a directory that is empty
+  or does not exist is a rock with no files. `RequirePlain` refuses,
   with `ErrNotPlain` and the tree untouched, a rock a file of which another
-  rock holds the plain path of. `client.PackStaged` packs such a directory
-  into the `.rock` the native `Pack` makes of the rock once installed.
+  rock holds the plain path of, and `NoDisplace` one a file of which would
+  take the plain path from another rock, so that with both the rock's files
+  are at plain paths no other rock had. `client.PackStaged` packs such a
+  directory into the `.rock` the native `Pack` makes of the rock once
+  installed.
 - `Tx.Graft` installs the rocks another tree has on disk — an extracted
   package's `.rocks` — as their binary rocks would install. Each rock is
   staged as the native `Pack` stages an installed rock, its `lua` and `lib`
@@ -341,8 +364,11 @@ err = t.Update(ctx, func(tx *tree.Tx) error {
   `Replace`. A file that is not what its `rock_manifest` records
   (`ErrIntegrity`), a symlink leading out of the source or an entry leaving
   its directory (`rocks.ErrUnsafePath`), or a conflict leaves the tree as it
-  was. The report lists the files of the source's `share/`, `lib/` and `bin/`
-  no rock of it lists, which are not copied.
+  was, and so does, with `NoDisplace`, a graft that would take a plain path
+  from a rock installed here, and with `RequirePlain` one a grafted rock of
+  which would not hold its plain paths (`ErrNotPlain`). The report lists the
+  files of the source's `share/`, `lib/` and `bin/` no rock of it lists,
+  which are not copied.
 - `Tx.Rewrap` rewrites every command wrapper for the tree's root and
   `BinWrap`, for a tree moved, extracted elsewhere or run by another
   interpreter; `client.BinWrapFor(cfg)` gives the inputs the native backend
@@ -372,6 +398,20 @@ changing one tree run one after the other instead of losing each other's
 manifest entries. An external `luarocks` and `Exec` do not take it. The
 manifests themselves are written through a temp file of each writer's own,
 flushed and renamed into place.
+
+The lock file, `tree.Paths.LockFile`, stays in a tree once a change has
+taken the lock, and is the library's, not the tree's contents: `Tx.Graft`
+does not take it from its source, `Check` and `View` look past it, and
+`Pack` and `client.PackStaged` never pack it. A tool that archives or copies
+a whole tree leaves it out, as the next change of the copy creates its own;
+removing it from a tree in use would let two changes run at once.
+
+Every directory and file a change to a tree creates has the mode upstream
+LuaRocks gives it, less the process umask: directories 0777, commands and C
+modules 0755, every other file 0644 or 0666. Under the usual umask, 022, a
+tree is readable by every user — a system-wide tree a service runs from as
+another user than the one installing into it needs nothing more — and under
+077 by its owner alone.
 
 ### Packages
 

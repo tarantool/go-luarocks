@@ -42,9 +42,16 @@ func SplitEnv(e string) (string, string, bool) { return splitEnv(e) }
 // BuildEnv exposes buildEnv for external tests.
 func BuildEnv(cfg rocks.Config) map[string]string { return buildEnv(cfg) }
 
-// RunCmd exposes runCmd for external tests.
+// RunCmd exposes runCmd, the child left in the caller's process group, for
+// external tests.
 func RunCmd(ctx context.Context, name string, args []string, cwd string, extraEnv map[string]string) error {
-	return runCmd(ctx, name, args, cwd, extraEnv)
+	return runCmd(ctx, false, name, args, cwd, extraEnv)
+}
+
+// RunCmdIsolated exposes runCmd with the child isolated in a process group
+// of its own, as rocks.Config.IsolateBuilds asks, for external tests.
+func RunCmdIsolated(ctx context.Context, name string, args []string, cwd string, extraEnv map[string]string) error {
+	return runCmd(ctx, true, name, args, cwd, extraEnv)
 }
 
 // SubstituteVars exposes substituteVars for external tests.

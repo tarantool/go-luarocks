@@ -102,6 +102,13 @@ type PackOpts struct {
 	SrcOnly bool
 }
 
+// PackStagedOpts tunes PackStaged.
+type PackStagedOpts struct {
+	// TempDir is the directory PackStaged makes its temporary tree in, and
+	// removes it from afterwards; empty, os.TempDir().
+	TempDir string
+}
+
 // InstalledRock is re-exported from the root package for caller
 // convenience (so `client.InstalledRock` and `rocks.InstalledRock` both
 // resolve to the same type).

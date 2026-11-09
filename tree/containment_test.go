@@ -43,6 +43,11 @@ func newContainLayout(t *testing.T) containLayout {
 	tr, err := tree.Open(rocks.Config{Tree: filepath.Join(parent, "tree")})
 	require.NoError(t, err)
 
+	// The tree has the layout an earlier install leaves.
+	for _, d := range []string{tr.RocksDir(), tr.DeployLuaDir(), tr.DeployLibDir(), tr.BinDir()} {
+		require.NoError(t, os.MkdirAll(d, 0o750))
+	}
+
 	l.tree = tr
 
 	return l

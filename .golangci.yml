@@ -31,8 +31,10 @@ linters:
 
     # --- Security scanner: high false-positive rate for this codebase ---
     - gosec         # G304/G305/G110 fire on internally-controlled paths and
-                    # trusted local archives; genuine perm hardening (0o600
-                    # files / 0o750 dirs) is kept in code regardless.
+                    # trusted local archives; G301/G302/G306 on the modes a
+                    # rock tree gets, which follow upstream and the umask
+                    # (0o777 dirs, 0o644/0o755 files) so other users can
+                    # read a system-wide tree.
 
     # --- Subjective style: naming, formatting, line/func shape ---
     - varnamelen    # short names (i, k, l, w) are idiomatic and readable here.

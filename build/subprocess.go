@@ -18,7 +18,8 @@ import (
 const stderrTailLimit = 4096
 
 // waitDelay bounds how long runCmd waits, once its context is cancelled and
-// the child killed, for the child's output pipes to close.
+// the child killed, for the child's output pipes to close: a process the
+// child started and the kill missed may hold them open.
 const waitDelay = time.Second
 
 // runCmd shells out to `name args...` with the given working directory and
@@ -28,18 +29,24 @@ const waitDelay = time.Second
 //
 // This is the ONLY entry point in the build/ package that
 // constructs an exec.Cmd, and the entire env path goes through extraEnv —
-// we never os.Setenv. On unix the child runs in a process group of its own,
-// and cancelling ctx kills that whole group, the compilers a make or cmake
-// started included (killGroupOnCancel); once the child is gone, runCmd
-// waits at most waitDelay for its output to close, so a process that left
-// the group and still holds the pipes cannot keep the call from returning.
-func runCmd(ctx context.Context, name string, args []string, cwd string, extraEnv map[string]string) error {
+// we never os.Setenv. The child stays in the caller's process group, so a
+// terminal's Ctrl-C reaches it and whatever it started, and cancelling ctx
+// kills the child alone. With isolate (rocks.Config.IsolateBuilds) on unix
+// the child runs in a process group of its own instead, and cancelling ctx
+// kills that whole group, the compilers a make or cmake started included
+// (killGroupOnCancel). Either way, once the child is gone, runCmd waits at
+// most waitDelay for its output to close, so a process it started that
+// still holds the pipes cannot keep the call from returning.
+func runCmd(ctx context.Context, isolate bool, name string, args []string, cwd string, extraEnv map[string]string) error {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // name/args are rockspec-derived build tooling, internally controlled
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
 
-	killGroupOnCancel(cmd)
+	if isolate {
+		killGroupOnCancel(cmd)
+	}
+
 	cmd.WaitDelay = waitDelay
 
 	cmd.Env = mergeEnv(os.Environ(), extraEnv)

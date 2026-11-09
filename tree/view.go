@@ -32,7 +32,11 @@ var ErrCorrupt = errors.New("rock tree is corrupt")
 var ErrIntegrity = errors.New("rock files do not match their rock_manifest")
 
 // ErrNotPlain is wrapped by the error of View.CheckPlain when a deployed file
-// of the rock is not at its plain path, another rock holding it.
+// of the rock is not at its plain path, another rock holding it, and by the
+// error of a change refused because a rock's file would not be at its plain
+// path after it: the rock's own, with StagedOpts.RequirePlain and
+// GraftOpts.RequirePlain, or another rock's, with StagedOpts.NoDisplace and
+// GraftOpts.NoDisplace.
 var ErrNotPlain = errors.New("rock files are not at their plain paths")
 
 // View is a read-only snapshot of a tree: its manifest, and the rock_manifest

@@ -50,9 +50,11 @@ type nativeEngine struct {
 	luajit     string
 }
 
-// unpackDirMode is the permission applied to directories created while
-// extracting a .rock archive: owner rwx, group rx, no world access.
-const unpackDirMode = 0o750
+// unpackDirMode is the mode, before the umask, of the directories the native
+// backend creates: those of an extracted .rock archive, a rock's build/
+// staging dir in its tree and the stage dirs of a pack, as upstream's mkdir
+// creates them: 0755 under the usual umask.
+const unpackDirMode = 0o777
 
 // luaInterpreter is the interpreter name baked into generated command
 // wrappers, matching the tarantool/luarocks fork's hardcoded.LUA_INTERPRETER.
@@ -480,12 +482,13 @@ func stageInstalled(t *tree.Tree, name, version, stage string) (string, error) {
 // <name>-<version>.<arch>.rock a server lists it under included, since a rock
 // made for another platform cannot take its arch from the host's, as Pack
 // does; it is written through a temporary file in its directory and renamed
-// into place. The temporary tree lives in the system's temporary directory.
+// into place. The temporary tree lives in opts.TempDir, or the system's
+// temporary directory.
 //
 // Like Pack's, the archive's entries carry no modification time and no
 // permissions, so two packs of the same files are the same bytes.
-func PackStaged(spec *rocks.Rockspec, dir, out string) error {
-	tmp, err := os.MkdirTemp("", "rocks-pack-staged-*")
+func PackStaged(spec *rocks.Rockspec, dir, out string, opts PackStagedOpts) error {
+	tmp, err := os.MkdirTemp(opts.TempDir, "rocks-pack-staged-*")
 	if err != nil {
 		return fmt.Errorf("rocks.PackStaged: %w", err)
 	}

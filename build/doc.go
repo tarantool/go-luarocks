@@ -12,9 +12,16 @@
 // os.Environ() with the five canonical TARANTOOL_DIR / LUA_* vars and any
 // rockspec-supplied K=V pairs.
 //
-// All subprocesses receive ctx via exec.CommandContext. Output
-// shared-library extension is `.so` on both linux and macOS (upstream
-// luarocks sets `lib_extension = "so"` for unix unconditionally,
+// All subprocesses receive ctx via exec.CommandContext and stay in the
+// caller's process group, so the terminal's Ctrl-C reaches them; cancelling
+// ctx kills the running tool, and the call returns within about a second
+// even if a process the tool started still holds its output. With
+// rocks.Config.IsolateBuilds, on unix, each tool runs in a process group of
+// its own, which cancelling ctx kills whole; the caller must then cancel ctx
+// on SIGINT and SIGTERM itself.
+//
+// Output shared-library extension is `.so` on both linux and macOS
+// (upstream luarocks sets `lib_extension = "so"` for unix unconditionally,
 // even on macOS where the linker emits a -bundle).
 //
 // An unrecognized build.type surfaces rocks.ErrUnsupportedRockspecFeature;

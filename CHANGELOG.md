@@ -65,11 +65,19 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   leaves, by `..` or through a symlink pointing out, fails with
   `rocks.ErrUnsafePath` instead of reaching outside, where upstream follows
   it.
+- tree, manif, client: The directories and files a change to a tree
+  creates have the modes upstream LuaRocks gives them, less the process
+  umask: directories, the tree's own and an unpacked rock's, 0777, commands
+  and C modules 0755, and the other files, manifests and the lock file
+  among them, 0644 or 0666, so a tree made under the usual umask, 022, is
+  readable by every user, as one a system service runs from must be.
 - tree: `Tree.Update` changes a tree in a transaction, a `Tx`, which keeps
   the tree manifest in step with the files: `Tx.Deploy` deploys a rock and
   records it, `Tx.Remove` undeploys an installed version, a `RockRef`, and
   drops it, failing with `ErrNotInstalled` for one the manifest does not
-  list, and `Tx.View` shows the tree as the transaction has it. The manifest
+  list, and undeploying the modules and commands its manifest entry names
+  when its `rock_manifest` cannot be read, so the plain paths it held pass
+  on; `Tx.View` shows the tree as the transaction has it. The manifest
   is written even when the change fails half-way, so it never lags behind
   the files. The native client deploys and removes rocks through it.
   `Tx.Deploy` copies the commands of a rock whose rockspec sets
@@ -79,10 +87,14 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   command wrappers, `rock_manifest` and tree manifest entry alike — its
   `spec.RawSource` becoming the installed rockspec; `StagedOpts.RequirePlain`
   refuses, with `ErrNotPlain` and the tree untouched, a rock a file of which
-  would not take its plain path, and `RemoveOtherVersions` removes the
-  rock's other versions first. As upstream's `install_binary_rock`, which
+  would not take its plain path, `NoDisplace` one a file of which would take
+  its plain path from another rock, which would keep it at its versioned
+  path only, and `RemoveOtherVersions` removes the rock's other versions
+  first. As upstream's `install_binary_rock`, which
   unpacks a rock whole, the files at the top of a binary rock land in its
-  install dir, and no default docs are made up from them.
+  install dir, and no default docs are made up from them. A stage dir that
+  is empty or does not exist is a rock with no files, its rockspec alone
+  installed, as for a rock that only gathers its dependencies.
 - tree: `Tx.Graft` installs the rocks another tree has on disk, such as an
   extracted package's `.rocks`, as their binary rocks would install: each is
   staged as the native `Pack` stages an installed rock, its `lua` and `lib`
@@ -93,7 +105,11 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   same, and fails the graft with `ErrConflict` otherwise, unless `Replace`.
   Nothing changes before every rock is staged and checked, so a symlink
   leading out of the source or a `rock_manifest` entry leaving its directory
-  (`rocks.ErrUnsafePath`) leaves the tree as it was. The `GraftReport` lists
+  (`rocks.ErrUnsafePath`) leaves the tree as it was, and so does, with
+  `GraftOpts.NoDisplace`, a graft that would take the plain path of a file
+  from a rock installed here, and with `GraftOpts.RequirePlain` one a
+  grafted rock of which would not hold its plain paths (`ErrNotPlain`). The
+  `GraftReport` lists
   the files of the source's `share/`, `lib/` and `bin/` no rock of it lists.
 - tree: `Tx.Rewrap` rewrites every command wrapper for the tree's root and
   `BinWrap`, for a tree moved, extracted elsewhere or run by another
@@ -117,10 +133,18 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   ends, failing then with `tree.ErrLocked`, so concurrent changes of one
   tree, from goroutines or processes, no longer lose each other's manifest
   entries. `Tree.Check`, and `Tx.Graft` of its source, read under it,
-  shared.
+  shared. `Paths.LockFile` names the lock file, which is the library's own:
+  `Tx.Graft` does not take it from its source, `Tree.Check` and `View` look
+  past it, and `Pack` and `PackStaged` never pack it, so a tool archiving a
+  whole tree knows to leave it out.
 - tree: `Inspect` reads a tree into a `View` without creating anything, an
   absent tree or manifest reading as empty, and `Tree.View` does the same
-  for an open tree; both read under the tree's lock, shared, waiting for it
+  for an open tree. `Open` creates nothing either, so a tree that does not
+  exist is still absent after `Tree.View`, `Tree.Check`, which finds it
+  healthy, and `Tree.Rebuild`, which finds no rocks, and after the client's
+  `List`, `Show` and `Which`; each change creates the directories it writes
+  into, and `Tree.Update` the rocks dir and its lock file. `Inspect` and
+  `Tree.View` read under the tree's lock, shared, waiting for it
   until their context ends, failing then with `ErrLocked`. A `View`
   answers `Rocks`, `Versions` and `Installed`, the `Providers` of a module or
   command, the `Owner` of a deployed file, a rock's `Files` and where each is
@@ -141,9 +165,14 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `make` and `cmake` backends install into the rock's install dir, as
   upstream's `$(PREFIX)`, `$(LUADIR)`, … name it; `cmake` builds out of tree
   in `build.luarocks` and installs under the rock's `$(PREFIX)` when the
-  rockspec sets no `CMAKE_INSTALL_PREFIX`. On unix every build tool runs in
-  a process group of its own, which cancelling the build's context kills
-  whole, the compilers a `make` started included. The `builtin` backend
+  rockspec sets no `CMAKE_INSTALL_PREFIX`. The build tools run in the
+  caller's process group, so the terminal's Ctrl-C reaches them, and a
+  cancelled build returns within about a second even if a process a tool
+  started still holds its output. With `Config.IsolateBuilds` on unix each
+  build tool runs in a process group of its own instead, which cancelling
+  the build's context kills whole, the compilers a `make` started
+  included; Ctrl-C no longer reaches it, so the caller must cancel the
+  context on SIGINT and SIGTERM. The `builtin` backend
   reads only inside the sources and writes only inside its build dir.
   Before any backend runs, a rockspec's `build.extra_files` are written
   into the sources and its `build.patches` applied, by a port of upstream's
@@ -228,7 +257,8 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   inputs the native backend deploys with, so a `tree.Tree` given them writes
   the wrappers `Install` writes. `PackStaged` packs a directory laid out as
   an unpacked binary rock into the `.rock` the native `Pack` makes of the
-  rock once installed from it.
+  rock once installed from it, installing it into a temporary tree in
+  `PackStagedOpts.TempDir`, or the system's temporary directory.
 - client: The lua backend runs each operation in its own VM, so no state
   carries over between calls, and one client may be used from several
   goroutines at once. It honours `Config.Servers`, reads

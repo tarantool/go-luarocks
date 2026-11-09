@@ -279,14 +279,17 @@ func TestShow_TreeOpenError(t *testing.T) {
 	require.Error(t, err, "Show with unusable tree path")
 }
 
-func TestWhich_TreeOpenError(t *testing.T) {
+// TestWhich_UnusableTree: Which in a tree whose root is a file finds
+// nothing; opening the tree creates nothing, so it fails nowhere.
+func TestWhich_UnusableTree(t *testing.T) {
 	t.Parallel()
 
 	r, err := client.New(brokenTreeConfig(t))
 	require.NoError(t, err, "New")
 
-	_, _, err = r.Which(context.Background(), "hello")
-	require.Error(t, err, "Which with unusable tree path")
+	_, ok, err := r.Which(context.Background(), "hello")
+	require.NoError(t, err, "Which with unusable tree path")
+	assert.False(t, ok, "Which with unusable tree path")
 }
 
 // --- native Build ---

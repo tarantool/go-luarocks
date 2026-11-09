@@ -31,6 +31,14 @@ type StagedOpts struct {
 	// because another rock holds it, so that `require` and the tree's bin
 	// reach the rock's own files.
 	RequirePlain bool
+	// NoDisplace refuses, with an error wrapping ErrNotPlain and before
+	// anything changes, a rock a file of which would take its plain path from
+	// another rock — one of another name, which would keep its file at the
+	// versioned path only — so that `require` and the tree's bin reach the
+	// files they reached before for every other rock. The rock's own other
+	// versions give their plain paths up as without it. With RequirePlain
+	// too, every file of the rock is at a plain path no other rock had.
+	NoDisplace bool
 }
 
 // InstallStaged deploys dir, laid out as an unpacked binary rock, as the rock
@@ -51,7 +59,9 @@ type StagedOpts struct {
 // rock whole and copies nothing else.
 //
 // dir is read only inside itself: a symlink in it leading out fails the
-// install with an error wrapping rocks.ErrUnsafePath.
+// install with an error wrapping rocks.ErrUnsafePath. A dir that does not
+// exist is a rock with no files, as an empty one is: its rockspec alone is
+// installed, as for a rock that only gathers its dependencies.
 func (tx *Tx) InstallStaged(spec *rocks.Rockspec, dir string, opts StagedOpts) (*rocks.RockManifest, error) {
 	if tx.done {
 		return nil, errTxDone
@@ -66,8 +76,8 @@ func (tx *Tx) InstallStaged(spec *rocks.Rockspec, dir string, opts StagedOpts) (
 		return nil, fmt.Errorf("tree.InstallStaged: %w", err)
 	}
 
-	if opts.RequirePlain {
-		if err := tx.checkStagedPlain(spec, dir, opts.RemoveOtherVersions); err != nil {
+	if opts.RequirePlain || opts.NoDisplace {
+		if err := tx.checkStaged(spec, dir, opts); err != nil {
 			return nil, fmt.Errorf("tree.InstallStaged: %w", err)
 		}
 	}
@@ -157,9 +167,9 @@ func wrapsCommands(spec *rocks.Rockspec) bool {
 // lua/ and lib/ trees, and the commands below bin/, from rockDir as from a
 // build dir.
 func binarySpec(spec *rocks.Rockspec, rockDir string) (*rocks.Rockspec, error) {
-	entries, err := os.ReadDir(rockDir)
+	entries, err := readRockDir(rockDir)
 	if err != nil {
-		return nil, fmt.Errorf("read rock dir %s: %w", rockDir, err)
+		return nil, err
 	}
 
 	deploySpec := *spec
@@ -193,15 +203,26 @@ func binarySpec(spec *rocks.Rockspec, rockDir string) (*rocks.Rockspec, error) {
 	return &deploySpec, nil
 }
 
+// readRockDir lists the unpacked binary rock rockDir: nothing when it does
+// not exist, which is a rock with no files.
+func readRockDir(rockDir string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(rockDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read rock dir %s: %w", rockDir, err)
+	}
+
+	return entries, nil
+}
+
 // copyTopFiles copies every regular file at the top of the unpacked binary
 // rock rockDir into the rock's install dir, keeping its permission bits, as
 // upstream's unpack of the rock there does — the rockspec and the
 // rock_manifest aside, which the deploy writes itself. Deploy's listing of the
 // install dir then records them in the rock_manifest.
 func (t *Tree) copyTopFiles(spec *rocks.Rockspec, rockDir string) error {
-	entries, err := os.ReadDir(rockDir)
+	entries, err := readRockDir(rockDir)
 	if err != nil {
-		return fmt.Errorf("read rock dir %s: %w", rockDir, err)
+		return err
 	}
 
 	installDir := t.InstallDir(spec.Package, spec.Version)
@@ -278,25 +299,46 @@ func (tx *Tx) removeOtherVersions(name string, keep []string) error {
 	return nil
 }
 
-// checkStagedPlain fails with an error wrapping ErrNotPlain when a deployed
-// file of the binary rock unpacked into dir would not take its plain path,
-// as Deploy decides it against the manifest the install leaves: the
-// transaction's, without spec's version, and without the rock's other
-// versions when removeOthers is set.
-func (tx *Tx) checkStagedPlain(spec *rocks.Rockspec, dir string, removeOthers bool) error {
+// checkStaged checks the binary rock of spec unpacked into dir against the
+// plain-path options of opts, as Deploy would give its files their spots in
+// the tree the install leaves: without spec's version, and without the
+// rock's other versions when opts.RemoveOtherVersions is set.
+func (tx *Tx) checkStaged(spec *rocks.Rockspec, dir string, opts StagedOpts) error {
+	rm, err := stagedDeployed(dir)
+	if err != nil {
+		return err
+	}
+
 	m := cloneManifest(tx.m)
 	for _, version := range tx.View().Versions(spec.Package) {
-		if removeOthers || sameVersion(version, spec.Version) {
+		if opts.RemoveOtherVersions || sameVersion(version, spec.Version) {
 			removeFromManifest(m, spec.Package, version)
 		}
 	}
 
-	t := &Tree{Paths: tx.tree.Paths, Providers: manifestProviders(m)}
+	if opts.RequirePlain {
+		if err := checkStagedPlain(tx.tree.Paths, m, spec, rm); err != nil {
+			return err
+		}
+	}
 
-	var notPlain []string
+	if !opts.NoDisplace {
+		return nil
+	}
 
-	for _, dt := range []string{deployLua, deployLib, deployBin} {
-		sub := filepath.Join(dir, dt)
+	addToManifest(m, spec, rm)
+
+	return checkDisplaced(tx.tree.Paths, tx.m, m, []incoming{{ref: RockRef{Name: spec.Package, Version: spec.Version}, rm: rm}})
+}
+
+// stagedDeployed lists the files of the binary rock unpacked into dir that
+// Deploy deploys — those under its lua/, lib/ and bin/ — in the sections of
+// a rock_manifest, without their digests.
+func stagedDeployed(dir string) (*rocks.RockManifest, error) {
+	rm := &rocks.RockManifest{Lua: map[string]string{}, Lib: map[string]string{}, Bin: map[string]string{}}
+
+	for _, sec := range deployedSections(rm) {
+		sub := filepath.Join(dir, sec.dt)
 
 		err := filepath.WalkDir(sub, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -316,20 +358,135 @@ func (tx *Tx) checkStagedPlain(spec *rocks.Rockspec, dir string, removeOthers bo
 				return err
 			}
 
-			rel = filepath.ToSlash(rel)
-			if plain, curName, curVer := t.takesPlainPath(dt, rel, spec.Package, spec.Version); !plain {
-				notPlain = append(notPlain, dt+"/"+rel+" (held by "+RockRef{Name: curName, Version: curVer}.String()+")")
-			}
+			sec.files[filepath.ToSlash(rel)] = ""
 
 			return nil
 		})
 		if err != nil {
-			return fmt.Errorf("list %s: %w", sub, err)
+			return nil, fmt.Errorf("list %s: %w", sub, err)
+		}
+	}
+
+	return rm, nil
+}
+
+// checkStagedPlain fails with an error wrapping ErrNotPlain when a file of
+// rm, the deployed files of spec's rock, would not take its plain path in the
+// tree of p whose manifest is m, as Deploy decides it.
+func checkStagedPlain(p Paths, m *rocks.Manifest, spec *rocks.Rockspec, rm *rocks.RockManifest) error {
+	t := &Tree{Paths: p, Providers: manifestProviders(m)}
+
+	var notPlain []string
+
+	for _, sec := range deployedSections(rm) {
+		for _, rel := range sortedKeys(sec.files) {
+			if plain, curName, curVer := t.takesPlainPath(sec.dt, rel, spec.Package, spec.Version); !plain {
+				notPlain = append(notPlain, sec.dt+"/"+rel+" (held by "+RockRef{Name: curName, Version: curVer}.String()+")")
+			}
 		}
 	}
 
 	if len(notPlain) > 0 {
 		return fmt.Errorf("%w: %s %s: %s", ErrNotPlain, spec.Package, spec.Version, strings.Join(notPlain, ", "))
+	}
+
+	return nil
+}
+
+// deployedSection is a section of a rock_manifest whose files Deploy
+// deploys: its deploy type and its files.
+type deployedSection struct {
+	dt    string
+	files map[string]string
+}
+
+// deployedSections returns the deployed sections of rm: lua, lib and bin.
+func deployedSections(rm *rocks.RockManifest) []deployedSection {
+	return []deployedSection{{deployLua, rm.Lua}, {deployLib, rm.Lib}, {deployBin, rm.Bin}}
+}
+
+// incoming is a rock about to be installed and its rock_manifest, of which
+// the deployed sections count.
+type incoming struct {
+	ref RockRef
+	rm  *rocks.RockManifest
+}
+
+// checkPlainAfter fails with an error wrapping ErrNotPlain, naming each file
+// and the rock holding it, when a file of a rock of in is not at its plain
+// path in the tree of p whose manifest is after, the one installing in
+// leaves: the rock is not the first provider of the item, as Deploy reads
+// the provider lists.
+func checkPlainAfter(p Paths, after *rocks.Manifest, in []incoming) error {
+	now := &Tree{Paths: p, Providers: manifestProviders(after)}
+
+	var notPlain []string
+
+	for _, r := range in {
+		var files []string
+
+		for _, sec := range deployedSections(r.rm) {
+			for _, rel := range sortedKeys(sec.files) {
+				if name, version, _ := now.currentProvider(sec.dt, rel); name != r.ref.Name || version != r.ref.Version {
+					files = append(files, sec.dt+"/"+rel+" (held by "+RockRef{Name: name, Version: version}.String()+")")
+				}
+			}
+		}
+
+		if len(files) > 0 {
+			notPlain = append(notPlain, r.ref.Name+" "+r.ref.Version+": "+strings.Join(files, ", "))
+		}
+	}
+
+	if len(notPlain) > 0 {
+		return fmt.Errorf("%w: %s", ErrNotPlain, strings.Join(notPlain, "; "))
+	}
+
+	return nil
+}
+
+// checkDisplaced fails with an error wrapping ErrNotPlain, naming each file
+// and the rock holding it, when installing the rocks in into the tree of p,
+// whose manifest goes from before to after, takes the plain path of a file
+// from another rock: one of before, of a name none of in has, that holds the
+// plain path of an item a rock of in provides — the item's first provider,
+// as Deploy reads the provider lists — and holds it no more after.
+func checkDisplaced(p Paths, before, after *rocks.Manifest, in []incoming) error {
+	names := map[string]bool{}
+	for _, r := range in {
+		names[r.ref.Name] = true
+	}
+
+	was := &Tree{Paths: p, Providers: manifestProviders(before)}
+	now := &Tree{Paths: p, Providers: manifestProviders(after)}
+
+	var taken []string
+
+	for _, r := range in {
+		var files []string
+
+		for _, sec := range deployedSections(r.rm) {
+			for _, rel := range sortedKeys(sec.files) {
+				name, version, ok := was.currentProvider(sec.dt, rel)
+				if !ok || names[name] {
+					continue
+				}
+
+				if n, v, _ := now.currentProvider(sec.dt, rel); n == name && v == version {
+					continue
+				}
+
+				files = append(files, sec.dt+"/"+rel+" (held by "+RockRef{Name: name, Version: version}.String()+")")
+			}
+		}
+
+		if len(files) > 0 {
+			taken = append(taken, r.ref.Name+" "+r.ref.Version+": "+strings.Join(files, ", "))
+		}
+	}
+
+	if len(taken) > 0 {
+		return fmt.Errorf("%w: other rocks would lose their plain paths: %s", ErrNotPlain, strings.Join(taken, "; "))
 	}
 
 	return nil

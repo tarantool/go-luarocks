@@ -406,20 +406,33 @@ func (s *spots) seen(t *Tree, dt, rel string) bool {
 //
 // t.Providers must still list the version being deleted: removing it from the
 // tree manifest is the caller's job, after DeleteVersion. A missing or
-// unreadable rock_manifest still lets the install dir be removed.
+// unreadable rock_manifest still lets the install dir be removed, the
+// deployed files left where they are; Tx.Remove finds them through the tree
+// manifest instead.
 //
 // Unlike upstream it removes nothing outside the tree: a name or version that
 // is not a single directory, or a rock_manifest entry that leaves its deploy
 // dir, fails it with an error wrapping rocks.ErrUnsafePath before anything is
 // removed.
 func (t *Tree) DeleteVersion(name, version string) error {
+	return t.deleteVersion(name, version, nil)
+}
+
+// deleteVersion is DeleteVersion, undeploying the files of fallback, when not
+// nil, if the rock_manifest of name/version cannot be read.
+func (t *Tree) deleteVersion(name, version string, fallback *rocks.RockManifest) error {
 	if err := checkNameVersion(name, version); err != nil {
 		return fmt.Errorf("tree.DeleteVersion: %w", err)
 	}
 
 	installDir := t.InstallDir(name, version)
 
-	if rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest")); err == nil && rm != nil {
+	rm, err := t.Store.ReadRock(filepath.Join(installDir, "rock_manifest"))
+	if err != nil || rm == nil {
+		rm = fallback
+	}
+
+	if rm != nil {
 		if err := t.undeployFiles(name, version, rm); err != nil {
 			return fmt.Errorf("tree.DeleteVersion: %w", err)
 		}

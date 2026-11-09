@@ -154,8 +154,9 @@ func isDir(path string) bool {
 }
 
 const (
-	// dirPerm is the mode used when creating destination directories.
-	dirPerm os.FileMode = 0o750
+	// dirPerm is the mode used when creating destination directories, before
+	// the umask, as upstream's mkdir creates them.
+	dirPerm os.FileMode = 0o777
 	// exePerm is the mode applied to installed executable artifacts.
 	exePerm os.FileMode = 0o750
 	// dirOwnerRWX is OR-ed into a copied directory's mode so the owner can
@@ -404,7 +405,7 @@ func compileModule(ctx context.Context, srcDir, destDir, name string, m rocks.Mo
 
 	args = append(args, flags.LDFLAGS...)
 
-	return runCmd(ctx, flags.CC, args, srcDir, buildEnv(cfg))
+	return runCmd(ctx, cfg.IsolateBuilds, flags.CC, args, srcDir, buildEnv(cfg))
 }
 
 // installBuildInstall processes the four sub-maps of build.install. Each
@@ -491,7 +492,7 @@ func installBuildInstall(srcDir, destDir string, bi rocks.BuildInstall) error {
 
 // copyFile copies src, read inside srcRoot, to dst, inside dstRoot,
 // preserving the source file's regular-file mode bits (lower 9 bits). Parent
-// directories of dst are created with dirPerm (0o750). A symlink on the way
+// directories of dst are created with dirPerm (0o777, less the umask). A symlink on the way
 // that leaves its root fails the copy (see safepath).
 func copyFile(srcRoot, src, dstRoot, dst string) error {
 	in, err := safepath.Open(srcRoot, src)

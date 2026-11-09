@@ -1,10 +1,13 @@
 package tree_test
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -17,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/client"
 	"github.com/tarantool/go-luarocks/tree"
 )
 
@@ -297,4 +301,40 @@ func TestInspect_WaitsUntilContextEnds(t *testing.T) {
 	v, err := tree.Inspect(context.Background(), root)
 	require.NoError(t, err, "Inspect once the Update is done")
 	assert.Empty(t, v.Rocks())
+}
+
+// TestLockFile_NotTreeContents: the lock file the changes of a tree leave in
+// it is the library's, not the tree's: Check finds nothing wrong with it, a
+// graft of the tree neither reports nor takes it, the grafted tree having a
+// lock of its own, and neither Pack nor PackStaged packs it.
+func TestLockFile_NotTreeContents(t *testing.T) {
+	t.Parallel()
+
+	src := buildTree(t, alpha1)
+	lock := tree.Paths{Tree: src}.LockFile()
+	require.FileExists(t, lock, "the lock of the changes that built the tree")
+	require.NoError(t, os.WriteFile(lock, []byte("the source's\n"), 0o600))
+
+	assert.Empty(t, check(t, src).Issues, "Check")
+
+	dst := t.TempDir()
+	report, err := graft(t, dst, src, tree.GraftOpts{})
+	require.NoError(t, err, "Graft")
+	assert.Empty(t, report.Untracked, "Untracked")
+	assert.Empty(t, readFile(t, tree.Paths{Tree: dst}.LockFile()), "the grafted tree's own lock")
+
+	spec := stagedSpec(t, "staged", "1.0-1")
+	staged := filepath.Join(t.TempDir(), "staged-1.0-1.all.rock")
+	require.NoError(t, client.PackStaged(spec, stageRockDir(t, spec), staged, client.PackStagedOpts{}), "PackStaged")
+
+	for _, archive := range []string{packRock(t, alpha1), staged} {
+		zr, err := zip.OpenReader(archive)
+		require.NoError(t, err)
+
+		for _, f := range zr.File {
+			assert.NotEqual(t, ".lock", path.Base(f.Name), "%s: %s", archive, f.Name)
+		}
+
+		require.NoError(t, zr.Close())
+	}
 }

@@ -1,6 +1,7 @@
 package tree_test
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	rocks "github.com/tarantool/go-luarocks"
+	"github.com/tarantool/go-luarocks/client"
 	"github.com/tarantool/go-luarocks/tree"
 )
 
@@ -19,21 +21,43 @@ import (
 // and file basename.
 const demoPkg = "demo"
 
-func TestOpen_CreatesLayout(t *testing.T) {
+// TestOpen_CreatesNothing: opening a tree that does not exist, then viewing,
+// checking and rebuilding it, and listing it through the client, leaves it
+// absent: each takes it for an empty tree.
+func TestOpen_CreatesNothing(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	tr, err := tree.Open(rocks.Config{Tree: dir})
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "absent")
+
+	tr, err := tree.Open(rocks.Config{Tree: root})
 	require.NoError(t, err)
-
-	for _, sub := range []string{tr.RocksDir(), tr.DeployLuaDir(), tr.DeployLibDir(), tr.BinDir()} {
-		st, err := os.Stat(sub)
-		if assert.NoError(t, err, "expected dir %q to exist", sub) {
-			assert.True(t, st.IsDir(), "expected dir %q to exist", sub)
-		}
-	}
-
 	assert.NotNil(t, tr.Store, "Open: Store should default to manif.FileStore, got nil")
+
+	v, err := tr.View(ctx)
+	require.NoError(t, err, "View")
+	assert.Empty(t, v.Rocks())
+
+	report, err := tr.Check(ctx, tree.CheckOpts{})
+	require.NoError(t, err, "Check")
+	assert.True(t, report.OK(), "Check: %v", report.Issues)
+
+	rebuilt, err := tr.Rebuild(ctx, tree.RebuildOpts{Strict: true})
+	require.NoError(t, err, "Rebuild")
+	assert.Empty(t, rebuilt.Rocks)
+
+	c, err := client.New(rocks.Config{Tree: root})
+	require.NoError(t, err, "New")
+
+	list, err := c.List(ctx)
+	require.NoError(t, err, "List")
+	assert.Empty(t, list)
+
+	_, ok, err := c.Which(ctx, "anything")
+	require.NoError(t, err, "Which")
+	assert.False(t, ok)
+
+	assert.NoDirExists(t, root, "the tree")
 }
 
 func TestOpen_EmptyTree(t *testing.T) {
@@ -966,13 +990,17 @@ func deployedModules(t *testing.T, root string) []string {
 }
 
 // deployedFiles returns the slash-separated paths of every regular file under
-// root, relative to it.
+// root, relative to it: none when root does not exist.
 func deployedFiles(t *testing.T, root string) []string {
 	t.Helper()
 
 	var got []string
 
 	require.NoError(t, filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if p == root && os.IsNotExist(err) {
+			return nil
+		}
+
 		if err != nil || fi.IsDir() {
 			return err
 		}
