@@ -8,6 +8,13 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-11-09
+
+The first release: a pure-Go native engine and a vendored upstream LuaRocks
+3.9.2 behind one `Rocks` facade, a `tree` package that owns a rock tree's
+files and its manifest together, and a differential harness that holds the
+two backends to the same deployed artifacts wherever they share semantics.
+
 Requires Go 1.26 or later, which `golang.org/x/crypto` v0.56.0 declares; that
 version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
 
