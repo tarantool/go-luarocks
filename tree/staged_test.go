@@ -241,3 +241,38 @@ func TestInstallStaged_Spec(t *testing.T) {
 	_, err := installStaged(t, root, good, dir, tree.StagedOpts{})
 	require.NoError(t, err)
 }
+
+// TestInstallStaged_NoFiles: a rock with no files — a stage dir that is
+// empty, or does not exist — installs as its rockspec alone, with every
+// option, and the tree holds nothing else of it.
+func TestInstallStaged_NoFiles(t *testing.T) {
+	t.Parallel()
+
+	opts := tree.StagedOpts{RequirePlain: true, NoDisplace: true, RemoveOtherVersions: true}
+
+	for name, dir := range map[string]string{
+		"an empty stage": t.TempDir(),
+		"no stage":       filepath.Join(t.TempDir(), "absent"),
+	} {
+		root := t.TempDir()
+		spec := stagedSpec(t, "meta", "1.0-1")
+
+		rm, err := installStaged(t, root, spec, dir, opts)
+		require.NoError(t, err, name)
+		assert.Equal(t, "meta-1.0-1.rockspec", rm.RockspecFile, name)
+		assert.Empty(t, rm.Lua, name)
+		assert.Empty(t, rm.Lib, name)
+		assert.Empty(t, rm.Bin, name)
+		assert.Empty(t, rm.Other, name)
+
+		ref := tree.RockRef{Name: "meta", Version: "1.0-1"}
+		v := inspect(t, root)
+		assert.Equal(t, []tree.RockRef{ref}, v.Rocks(), name)
+
+		if deps := v.Dependencies(ref); assert.Len(t, deps, 1, name) {
+			assert.Equal(t, "alpha", deps[0].Name, name)
+		}
+
+		assert.Empty(t, check(t, root).Issues, name)
+	}
+}

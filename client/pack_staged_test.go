@@ -79,7 +79,16 @@ func TestPackStaged(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "staged-1.0-1.linux-x86_64.rock")
-	require.NoError(t, client.PackStaged(spec, dir, out), "PackStaged")
+	tmp := t.TempDir()
+
+	err = client.PackStaged(spec, dir, out, client.PackStagedOpts{TempDir: filepath.Join(tmp, "absent")})
+	require.ErrorContains(t, err, filepath.Join(tmp, "absent"), "PackStaged into a TempDir that does not exist")
+
+	require.NoError(t, client.PackStaged(spec, dir, out, client.PackStagedOpts{TempDir: tmp}), "PackStaged")
+
+	left, err := os.ReadDir(tmp)
+	require.NoError(t, err)
+	assert.Empty(t, left, "the temporary tree is removed from TempDir")
 
 	cfg := rocks.Config{Tree: t.TempDir(), WorkingDir: t.TempDir(), Tarantool: rocks.TarantoolConfig{Prefix: "/opt/test"}}
 

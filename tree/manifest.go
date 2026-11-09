@@ -88,15 +88,17 @@ type Tx struct {
 //
 // The lock is an advisory lock on the file .lock in the rocks dir (flock(2)
 // on Linux, macOS and the BSDs; elsewhere it guards nothing), which Update
-// creates, with the rocks dir, when the tree has none. It orders every Update
-// of the tree, every write of the client to it, and the loads of Inspect and
-// View, which take it shared, across processes and goroutines alike: Update
-// waits for the changes and loads before it to end, and fails with an error
-// wrapping ErrLocked and the cause of ctx's end when ctx ends first. Other
-// writers — an external `luarocks`, or Exec of the client's lua backend — do
-// not take it. fn must not call Update, View or Inspect on the same tree, nor
-// the client's writes to it: they would wait for the lock fn holds, until
-// ctx ends, or for ever; tx.View is the view fn has.
+// creates, with the rocks dir, when the tree has none, even when fn changes
+// nothing: to look into a tree that may not exist — whether it has anything
+// to prune, say — take its View, which creates nothing. It orders every
+// Update of the tree, every write of the client to it, and the loads of
+// Inspect and View, which take it shared, across processes and goroutines
+// alike: Update waits for the changes and loads before it to end, and fails
+// with an error wrapping ErrLocked and the cause of ctx's end when ctx ends
+// first. Other writers — an external `luarocks`, or Exec of the client's lua
+// backend — do not take it. fn must not call Update, View or Inspect on the
+// same tree, nor the client's writes to it: they would wait for the lock fn
+// holds, until ctx ends, or for ever; tx.View is the view fn has.
 func (t *Tree) Update(ctx context.Context, fn func(tx *Tx) error) error {
 	return t.update(ctx, "tree.Update", t.readManifest, fn)
 }
@@ -214,6 +216,13 @@ func (tx *Tx) Deploy(spec *rocks.Rockspec, deploy func(t *Tree) (*rocks.RockMani
 // next provider. It does not ask whether another installed rock depends on
 // the version: the caller owns the dependency graph.
 //
+// A version whose rock_manifest is missing or cannot be read, which upstream
+// drops from the manifest alone, is undeployed by the files its entry in the
+// tree manifest names: its commands, and its modules, each with the other
+// form of the module beside it, so that the plain paths it held pass on; a
+// file the entry does not name, such as a data file beside its modules, is
+// left, and the install dir is removed whole.
+//
 // r.Version may be any spelling of an installed version that deps.Compare
 // finds equal. A version the tree manifest does not list fails with an error
 // wrapping ErrNotInstalled.
@@ -233,9 +242,11 @@ func (tx *Tx) Remove(r RockRef) error {
 // deleteVersion undeploys name/version from the tree and drops it from the
 // manifest: DeleteVersion consults the manifest, which still lists the
 // version, to tell which of its files hold plain paths and which provider
-// takes each over, and the version leaves it afterwards.
+// takes each over, and the version leaves it afterwards. When the version's
+// rock_manifest cannot be read, the files its manifest entry names are
+// undeployed instead (entryFiles).
 func (tx *Tx) deleteVersion(name, version string) error {
-	if err := tx.treeFor().DeleteVersion(name, version); err != nil {
+	if err := tx.treeFor().deleteVersion(name, version, entryFiles(tx.m.Repository[name][version])); err != nil {
 		return err
 	}
 
@@ -243,6 +254,36 @@ func (tx *Tx) deleteVersion(name, version string) error {
 	tx.changed()
 
 	return nil
+}
+
+// entryFiles lists, in the deployed sections of a rock_manifest, the files
+// the tree manifest's entry of a rock names, to stand in for the rock's
+// rock_manifest when that cannot be read: each command, and each module at
+// the path the entry gives and at the other form of the module beside it —
+// the .so of a .lua and the .lua of a .so — since an entry names one file
+// per module, the .so of a module shipping both (ModuleIndex). A module file
+// of another extension may be in either deploy dir and is listed in both. A
+// file of the rock the entry does not name, such as a data file beside its
+// modules, is not listed.
+func entryFiles(e rocks.RepoEntry) *rocks.RockManifest {
+	rm := &rocks.RockManifest{Lua: map[string]string{}, Lib: map[string]string{}, Bin: map[string]string{}}
+
+	for _, rel := range e.Modules {
+		switch {
+		case strings.HasSuffix(rel, ".lua"):
+			rm.Lua[rel], rm.Lib[withSoExt(rel)] = "", ""
+		case strings.HasSuffix(rel, ".so"):
+			rm.Lib[rel], rm.Lua[withLuaExt(rel)] = "", ""
+		default:
+			rm.Lua[rel], rm.Lib[rel] = "", ""
+		}
+	}
+
+	for _, rel := range e.Commands {
+		rm.Bin[rel] = ""
+	}
+
+	return rm
 }
 
 // changed records that the transaction changed its manifest.

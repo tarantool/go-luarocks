@@ -29,6 +29,20 @@ type GraftOpts struct {
 	// a grafted rock that Graft does not graft, so the tree ends with the
 	// versions of the source tree; Graft keeps them otherwise.
 	RemoveOtherVersions bool
+	// NoDisplace refuses, with an error wrapping ErrNotPlain and before
+	// anything changes, a graft that would take the plain path of a file
+	// from a rock installed here of another name than every grafted rock's,
+	// as StagedOpts.NoDisplace refuses an install that would. The grafted
+	// rocks share their items among themselves, and with the other versions
+	// of their own names, by the tree's conflict rules.
+	NoDisplace bool
+	// RequirePlain refuses, with an error wrapping ErrNotPlain and before
+	// anything changes, a graft a file of a grafted rock of which would not
+	// be at its plain path once grafted, another rock, grafted or installed
+	// here, holding it, as StagedOpts.RequirePlain refuses an install. To ask
+	// it of one rock, the package of an archive say, graft that rock alone
+	// with it (Select), after the others.
+	RequirePlain bool
 }
 
 // GraftReport is what Tx.Graft did.
@@ -154,6 +168,12 @@ func (tx *Tx) Graft(src string, opts GraftOpts) (*GraftReport, error) {
 
 	if len(conflicts) > 0 {
 		return nil, fmt.Errorf("tree.Graft: %w: %s", ErrConflict, strings.Join(conflicts, ", "))
+	}
+
+	if opts.NoDisplace || opts.RequirePlain {
+		if err := tx.checkGraftPlain(staged, todo, opts); err != nil {
+			return nil, fmt.Errorf("tree.Graft: %w", err)
+		}
 	}
 
 	if opts.RemoveOtherVersions {
@@ -445,6 +465,56 @@ func stagedRockspec(ref RockRef, rm *rocks.RockManifest, dir string) (*rocks.Roc
 	}
 
 	return spec, nil
+}
+
+// checkGraftPlain checks grafting todo, of the rocks staged, against the
+// plain-path options of opts: it fails as checkDisplaced does with
+// opts.NoDisplace, and as checkPlainAfter does with opts.RequirePlain. It
+// plays the graft on a copy of the manifest: the versions of the staged
+// rocks' names staged does not have removed when opts.RemoveOtherVersions is
+// set, as removeUngrafted removes them, then each rock of todo, in the order
+// Graft installs them, put in the place of its installed version.
+func (tx *Tx) checkGraftPlain(staged, todo []graftRock, opts GraftOpts) error {
+	m := cloneManifest(tx.m)
+
+	if opts.RemoveOtherVersions {
+		keep := map[string][]string{}
+		for _, r := range staged {
+			keep[r.ref.Name] = append(keep[r.ref.Name], r.ref.Version)
+		}
+
+		for _, name := range slices.Sorted(maps.Keys(keep)) {
+			for _, version := range slices.Sorted(maps.Keys(m.Repository[name])) {
+				if !slices.ContainsFunc(keep[name], func(k string) bool { return sameVersion(k, version) }) {
+					removeFromManifest(m, name, version)
+				}
+			}
+		}
+	}
+
+	in := make([]incoming, 0, len(todo))
+
+	for _, r := range graftOrder(todo) {
+		if installed, ok := installedRef(m, r.ref.Name, r.ref.Version); ok {
+			removeFromManifest(m, installed.Name, installed.Version)
+		}
+
+		addToManifest(m, r.spec, r.rm)
+
+		in = append(in, incoming{ref: r.ref, rm: r.rm})
+	}
+
+	if opts.RequirePlain {
+		if err := checkPlainAfter(tx.tree.Paths, m, in); err != nil {
+			return err
+		}
+	}
+
+	if opts.NoDisplace {
+		return checkDisplaced(tx.tree.Paths, tx.m, m, in)
+	}
+
+	return nil
 }
 
 // removeUngrafted removes every installed version of a rock of staged that

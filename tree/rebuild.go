@@ -2,7 +2,10 @@ package tree
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -62,8 +65,14 @@ type SkippedRock struct {
 // evaluate is listed without its declared dependencies, as upstream lists it,
 // and reported. Rebuild holds the tree's lock, exclusive, as Update does,
 // waiting for it until ctx ends (ErrLocked), and writes the manifest once.
+// A tree without a rocks dir has no rocks to list: Rebuild returns an empty
+// report then, and creates nothing.
 func (t *Tree) Rebuild(ctx context.Context, opts RebuildOpts) (*RebuildReport, error) {
 	report := &RebuildReport{}
+
+	if _, err := os.Stat(t.RocksDir()); errors.Is(err, fs.ErrNotExist) {
+		return report, nil
+	}
 
 	empty := func() (*rocks.Manifest, error) { return normalizeManifest(&rocks.Manifest{}), nil }
 

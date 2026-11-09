@@ -56,7 +56,7 @@ func runMake(ctx context.Context, spec *rocks.Rockspec, srcDir, _ string, cfg ro
 
 		args = append(args, kvArgs(bv)...)
 
-		if err := runCmd(ctx, "make", args, srcDir, env); err != nil {
+		if err := runCmd(ctx, cfg.IsolateBuilds, "make", args, srcDir, env); err != nil {
 			return err
 		}
 	}
@@ -75,7 +75,7 @@ func runMake(ctx context.Context, spec *rocks.Rockspec, srcDir, _ string, cfg ro
 	args = append(args, installTarget)
 	args = append(args, kvArgs(iv)...)
 
-	return runCmd(ctx, "make", args, srcDir, env)
+	return runCmd(ctx, cfg.IsolateBuilds, "make", args, srcDir, env)
 }
 
 // prepareMakeVars expands $(VAR) in every value against subst and auto-injects

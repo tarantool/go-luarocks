@@ -6,6 +6,7 @@ package tree
 // exported-API test style there stays untouched.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -616,16 +617,21 @@ func TestCopyTree_Errors(t *testing.T) {
 	})
 }
 
-func TestOpen_MkdirError(t *testing.T) {
+// TestUpdate_MkdirError: a tree whose root is a file opens, and fails the
+// first Update, which creates its rocks dir.
+func TestUpdate_MkdirError(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	blocked := filepath.Join(dir, "blocked")
 	writeInternal(t, blocked, "not a dir")
 
-	_, err := Open(rocks.Config{Tree: blocked})
+	tr, err := Open(rocks.Config{Tree: blocked})
+	require.NoError(t, err)
+
+	err = tr.Update(context.Background(), func(*Tx) error { return nil })
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tree.Open")
+	assert.Contains(t, err.Error(), "tree.Update: mkdir")
 }
 
 // TestDeploy_NilAndInvalidSpec covers Deploy's own guard-clause errors.
@@ -853,6 +859,7 @@ func TestDeploy_InstallBinWrapperMkdirError(t *testing.T) {
 
 	tr.BinWrap = &BinWrap{Interpreter: "/usr/bin/lua", Sysconfdir: "/etc/luarocks"}
 
+	require.NoError(t, os.MkdirAll(tr.BinDir(), dirPerm))
 	readOnlyDir(t, tr.BinDir())
 
 	spec := &rocks.Rockspec{

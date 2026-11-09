@@ -33,9 +33,10 @@ import (
 // FileStore is a value type with no state.
 type FileStore struct{}
 
-// manifestDirMode is the permission applied to directories created while
-// writing a manifest: owner rwx, group rx, no world access.
-const manifestDirMode = 0o750
+// manifestDirMode is the mode directories created while writing a manifest
+// get before the umask, as upstream's mkdir gives them: 0755 under the usual
+// umask.
+const manifestDirMode = 0o777
 
 // legacyRockspecKey is the fixed rock_manifest key upstream used before it
 // switched to the versioned "<name>-<version>.rockspec" filename; still

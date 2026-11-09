@@ -83,7 +83,7 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 		configure = append(configure, "-D"+k+"="+dvars[k])
 	}
 
-	err := runCmd(ctx, "cmake", configure, srcDir, env)
+	err := runCmd(ctx, cfg.IsolateBuilds, "cmake", configure, srcDir, env)
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 	honorPasses := rockspecFormatAtLeast3(spec.RockspecFormat)
 
 	if !honorPasses || passEnabled(spec.Build.BuildPass) {
-		if err := runCmd(ctx, "cmake", []string{"--build", cmakeBuildDir, "--config", "Release"}, srcDir, env); err != nil {
+		if err := runCmd(ctx, cfg.IsolateBuilds, "cmake", []string{"--build", cmakeBuildDir, "--config", "Release"}, srcDir, env); err != nil {
 			return err
 		}
 	}
@@ -102,7 +102,7 @@ func runCMake(ctx context.Context, spec *rocks.Rockspec, srcDir, destDir string,
 		return nil
 	}
 
-	return runCmd(ctx, "cmake", []string{"--build", cmakeBuildDir, "--target", "install", "--config", "Release"}, srcDir, env)
+	return runCmd(ctx, cfg.IsolateBuilds, "cmake", []string{"--build", cmakeBuildDir, "--target", "install", "--config", "Release"}, srcDir, env)
 }
 
 // rockspecFormatAtLeast3 reports whether the rockspec_format (default "1.0") is

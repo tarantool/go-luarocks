@@ -20,6 +20,7 @@ func TestPaths(t *testing.T) {
 		want string
 	}{
 		{"RocksDir", p.RocksDir(), filepath.Join("/tmp/r", "share", "tarantool", "rocks")},
+		{"LockFile", p.LockFile(), filepath.Join("/tmp/r", "share", "tarantool", "rocks", ".lock")},
 		{"InstallDir", p.InstallDir("metrics", "0.17.0-1"),
 			filepath.Join("/tmp/r", "share", "tarantool", "rocks", "metrics", "0.17.0-1")},
 		{"DeployLuaDir", p.DeployLuaDir(), filepath.Join("/tmp/r", "share", "tarantool")},

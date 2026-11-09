@@ -38,7 +38,7 @@ func runCommand(ctx context.Context, spec *rocks.Rockspec, srcDir, _ string, cfg
 	if spec.Build.BuildCommand != "" {
 		cmd := substituteVars(spec.Build.BuildCommand, vars)
 
-		err := runCmd(ctx, "sh", []string{"-c", cmd}, srcDir, env)
+		err := runCmd(ctx, cfg.IsolateBuilds, "sh", []string{"-c", cmd}, srcDir, env)
 		if err != nil {
 			return err
 		}
@@ -47,7 +47,7 @@ func runCommand(ctx context.Context, spec *rocks.Rockspec, srcDir, _ string, cfg
 	if spec.Build.InstallCommand != "" {
 		cmd := substituteVars(spec.Build.InstallCommand, vars)
 
-		err := runCmd(ctx, "sh", []string{"-c", cmd}, srcDir, env)
+		err := runCmd(ctx, cfg.IsolateBuilds, "sh", []string{"-c", cmd}, srcDir, env)
 		if err != nil {
 			return err
 		}

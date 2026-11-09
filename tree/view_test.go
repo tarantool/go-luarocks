@@ -548,6 +548,34 @@ func TestTx_RemoveAsTheClientDoes(t *testing.T) {
 	requireConsistent(t, byTx, alpha1)
 }
 
+// TestTx_RemoveWithoutRockManifest: a version whose rock_manifest is gone,
+// or does not parse, is removed by the files its tree manifest entry names,
+// so the tree ends as when it is removed whole, the plain paths it held
+// passed to the next provider, but for a file the entry does not name.
+func TestTx_RemoveWithoutRockManifest(t *testing.T) {
+	t.Parallel()
+
+	want := buildTree(t, alpha1, alpha2)
+	nativeRemove(t, want, alpha2.ref())
+
+	for name, damage := range map[string]func(p string) error{
+		"missing":     os.Remove,
+		"not parsing": func(p string) error { return os.WriteFile(p, []byte("this does not parse"), 0o600) },
+	} {
+		root := buildTree(t, alpha1, alpha2)
+		p := tree.Paths{Tree: root}
+		require.NoError(t, damage(filepath.Join(p.InstallDir("alpha", "2.0-1"), "rock_manifest")), name)
+
+		require.NoError(t, update(t, root, func(tx *tree.Tx) error {
+			return tx.Remove(alpha2.ref())
+		}), name)
+
+		assert.Equal(t, treeState(t, want), treeState(t, root), "%s: the tree", name)
+		requireConsistent(t, root, alpha1)
+		assert.Empty(t, check(t, root).Issues, name)
+	}
+}
+
 // TestTx_Prune: Prune removes what keep does not keep in one pass, leaving
 // the tree the native Removes of the same versions leave, in either order;
 // and the outcome does not depend on the order the rocks were installed in.

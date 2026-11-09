@@ -2,7 +2,6 @@ package tree
 
 import (
 	"errors"
-	"fmt"
 	"os"
 
 	rocks "github.com/tarantool/go-luarocks"
@@ -10,14 +9,18 @@ import (
 )
 
 // File and directory permission bits used across the tree package when
-// materializing deployed rocks.
+// materializing deployed rocks. Each is the mode a file or directory is
+// created with, which the process umask then narrows, as upstream LuaRocks
+// creates them: under the usual umask, 022, a tree is readable by everyone.
 const (
 	// dirPerm is applied to directories created in the rock tree.
-	dirPerm os.FileMode = 0o750
-	// filePerm is the default mode for regular deployed files (non-executable).
+	dirPerm os.FileMode = 0o777
+	// filePerm is the default mode for regular deployed files (non-executable),
+	// upstream's "read" permissions.
 	filePerm os.FileMode = 0o644
-	// execPerm is the mode for executable deployed files: install.bin scripts
-	// and the generated command wrappers.
+	// execPerm is the mode for executable deployed files: install.bin scripts,
+	// C modules and the generated command wrappers, upstream's "exec"
+	// permissions.
 	execPerm os.FileMode = 0o755
 )
 
@@ -63,9 +66,11 @@ type BinWrap struct {
 	Sysconfdir string
 }
 
-// Open returns a Tree handle backed by cfg.Tree on disk. The minimal set
-// of subdirectories — RocksDir, DeployLuaDir, DeployLibDir, BinDir — are
-// created if missing (the tree-init step is idempotent).
+// Open returns a Tree handle backed by cfg.Tree on disk. It creates
+// nothing, and the tree need not exist: each change creates the directories
+// it writes into, Update the rocks dir and its lock file, so a tree that does
+// not exist is still absent after it is viewed (View), checked (Check) or
+// rebuilt (Rebuild), each of which takes it for an empty one.
 //
 // cfg.Tarantool fields are not consulted: tree management is independent
 // of the Tarantool target (which only matters at build time).
@@ -74,16 +79,8 @@ func Open(cfg rocks.Config) (*Tree, error) {
 		return nil, errors.New("tree.Open: Config.Tree is empty")
 	}
 
-	t := &Tree{
+	return &Tree{
 		Paths: Paths{Tree: cfg.Tree},
 		Store: manif.FileStore{},
-	}
-	for _, d := range []string{t.RocksDir(), t.DeployLuaDir(), t.DeployLibDir(), t.BinDir()} {
-		err := os.MkdirAll(d, dirPerm)
-		if err != nil {
-			return nil, fmt.Errorf("tree.Open: mkdir %q: %w", d, err)
-		}
-	}
-
-	return t, nil
+	}, nil
 }

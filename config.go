@@ -32,6 +32,24 @@ type Config struct {
 	// included, so a listed host redirecting elsewhere does not lift the
 	// check there; a redirect from https to http is refused.
 	InsecureServers []string
+
+	// IsolateBuilds, on unix, makes the native backend start every build
+	// tool — make, cmake, the C compiler, the shell of a command build — in
+	// a process group of its own, and makes cancelling the build's context
+	// kill that whole group, the compilers a make started included, so none
+	// of them runs on after the build is cancelled. Signals sent to the
+	// caller's process group, the terminal's Ctrl-C (SIGINT) among them, no
+	// longer reach the build tools: a caller that sets it must cancel the
+	// context on SIGINT and SIGTERM, e.g. with signal.NotifyContext, or the
+	// build tools survive the caller and keep writing into the tree.
+	//
+	// By default the build tools stay in the caller's process group, so
+	// Ctrl-C reaches them, and cancelling the context kills only the tool
+	// the build is running, not the processes it started. Either way a
+	// cancelled build returns within about a second, even if a process it
+	// started still holds its output open. IsolateBuilds is a no-op on other
+	// platforms and in the lua backend.
+	IsolateBuilds bool
 }
 
 // TarantoolConfig describes the Tarantool installation rocks are built against.

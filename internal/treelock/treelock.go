@@ -31,9 +31,11 @@ const Name = ".lock"
 // keeps the lock until the context ends.
 var ErrBusy = errors.New("the lock stayed held")
 
-// fileMode is the mode of a new lock file: readable by everyone, so a reader
-// of the tree who cannot write it still takes a shared lock.
-const fileMode fs.FileMode = 0o644
+// fileMode is the mode of a new lock file before the umask, the one of the
+// manifests beside it: readable by everyone under the usual umask, so a reader
+// of the tree who cannot write it still takes a shared lock, and writable by
+// the group under 002, so the group sharing a tree can change it.
+const fileMode fs.FileMode = 0o666
 
 // Waits between two attempts to take a lock that is held: the first, and the
 // longest, which the doubling wait reaches.

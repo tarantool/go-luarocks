@@ -1,12 +1,15 @@
 package tree
 
-import "path/filepath"
+import (
+	"path/filepath"
+
+	"github.com/tarantool/go-luarocks/internal/treelock"
+)
 
 // Paths computes the conventional subdirectories under a tree root.
 //
 // All methods are pure functions of Tree; they do not touch disk. The
-// caller is responsible for ensuring directories exist (Tree.Open does
-// the minimal mkdir).
+// changes of a Tree create the directories they write into.
 type Paths struct {
 	// Tree is the tree root (e.g. ".rocks" in a project, or a system
 	// tarantool prefix). Always an absolute or project-relative path.
@@ -17,6 +20,17 @@ type Paths struct {
 // luarocks refers to.
 func (p Paths) RocksDir() string {
 	return filepath.Join(p.Tree, "share", "tarantool", "rocks")
+}
+
+// LockFile returns <tree>/share/tarantool/rocks/.lock — the file whose
+// advisory lock orders the changes of the tree (see Tree.Update). It is the
+// library's own, not the tree's contents: Graft does not take it from its
+// source, Check and View look past it, and Pack never packs it. A tool that
+// archives or copies a whole tree leaves it out; the next change of the copy
+// creates its own. Removing it from a tree in use lets two changes run at
+// once.
+func (p Paths) LockFile() string {
+	return filepath.Join(p.RocksDir(), treelock.Name)
 }
 
 // InstallDir returns <tree>/share/tarantool/rocks/<name>/<ver> — the
