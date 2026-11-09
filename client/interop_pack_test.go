@@ -91,6 +91,10 @@ func TestBackendInterop_Pack(t *testing.T) {
 						p := pair{a, b}
 						packed[p] = packInstalled(t, x, b, direct[a], fx.pkg)
 						installed[p] = installPacked(t, x, a, packed[p], fx)
+
+						if b == client.BackendNative {
+							markNativePacked(installed[p]) // divPackModes
+						}
 					}
 				}
 

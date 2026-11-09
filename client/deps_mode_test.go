@@ -7,6 +7,7 @@ package client_test
 // through both backends, which differ there by design.
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -177,14 +178,16 @@ func checkDepsOutcome(t *testing.T, want depsOutcome, target, other string) {
 var wrapperPathRE = regexp.MustCompile(`package\.path="([^"]*)"`)
 
 // wrapperTrees returns the roots of the rock trees the command wrapper at
-// path puts on package.path, in order.
+// path puts on package.path, in order. The wrapper passes package.path in a
+// single-quoted shell word, which a single quote of a root ends, escaped with
+// a backslash, before the word starts again.
 func wrapperTrees(t *testing.T, path string) []string {
 	t.Helper()
 
 	body, err := os.ReadFile(path) //nolint:gosec // test temp path
 	require.NoError(t, err, "read the command wrapper")
 
-	match := wrapperPathRE.FindSubmatch(body)
+	match := wrapperPathRE.FindSubmatch(bytes.ReplaceAll(body, []byte(`'\''`), []byte(`'`)))
 	require.NotNil(t, match, "no package.path in the wrapper:\n%s", body)
 
 	var roots []string

@@ -3,10 +3,12 @@
 #
 # Entrypoint of the test sandbox image. Runs CMD, then fails the run if CMD
 # left anything behind in the container's writable scratch space: /tmp (which
-# holds TMPDIR) and /dev/shm. Go removes t.TempDir directories and its own
-# build directories when it is done, so a leftover means a test or a build
-# script it ran wrote outside its temp dir. The exit status is that of CMD,
-# or 1 if CMD succeeded but left files behind.
+# holds TMPDIR) and /dev/shm, and the Go build cache volume (GOCACHE). Go
+# removes t.TempDir directories and its own build directories when it is
+# done, so a leftover means a test or a build script it ran wrote outside its
+# temp dir. The build cache outlives the run and Go writes into it, so there
+# only what is new and does not follow Go's own layout counts. The exit status
+# is that of CMD, or 1 if CMD succeeded but left files behind.
 set -eu
 
 : "${TMPDIR:?TMPDIR must be set}"
@@ -17,6 +19,34 @@ if [ "$#" -eq 0 ]; then
 	exit 2
 fi
 
+# gocache_strays lists the entries of the top two levels of GOCACHE that are
+# not Go's: its README, trim.txt and testexpire.txt, the fuzz/ corpus cache,
+# and the 00 … ff directories, which hold <sha256>-a action and <sha256>-d
+# output entries (an output entry may be a directory, holding a cached
+# executable). Errors are part of the list.
+gocache_strays() {
+	if [ -z "${GOCACHE:-}" ] || [ ! -d "$GOCACHE" ]; then
+		return 0
+	fi
+	find "$GOCACHE" -mindepth 1 -maxdepth 2 2>&1 |
+		sed "s|^$GOCACHE/||" |
+		grep -Ev '^(README|trim\.txt|testexpire\.txt|fuzz|fuzz/.*|[0-9a-f]{2}|[0-9a-f]{2}/[0-9a-f]{64}-[ad])$' |
+		sort || true
+}
+
+# report TITLE LIST prints the leftovers of LIST under TITLE.
+report() {
+	echo
+	echo "sandbox: FAIL: $1:"
+	echo "$2" | head -n 100 | sed 's/^/  /'
+	count=$(echo "$2" | wc -l)
+	if [ "$count" -gt 100 ]; then
+		echo "  ... and $((count - 100)) more"
+	fi
+}
+
+cache_before=$(gocache_strays)
+
 rc=0
 "$@" || rc=$?
 
@@ -24,15 +54,18 @@ rc=0
 # leftover directory without read permission) are part of the report.
 leftovers=$(find /tmp /dev/shm -mindepth 1 ! -path "$TMPDIR" 2>&1 | sort)
 if [ -n "$leftovers" ]; then
-	{
-		echo
-		echo "sandbox: FAIL: the command left files outside its temp dirs:"
-		echo "$leftovers" | head -n 100 | sed 's/^/  /'
-		count=$(echo "$leftovers" | wc -l)
-		if [ "$count" -gt 100 ]; then
-			echo "  ... and $((count - 100)) more"
-		fi
-	} >&2
+	report "the command left files outside its temp dirs" "$leftovers" >&2
+	if [ "$rc" -eq 0 ]; then
+		rc=1
+	fi
+fi
+
+# What is in GOCACHE now and was not before, of what is not Go's.
+cache_new=$(printf '%s\n--after--\n%s\n' "$cache_before" "$(gocache_strays)" |
+	awk '$0 == "--after--" { after = 1; next } !after { seen[$0] = 1; next } $0 != "" && !seen[$0]')
+if [ -n "$cache_new" ]; then
+	report "the command left files in the Go build cache ($GOCACHE) that are not Go's" \
+		"$(echo "$cache_new" | sed "s|^|$GOCACHE/|")" >&2
 	if [ "$rc" -eq 0 ]; then
 		rc=1
 	fi

@@ -103,7 +103,7 @@ func (x interopCtx) cfg(t *testing.T, i int, servers ...string) rocks.Config {
 
 	return rocks.Config{
 		Tree:       x.trees[i],
-		WorkingDir: t.TempDir(),
+		WorkingDir: emptyWorkDir(t, fmt.Sprintf("an operation on tree %d", i)),
 		Servers:    servers,
 		Tarantool:  rocks.TarantoolConfig{Prefix: x.prefix, IncludeDir: x.incDir, Version: parityTarantoolVersion},
 	}
@@ -415,9 +415,12 @@ func rootReplacer(roots []string) *strings.Replacer {
 // compareDeployedRoots requires tree i of got and want to hold the same
 // deployed artifacts, byte for byte once the roots of each run's trees are
 // normalized (a command wrapper names every tree it puts on package.path); a
-// compiled .so by presence only.
+// compiled .so by presence only. The two trees must also have the same shape,
+// the bookkeeping included (compareShapes).
 func compareDeployedRoots(t *testing.T, label string, got, want []string, i int) {
 	t.Helper()
+
+	compareShapes(t, label, shapeSide{"interop", got[i], got}, shapeSide{"reference", want[i], want})
 
 	depGot := deployedArtifacts(t, got[i])
 	depWant := deployedArtifacts(t, want[i])

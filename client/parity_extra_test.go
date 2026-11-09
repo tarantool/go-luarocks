@@ -56,6 +56,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -557,11 +558,12 @@ type parityOp struct {
 	// directory, as Make needs. The others fetch the source themselves and
 	// get an empty working directory, so they cannot pick the staged files up.
 	inSource bool
-	// run runs the operation; keep is BuildOpts.Keep for Build, which the
-	// lua backend passes as --keep to keep the other installed versions of
-	// the rock (the native one keeps them anyway, and only its staging dir
-	// with it). Make and Install have no Keep and ignore it.
-	run func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool)
+	// do runs the operation and returns its error; keep is BuildOpts.Keep
+	// for Build, which the lua backend passes as --keep to keep the other
+	// installed versions of the rock (the native one keeps them anyway, and
+	// only its staging dir with it). Make and Install have no Keep and
+	// ignore it.
+	do func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) error
 }
 
 // parityOps are the operations TestBackendParity_Fixtures runs every fixture
@@ -570,29 +572,42 @@ type parityOp struct {
 // the rockspec come from.
 func parityOps() []parityOp {
 	return []parityOp{
-		{"make", true, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
+		{"make", true, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) error {
 			t.Helper()
 			specPath := writeParityRockspec(t, fx, src, "file://localhost/"+fx.pkg+".tar.gz")
-			require.NoError(t, r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}),
-				"Make(%s)", fx.name)
+
+			if err := r.Make(context.Background(), client.MakeOpts{RockspecPath: specPath}); err != nil {
+				return fmt.Errorf("Make(%s): %w", fx.name, err)
+			}
+
+			return nil
 		}},
-		{"build", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
+		{"build", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) error {
 			t.Helper()
 			specPath := writeParityRockspec(t, fx, t.TempDir(), parityTarball(t, fx, src))
-			require.NoError(t, r.Build(context.Background(), specPath, client.BuildOpts{Keep: keep}),
-				"Build(%s)", fx.name)
+
+			if err := r.Build(context.Background(), specPath, client.BuildOpts{Keep: keep}); err != nil {
+				return fmt.Errorf("Build(%s): %w", fx.name, err)
+			}
+
+			return nil
 		}},
-		{"install", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) {
+		{"install", false, func(t *testing.T, r *client.Rocks, fx parityFixture, src string, keep bool) error {
 			t.Helper()
 			repo := t.TempDir()
 			writeParityRockspec(t, fx, repo, parityTarball(t, fx, src))
 			manifest := "commands = {}\nmodules = {}\nrepository = {\n   [\"" + fx.pkg + "\"] = { [\"" + fx.version +
 				"\"] = { { arch = \"rockspec\" } } },\n}\n"
 			require.NoError(t, os.WriteFile(filepath.Join(repo, "manifest"), []byte(manifest), 0o600))
-			require.NoError(t, r.Install(context.Background(), fx.pkg, client.InstallOpts{
+
+			if err := r.Install(context.Background(), fx.pkg, client.InstallOpts{
 				Version: fx.version,
 				Servers: []string{repo},
-			}), "Install(%s)", fx.name)
+			}); err != nil {
+				return fmt.Errorf("Install(%s): %w", fx.name, err)
+			}
+
+			return nil
 		}},
 	}
 }
@@ -681,7 +696,36 @@ func parityStep(
 	t *testing.T, op parityOp, fx parityFixture, keep bool, backend client.Backend, tree, prefix, incDir string,
 ) *client.Rocks {
 	t.Helper()
-	src := t.TempDir()
+
+	r, err := parityStepIn(t, op, fx, keep, backend, tree, prefix, incDir, "")
+	require.NoError(t, err)
+
+	return r
+}
+
+// parityStepIn is parityStep with the source and the working directory made
+// in fresh subdirectories of base, or of t.TempDir when base is empty, and
+// the error of op returned. Once op has returned, successfully or not, the
+// working directory must hold nothing op left behind (checkWorkDir).
+func parityStepIn(
+	t *testing.T, op parityOp, fx parityFixture, keep bool, backend client.Backend, tree, prefix, incDir, base string,
+) (*client.Rocks, error) {
+	t.Helper()
+
+	newDir := func() string {
+		if base == "" {
+			return t.TempDir()
+		}
+
+		dir, err := os.MkdirTemp(base, "dir-") //nolint:usetesting // under base, which t.TempDir is not
+		require.NoError(t, err)
+
+		return dir
+	}
+
+	src := newDir()
+	created := []string{"*.rockspec"}
+
 	for rel, body := range fx.files {
 		full := filepath.Join(src, rel)
 		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
@@ -690,12 +734,22 @@ func parityStep(
 			mode = 0o755
 		}
 		require.NoError(t, os.WriteFile(full, []byte(body), mode))
+
+		top, _, _ := strings.Cut(rel, "/")
+		created = append(created, top)
 	}
 
 	work := src
 	if !op.inSource {
-		work = t.TempDir()
+		work = newDir()
+		created = nil
 	}
+
+	if keep && op.name == "build" && backend == client.BackendNative {
+		created = append(created, "rocks-build-*") // BuildOpts.Keep keeps the staging dir
+	}
+
+	defer checkWorkDir(t, fmt.Sprintf("%s %s, %v", op.name, fx.name, backend), work, created, op.inSource)
 
 	r, err := client.New(rocks.Config{
 		Tree:       tree,
@@ -706,17 +760,20 @@ func parityStep(
 		},
 	}, client.WithBackend(backend))
 	require.NoError(t, err, "New(%s, backend=%v)", fx.name, backend)
-	op.run(t, r, fx, src, keep)
 
-	return r
+	return r, op.do(t, r, fx, src, keep)
 }
 
 // compareDeployed requires every deployed artifact — every file outside
 // share/tarantool/rocks/ — to be present in both trees with the same bytes.
 // A compiled .so is compared by presence only, and a generated text artifact
-// may differ in the absolute root of the tree it was generated for.
+// may differ in the absolute root of the tree it was generated for. The two
+// trees must also have the same shape, the bookkeeping included
+// (compareShapes): the same directories, modes and symlinks.
 func compareDeployed(tb testing.TB, label, treeNative, treeLua string) {
 	tb.Helper()
+
+	compareShapes(tb, label, shapeSide{"native", treeNative, []string{treeNative}}, shapeSide{"lua", treeLua, []string{treeLua}})
 
 	depN := deployedArtifacts(tb, treeNative)
 	depL := deployedArtifacts(tb, treeLua)

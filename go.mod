@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/yuin/gopher-lua v1.1.2
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
 )
 
