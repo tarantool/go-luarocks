@@ -12,6 +12,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	sshagent "github.com/xanzy/ssh-agent"
 
 	"github.com/tarantool/go-luarocks/internal/safepath"
 )
@@ -117,8 +118,10 @@ func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Option
 	// go-git does not consult ssh-agent automatically; wire it up for the
 	// git+ssh scheme on a best-effort basis (anonymous clone otherwise).
 	if scheme == "git+ssh" {
-		if auth, authErr := sshAuth(cloneURL); authErr == nil {
+		if auth, closeAgent, authErr := sshAuth(cloneURL); authErr == nil {
 			co.Auth = auth
+
+			defer closeAgent()
 		}
 	}
 
@@ -175,11 +178,25 @@ func refName(opts Options) plumbing.ReferenceName {
 	return plumbing.NewBranchReferenceName(opts.Branch)
 }
 
-// sshAuth builds an ssh-agent auth method for a git+ssh clone. It fails if no
-// agent is reachable, in which case the caller falls back to an
-// unauthenticated clone.
-func sshAuth(cloneURL string) (*ssh.PublicKeysCallback, error) {
-	return ssh.NewSSHAgentAuth(sshUser(cloneURL))
+// sshAuth builds an ssh-agent auth method for a git+ssh clone, and the func
+// that closes its connection to the agent once the clone is done. It fails if
+// no agent is reachable, in which case the caller falls back to an
+// unauthenticated clone. It is ssh.NewSSHAgentAuth keeping the connection,
+// which that one drops while its reading goroutine runs on.
+func sshAuth(cloneURL string) (*ssh.PublicKeysCallback, func(), error) {
+	a, conn, err := sshagent.New()
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch.git: ssh agent: %w", err)
+	}
+
+	closeAgent := func() {
+		// Pageant has no connection to close.
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}
+
+	return &ssh.PublicKeysCallback{User: sshUser(cloneURL), Callback: a.Signers}, closeAgent, nil
 }
 
 // sshUser extracts the remote user from a git+ssh URL, defaulting to "git"
