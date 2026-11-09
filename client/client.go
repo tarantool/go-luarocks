@@ -628,8 +628,10 @@ func unwrapPathErr(err error) error {
 	return nil
 }
 
-// zipDir recursively zips srcDir contents into outPath. Entries are
-// stored with paths relative to srcDir.
+// zipDir zips every file under srcDir into outPath, in lexical order, each
+// under its slash path relative to srcDir (addZipFile). Like upstream's zip
+// -r it stores a file as it finds it; unlike it, it stores no entries for
+// the directories, as luarocks.tools.zip does not, which unzip then creates.
 func zipDir(outPath, srcDir string) error {
 	f, err := os.Create(outPath)
 	if err != nil {
@@ -654,21 +656,7 @@ func zipDir(outPath, srcDir string) error {
 			return err
 		}
 
-		w, err := zw.Create(filepath.ToSlash(rel))
-		if err != nil {
-			return err
-		}
-
-		in, err := os.Open(p)
-		if err != nil {
-			return err
-		}
-
-		defer func() { _ = in.Close() }()
-
-		_, err = io.Copy(w, in)
-
-		return err
+		return addZipFile(zw, filepath.ToSlash(rel), p, info.Mode().Perm())
 	})
 	if walkErr != nil {
 		_ = zw.Close()
@@ -676,16 +664,20 @@ func zipDir(outPath, srcDir string) error {
 		return walkErr
 	}
 
-	return zw.Close()
-}
-
-func zipSingleFile(outPath, srcPath, entryName string) error {
-	in, err := os.Open(srcPath)
-	if err != nil {
+	if err := zw.Close(); err != nil {
 		return err
 	}
 
-	defer func() { _ = in.Close() }()
+	return f.Close()
+}
+
+// zipSingleFile zips the file at srcPath into outPath as entryName
+// (addZipFile).
+func zipSingleFile(outPath, srcPath, entryName string) error {
+	st, err := os.Stat(srcPath)
+	if err != nil {
+		return err
+	}
 
 	out, err := os.Create(outPath)
 	if err != nil {
@@ -696,18 +688,44 @@ func zipSingleFile(outPath, srcPath, entryName string) error {
 
 	zw := zip.NewWriter(out)
 
-	w, err := zw.Create(entryName)
+	if err := addZipFile(zw, entryName, srcPath, st.Mode().Perm()); err != nil {
+		_ = zw.Close()
+
+		return err
+	}
+
+	if err := zw.Close(); err != nil {
+		return err
+	}
+
+	return out.Close()
+}
+
+// addZipFile adds the file at path to zw as the entry name, deflated, with
+// the permission bits perm, as upstream's zip (Info-ZIP's, fs/unix/tools.lua
+// zip; the engine has no lua-zlib for luarocks.tools.zip) stores a file: made
+// on Unix ("version made by" 3), its mode, regular-file type bits included,
+// in the high 16 bits of the external attributes, which unzip restores. The
+// entry carries no modification time: its DOS time and date are zero, as
+// luarocks.tools.zip writes them, and it has no extra field, so two packs of
+// the same files with the same modes are the same bytes.
+func addZipFile(zw *zip.Writer, name, path string, perm os.FileMode) error {
+	h := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	h.SetMode(perm)
+
+	w, err := zw.CreateHeader(h)
 	if err != nil {
-		_ = zw.Close()
-
 		return err
 	}
 
-	if _, err := io.Copy(w, in); err != nil {
-		_ = zw.Close()
-
+	in, err := os.Open(path) //nolint:gosec // a file of the pack's own staging dir
+	if err != nil {
 		return err
 	}
 
-	return zw.Close()
+	defer func() { _ = in.Close() }()
+
+	_, err = io.Copy(w, in)
+
+	return err
 }

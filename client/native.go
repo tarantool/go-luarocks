@@ -1,11 +1,11 @@
 package client
 
 import (
-	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -488,8 +488,12 @@ func stageInstalled(t *tree.Tree, name, version, stage string) (string, error) {
 // into place. The temporary tree lives in opts.TempDir, or the system's
 // temporary directory.
 //
-// Like Pack's, the archive's entries carry no modification time and no
-// permissions, so two packs of the same files are the same bytes.
+// Like Pack's, the archive's entries carry the permission bits of the files
+// staged, as upstream's zip stores them: the lib files 0755 and the lua files
+// 0644, less the umask, as Pack copies them back, and the files of the
+// install dir, the commands kept there among them, the modes they have in
+// dir. They carry no modification time, so two packs of the same files with
+// the same modes are the same bytes.
 func PackStaged(spec *rocks.Rockspec, dir, out string, opts PackStagedOpts) error {
 	tmp, err := os.MkdirTemp(opts.TempDir, "rocks-pack-staged-*")
 	if err != nil {
@@ -576,6 +580,10 @@ const (
 // another rock's file, instead. The versioned name is formed here the way the
 // deploy formed it.
 //
+// Each copy is created with mode less the umask, as upstream's fs.copy gives
+// it the "exec" or "read" permissions fs.set_permissions moderates by the
+// umask (fs/unix.lua), so the archive records the modes upstream's does.
+//
 // A rock_manifest entry that leaves deployDir or packDir fails it with an
 // error wrapping rocks.ErrUnsafePath, and the copy reads inside deployDir and
 // writes inside packDir only.
@@ -595,7 +603,11 @@ func copyBackFiles(files map[string]string, deployDir, packDir, name, version st
 			source = versioned
 		}
 
-		if err := copyFileMode(deployDir, source, packDir, target, mode); err != nil {
+		if err := safepath.Remove(packDir, target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+
+		if err := copyFileMode(deployDir, source, packDir, target, mode, false); err != nil {
 			return err
 		}
 	}
@@ -650,8 +662,10 @@ func fileExists(p string) bool {
 }
 
 // copyFileMode copies the file src, inside srcRoot, to dst, inside dstRoot,
-// creating dst's directory, with mode as dst's permissions.
-func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode) error {
+// creating dst's directory, with mode as dst's permissions: exactly when
+// exact says so, and otherwise, for a dst that does not exist, less the
+// umask.
+func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode, exact bool) error {
 	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return err
@@ -676,6 +690,10 @@ func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode) error {
 
 	if err := out.Close(); err != nil {
 		return err
+	}
+
+	if !exact {
+		return nil
 	}
 
 	return safepath.Chmod(dstRoot, dst, mode)
@@ -707,16 +725,19 @@ func copyDirContents(src, dst string, skip ...string) error {
 			return safepath.MkdirAll(dst, filepath.Join(dst, rel), unpackDirMode)
 		}
 
-		return copyFileMode(src, p, dst, filepath.Join(dst, rel), fi.Mode().Perm())
+		return copyFileMode(src, p, dst, filepath.Join(dst, rel), fi.Mode().Perm(), true)
 	})
 }
 
-// Unpack extracts `archive` (a .rock or .src.rock zip) into destDir. Every
-// entry stays inside destDir, a deliberate strictness beyond upstream: an
-// entry reaching above it, or beneath a symlink pointing out of it, fails the
-// unpack with an error wrapping rocks.ErrUnsafePath, an absolute entry name is
-// extracted inside it, as unzip does, and only an entry's permission bits are
-// kept, never setuid, setgid or sticky.
+// Unpack extracts `archive` (a .rock or .src.rock zip) into destDir, as
+// upstream's unzip does: a file of an archive made on Unix gets the
+// permission bits the archive records, the umask not applied, and one of
+// another the defaults, less the umask (safepath.Unzip). Every entry stays
+// inside destDir, a deliberate strictness beyond upstream: an entry reaching
+// above it, or beneath a symlink pointing out of it, fails the unpack with an
+// error wrapping rocks.ErrUnsafePath, an absolute entry name is extracted
+// inside it, as unzip does, and only an entry's permission bits are kept,
+// never setuid, setgid or sticky.
 func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) error {
 	_ = ctx
 
@@ -724,56 +745,8 @@ func (e *nativeEngine) Unpack(ctx context.Context, archive, destDir string) erro
 		return fmt.Errorf("rocks.Unpack: mkdir: %w", err)
 	}
 
-	zr, err := zip.OpenReader(archive)
-	if err != nil {
-		return fmt.Errorf("rocks.Unpack: open %s: %w", archive, err)
-	}
-
-	defer func() { _ = zr.Close() }()
-
-	for _, f := range zr.File {
-		target, err := safepath.Join(destDir, strings.TrimLeft(filepath.FromSlash(f.Name), string(filepath.Separator)))
-		if err != nil {
-			return fmt.Errorf("rocks.Unpack: entry: %w", err)
-		}
-
-		if f.FileInfo().IsDir() {
-			err := safepath.MkdirAll(destDir, target, unpackDirMode)
-			if err != nil {
-				return err
-			}
-
-			continue
-		}
-
-		if err := safepath.MkdirAll(destDir, filepath.Dir(target), unpackDirMode); err != nil {
-			return err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-
-		out, err := safepath.Create(destDir, target, f.Mode().Perm())
-		if err != nil {
-			_ = rc.Close()
-
-			return err
-		}
-
-		if _, err := io.Copy(out, rc); err != nil {
-			_ = rc.Close()
-			_ = out.Close()
-
-			return err
-		}
-
-		_ = rc.Close()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
+	if err := safepath.Unzip(archive, destDir, unpackDirMode); err != nil {
+		return fmt.Errorf("rocks.Unpack: %s: %w", archive, err)
 	}
 
 	return nil

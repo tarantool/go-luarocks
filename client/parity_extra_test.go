@@ -880,7 +880,9 @@ func parityTarball(t *testing.T, fx parityFixture, src string) string {
 // placeholder. This is the correct parity check for generated launchers, which
 // must embed the (necessarily different) tree path of the tree they live in.
 // A command wrapper is compared without the Tarantool prefix's tree, which
-// only upstream install lists (divWrapperTrees).
+// only upstream install lists (divWrapperTrees). A wrapper holds the root
+// inside a single-quoted word of sh, so a root holding a single quote is
+// normalized in the form that word escapes it in, too.
 func textArtifactsEqual(treeNative, treeLua, rel string) bool {
 	bN, err := os.ReadFile(filepath.Join(treeNative, filepath.FromSlash(rel)))
 	if err != nil {
@@ -890,8 +892,12 @@ func textArtifactsEqual(treeNative, treeLua, rel string) bool {
 	if err != nil {
 		return false
 	}
-	normN := strings.ReplaceAll(dropPrefixTree(string(bN)), treeNative, "<TREE>")
-	normL := strings.ReplaceAll(dropPrefixTree(string(bL)), treeLua, "<TREE>")
+	norm := func(text, root string) string {
+		text = strings.ReplaceAll(text, strings.ReplaceAll(root, `'`, `'\''`), "<TREE>")
+		return strings.ReplaceAll(text, root, "<TREE>")
+	}
+	normN := norm(dropPrefixTree(string(bN)), treeNative)
+	normL := norm(dropPrefixTree(string(bL)), treeLua)
 	return normN == normL
 }
 

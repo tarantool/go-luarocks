@@ -206,12 +206,22 @@ reasons, in `client/parity_shape_test.go`. The fixtures of every build type
 also run with `Config.Tree` and `Config.WorkingDir` under a path holding a
 space, a single quote, a dollar sign, non-ASCII letters or a 200-byte
 component, or reached through a symlink (`TestBackendParity_HostilePaths`),
-and the command wrappers are run. Under a single quote or a dollar sign the
-backends end differently, each case named in `client/parity_paths_test.go`:
-upstream splices the path into shell command lines unquoted
-(`fs.is_lua`, and the `-D` values of a `cmake` build), so the lua backend
-copies a Lua command unwrapped there, and a `$` in the path is expanded by
-make, and by sh in a `command` build, before any build script sees it. Run it
+and the command wrappers are run. Where upstream splices such a path into a
+shell command line unquoted, the lua backend's shims over its modules
+(`internal/luarocks/extra`) quote it — `fs.is_lua`, which decides whether a
+command script gets a wrapper, and the `-D` values of a `cmake` build — and
+they substitute a rockspec's `$(PREFIX)`, `$(LUADIR)`, … once, as the native
+backend does, where upstream then removed every `$(NAME)` the substituted
+paths held. Under a dollar sign the backends end otherwise than alike, each
+case named in `client/parity_paths_test.go`: make expands a `$` in the path,
+and sh one in the double-quoted words of a `command` build and of a
+Makefile's recipes, before any build script sees it, through either backend,
+as both hand make its variables as arguments and substitute the paths into
+the rockspec's own shell code as text; and the Makefiles CMake generates do
+not escape a `$` of the build dir, so a `cmake` build fails in one: the
+native backend's, which it stages in `Config.WorkingDir`, and both backends'
+`Make`, which builds in it, where upstream's `Build` and `Install` stage under
+`TMPDIR` and deploy the rock. Run it
 (needs a real `tarantool` on `PATH` plus its `lua.h`, and `cmake`):
 
 ```bash
@@ -276,8 +286,11 @@ layers, and a name that would leave fails with an error wrapping
   file operations go through `os.Root` (`internal/safepath`), so a symlink on
   the way that points out fails them too; one that stays inside is followed.
   Archive extraction creates no symlinks, keeps only permission bits (never
-  setuid, setgid or sticky), and extracts an absolute entry name inside the
-  destination, as `tar` and `unzip` do.
+  setuid, setgid or sticky) — those a zip entry made on Unix records exactly,
+  as `unzip` restores them — and extracts an absolute entry name inside the
+  destination, as `tar` and `unzip` do. A rock the native `Pack` or
+  `client.PackStaged` packs records the permission bits of its files, made
+  on Unix, as upstream's `zip` does, and no modification time.
 
 Legitimate rockspecs are unaffected; the parity harness and the rock corpus
 install the same trees as before.

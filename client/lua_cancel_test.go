@@ -220,6 +220,47 @@ func TestLuaEngine_CancelStopsLua(t *testing.T) {
 		"Lint after the cancellations")
 }
 
+// TestLuaEngine_CancelLeavesNoTempFiles — util.popen_read, which cfg.init
+// runs while a VM warms up, has os.execute write its command's output into a
+// file named by os.tmpname and removes the file once it has read it. A
+// cancellation raised as the command was killed skipped the removal, so a
+// cancelled call left the file in TMPDIR. The engine removes what is left at
+// the names os.tmpname gave out when it retires the VM, here the file of a
+// popen_read cancelled while its command runs, and of the warm-up the call
+// started, cancelled with it. It sets TMPDIR, where os.tmpname makes its
+// names, so it does not run in parallel.
+func TestLuaEngine_CancelLeavesNoTempFiles(t *testing.T) {
+	cfg := newLuaStubCfg(t, t.TempDir())
+	marker := filepath.Join(t.TempDir(), "started")
+
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	e := client.NewLuaEngine(cfg, nil, nil)
+	chunk := `require("luarocks.core.util").popen_read("echo > '` + marker + `'; exec sleep 30")`
+
+	for range 3 {
+		callAndCancel(t, func(ctx context.Context) error { return e.Run(ctx, chunk) }, func() {
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(marker)
+
+				return err == nil
+			}, luaStartBound, 10*time.Millisecond, "the command starts")
+		})
+
+		left, err := os.ReadDir(tmp)
+		require.NoError(t, err)
+
+		names := make([]string, 0, len(left))
+		for _, entry := range left {
+			names = append(names, entry.Name())
+		}
+
+		require.Empty(t, names, "what the cancelled call left in TMPDIR")
+		require.NoError(t, os.Remove(marker))
+	}
+}
+
 // TestLuaEngine_CancelKillsBuildCommand — a cancelled Make or Build of the
 // lua backend ran its build command to the end. Cancelling must kill it: in
 // the caller's process group the command alone, which here is the sleep the

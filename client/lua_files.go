@@ -140,6 +140,51 @@ func callCreating(L *lua.LState, fn *lua.LFunction, path string, args []lua.LVal
 	return L.GetTop() - top
 }
 
+// luaTempNames records the names os.tmpname gives out in one VM, so that
+// luaVM.Close removes the files LuaRocks leaves at them. util.popen_read
+// (core/util.lua), which cfg.init runs, has os.execute write the output of its
+// command into such a file and removes the file once it has read it, but a
+// cancellation, which os.execute raises once the command is killed and the VM
+// at its next instruction, skips the removal, so a cancelled call left the file
+// in TMPDIR; and upload/api.lua returns without removing its file when the
+// download into it fails. Only the goroutine running the VM, and then the one
+// closing it, touch it.
+type luaTempNames struct {
+	names []string
+}
+
+// install wraps os.tmpname in L so that it records every name it returns.
+func (n *luaTempNames) install(L *lua.LState, osTbl *lua.LTable) error { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
+	orig, ok := L.GetField(osTbl, "tmpname").(*lua.LFunction)
+	if !ok {
+		return errors.New("luaEngine: os.tmpname missing from Lua environment")
+	}
+
+	L.SetField(osTbl, "tmpname", L.NewFunction(func(L *lua.LState) int {
+		L.Push(orig)
+		L.Call(0, 1)
+
+		if name, ok := L.Get(-1).(lua.LString); ok {
+			n.names = append(n.names, string(name))
+		}
+
+		return 1
+	}))
+
+	return nil
+}
+
+// remove removes what is left at every recorded name: the file a command
+// wrote there, or an empty directory. A name nothing is at any more, as
+// LuaRocks removed its file, is passed over.
+func (n *luaTempNames) remove() {
+	for _, name := range n.names {
+		_ = os.Remove(name)
+	}
+
+	n.names = nil
+}
+
 // createByUmask creates path as an empty file of mode luaCreatedFileMode less
 // the umask when nothing is there, and reports whether it did.
 func createByUmask(path string) bool {

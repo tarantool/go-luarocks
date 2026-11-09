@@ -297,3 +297,23 @@ func TestUnpack_DropsSpecialModeBits(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fs.FileMode(0o755), st.Mode(), "tar entry mode")
 }
+
+// TestUnpack_RestoresRecordedModes: a zip entry made on Unix gets the
+// permission bits it records, the umask not applied, as unzip, which
+// upstream extracts a rock with, restores them: a binary rock's commands come
+// out as they were packed.
+func TestUnpack_RestoresRecordedModes(t *testing.T) {
+	t.Parallel()
+
+	l := newFetchLayout(t)
+	require.NoError(t, l.fetchArchive(t, "x.rock", zipArchive(t, []zipEntry{
+		{"bin/group-tool", 0o775, "#!/bin/sh\n"},
+		{"doc/shared", 0o666, "doc\n"},
+	})))
+
+	for name, want := range map[string]fs.FileMode{"bin/group-tool": 0o775, "doc/shared": 0o666} {
+		st, err := os.Stat(filepath.Join(l.dest, filepath.FromSlash(name)))
+		require.NoError(t, err)
+		assert.Equal(t, want.String(), st.Mode().String(), name)
+	}
+}

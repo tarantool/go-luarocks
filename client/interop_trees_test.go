@@ -6,10 +6,18 @@ package client_test
 // that remove rocks and rewrite the tree manifest.
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/tree"
 )
 
 // TestBackendInterop_Remove has B remove what A installed: hello and its
@@ -111,5 +119,75 @@ func TestBackendInterop_ManifestRoundTrip(t *testing.T) {
 			t.Parallel()
 			testInterop(t, prefix, incDir, sc)
 		})
+	}
+}
+
+// TestBackendInterop_ConcurrentWritesIntoANewTree installs a rock through
+// each backend at once into one tree that does not exist yet, a few times.
+// Every write takes the tree's lock, the lua backend's first one into the
+// fresh tree too, so the two run one after the other: neither drops the
+// manifest entry the other wrote, and the tree keeps the lock file.
+func TestBackendInterop_ConcurrentWritesIntoANewTree(t *testing.T) {
+	t.Parallel()
+
+	prefix, incDir := parityTarantool(t)
+
+	repo := t.TempDir()
+	writeTarballRock(t, repo, "alpha", "", "", nil)
+	writeTarballRock(t, repo, "beta", "", "", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "manifest"), []byte(`commands = {}
+modules = {}
+repository = {
+   alpha = { ["1.0-1"] = { { arch = "rockspec" } } },
+   beta = { ["1.0-1"] = { { arch = "rockspec" } } },
+}
+`), 0o600), "write the manifest")
+
+	rockOf := map[client.Backend]string{client.BackendNative: "alpha", client.BackendLua: "beta"}
+
+	for round := range 3 {
+		root := filepath.Join(t.TempDir(), "new", "tree")
+
+		clients := map[client.Backend]*client.Rocks{}
+		for backend := range rockOf {
+			clients[backend] = newClient(t, rocks.Config{
+				Tree:       root,
+				WorkingDir: t.TempDir(),
+				Servers:    []string{repo},
+				Tarantool:  rocks.TarantoolConfig{Prefix: prefix, IncludeDir: incDir, Version: parityTarantoolVersion},
+			}, client.WithBackend(backend))
+		}
+
+		var (
+			wg   sync.WaitGroup
+			mu   sync.Mutex
+			errs = map[client.Backend]error{}
+		)
+
+		for backend, r := range clients {
+			wg.Go(func() {
+				err := r.Install(context.Background(), rockOf[backend], client.InstallOpts{Deps: client.DepsNone})
+
+				mu.Lock()
+				errs[backend] = err
+				mu.Unlock()
+			})
+		}
+
+		wg.Wait()
+
+		for backend, err := range errs {
+			require.NoError(t, err, "round %d: the %v backend's Install of %s", round, backend, rockOf[backend])
+		}
+
+		v, err := tree.Inspect(context.Background(), root)
+		require.NoError(t, err, "round %d: Inspect", round)
+
+		for backend, name := range rockOf {
+			_, ok := v.Installed(name, "1.0-1")
+			assert.True(t, ok, "round %d: the tree manifest lists %s, which the %v backend installed", round, name, backend)
+		}
+
+		assert.FileExists(t, tree.Paths{Tree: root}.LockFile(), "round %d: the lock file", round)
 	}
 }

@@ -3,6 +3,7 @@
 package client_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tarantool/go-luarocks/client"
 	lua "github.com/yuin/gopher-lua"
+	"golang.org/x/sys/unix"
 )
 
 // luaProcScript exercises os.execute and io.popen the ways LuaRocks and a
@@ -115,6 +117,73 @@ func TestLuaEngine_ProcessesAsGopherLua(t *testing.T) {
 	got, err := e.Probe(luaProcScript)
 	require.NoError(t, err, "the script under the engine")
 	assert.Equal(t, want, got, "the engine's os.execute and io.popen return what gopher-lua's do")
+}
+
+// luaStdScript writes to the standard output and error of the process from
+// Lua and from a command os.execute runs.
+const luaStdScript = `io.stdout:write("lua: out\n")
+io.stderr:write("lua: err\n")
+os.execute("echo sh: out; echo sh: err >&2")`
+
+// TestLuaEngine_ExecuteKeepsStderrApart — `go test -json` sets os.Stderr to
+// os.Stdout (testing, under -test.v=test2json), and the engine's os.execute
+// handed a command the files the two variables held at the call, which
+// exec.Cmd then took for one destination of both: the command's stderr went
+// to the process's stdout, into what Exec printed, and
+// TestLuaEngine_TypedMethodsIgnoreConfigFile found sh's "not found" there. A
+// command's output and errors must go to file descriptors 1 and 2, as
+// io.stdout and io.stderr write, and as with gopher-lua's os.execute when
+// nothing reassigned the variables.
+//
+//nolint:paralleltest // redirects file descriptors 1 and 2 and sets os.Stderr, which are process-wide
+func TestLuaEngine_ExecuteKeepsStderrApart(t *testing.T) {
+	saved := os.Stderr
+
+	t.Cleanup(func() { os.Stderr = saved })
+
+	stock := lua.NewState()
+	defer stock.Close()
+
+	// gopher-lua's os.execute takes os.Stderr at the call, which -json makes
+	// os.Stdout, so it runs with one of fd 2 of its own.
+	wantOut, wantErr := captureStdio(t, func() error {
+		fd, err := unix.FcntlInt(2, unix.F_DUPFD_CLOEXEC, 0)
+		if err != nil {
+			return err
+		}
+
+		os.Stderr = os.NewFile(uintptr(fd), "stderr")
+		defer func() {
+			_ = os.Stderr.Close()
+			os.Stderr = saved
+		}()
+
+		return stock.DoString(luaStdScript)
+	})
+	require.Equal(t, "lua: out\nsh: out\n", wantOut, "what gopher-lua writes to fd 1")
+	require.Equal(t, "lua: err\nsh: err\n", wantErr, "what gopher-lua writes to fd 2")
+
+	e := client.NewLuaEngine(newLuaStubCfg(t, t.TempDir()), nil, nil)
+
+	os.Stderr = os.Stdout // as testing does under -test.v=test2json
+
+	gotOut, gotErr := captureStdio(t, func() error { return e.Run(context.Background(), luaStdScript) })
+	assert.Equal(t, wantOut, gotOut, "what the engine writes to fd 1")
+	assert.Equal(t, wantErr, gotErr, "what the engine writes to fd 2")
+}
+
+// captureStdio runs fn with file descriptors 1 and 2 redirected into pipes
+// of their own and returns what was written to each.
+func captureStdio(t *testing.T, fn func() error) (stdout, stderr string) {
+	t.Helper()
+
+	stderr = captureFd(t, 2, func() error {
+		stdout = captureFd(t, 1, fn)
+
+		return nil
+	})
+
+	return stdout, stderr
 }
 
 // TestLuaEngine_PopenWriteCloses — gopher-lua's close of a "w" pipe waited
