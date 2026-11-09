@@ -77,6 +77,17 @@ are in `internal/testenv`; `TestLuaEngine_Install_LeavesRealHomeAlone`
 (`integration_luaengine`, which also needs `unzip`) checks that a lua-backend
 install leaves the real home alone.
 
+The `client` package also runs under a fixed umask, 022, so the modes the
+backend-parity harness compares are the same on every machine. The
+`TestMain` of `build`, `client`, `fetch`, `remote` and `tree` fails the run
+when the tests leave goroutines behind
+([goleak](https://github.com/uber-go/goleak)), once the idle connections of
+the HTTP transports the process shares are closed. On Linux,
+`TestFetch_*NoFDLeak` and `TestNative*_NoFDLeak` repeat fetches, failing
+fetches, unpacks and installs and fail when file descriptors stay open, and
+`TestLuaClients_HeapCeiling` makes 50 lua-backend clients in turn and fails
+when the heap they leave in use keeps growing.
+
 ### Sandboxed runner
 
 The integration and lua-engine suites run real build tools and LuaRocks
@@ -90,7 +101,10 @@ turns stray writes into test failures:
 - tests run as an unprivileged user without capabilities;
 - the only writable places are `/tmp` (a tmpfs that holds `TMPDIR`) and the
   Go build cache volume; anything left in `/tmp` or `/dev/shm` after the run
-  fails it with a list of the leftovers;
+  fails it with a list of the leftovers, and so does a new entry of the build
+  cache that is not Go's own (the cache's `README`, `trim.txt` and
+  `testexpire.txt`, its `fuzz/` directory, and the `00` … `ff` directories of
+  `<sha256>-a` and `<sha256>-d` entries);
 - there is no network unless you pass `--net`; the module cache volume is
   filled by a separate `go mod download` step, the only one ever given
   network for that. An offline run sets `GO_LUAROCKS_OFFLINE=1`, so the

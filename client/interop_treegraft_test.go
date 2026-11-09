@@ -108,6 +108,8 @@ func TestBackendInterop_TreeGraft(t *testing.T) {
 	installGuest := func(root string) {
 		t.Helper()
 
+		markNativePacked(root) // divPackModes
+
 		cfg := luaTreeCfg(t, root, prefix, incDir)
 		cfg.Servers = []string{repo}
 

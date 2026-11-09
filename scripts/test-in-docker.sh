@@ -9,8 +9,9 @@
 # user without capabilities and, by default, without network. The only
 # writable places are /tmp (a tmpfs holding TMPDIR) and the Go build cache
 # volume; HOME is read-only. A write anywhere else fails with EROFS or EACCES,
-# and anything a command leaves behind in /tmp or /dev/shm fails the run, so
-# stray writes surface as failures instead of vanishing with the container.
+# and anything a command leaves behind in /tmp or /dev/shm, or in the build
+# cache volume outside Go's own layout, fails the run, so stray writes
+# surface as failures instead of vanishing with the container.
 #
 # Options:
 #   --net       Give the container network access (also: NET=1). Needed by

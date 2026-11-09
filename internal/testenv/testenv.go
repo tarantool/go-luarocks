@@ -30,6 +30,21 @@
 // neither writes into the developer's home nor depends on their LuaRocks
 // configuration. TMPDIR, PATH and the toolchain variables (CC, CFLAGS, …)
 // are left alone: t.TempDir needs the first, and the builds need the rest.
+//
+// # Fixed umask
+//
+// The modes of the files and directories a test creates follow the process
+// umask, which differs between machines. [SetSuiteUmask], called from
+// TestMain, sets the usual one, so a suite that compares modes, such as the
+// backend-parity harness, compares the same ones everywhere.
+//
+// # Leaks
+//
+// [CheckLeaks] ends a TestMain that fails the run when the tests leave
+// goroutines behind, and [RequireNoFDLeak] fails a test whose operation,
+// repeated, leaves file descriptors open. Both first close the idle
+// connections of the HTTP transports the process shares, which are no leak
+// ([CloseIdleConnections]).
 package testenv
 
 import (

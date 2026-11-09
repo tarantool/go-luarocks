@@ -21,6 +21,19 @@ const (
 	umaskArgEnv = "GO_LUAROCKS_TEST_UMASK_ARG"
 )
 
+// SuiteUmask is the umask SetSuiteUmask sets: the usual one, under which a
+// tree is readable by everyone.
+const SuiteUmask = 0o022
+
+// SetSuiteUmask sets the umask of the process to SuiteUmask, so that the
+// modes of the files and directories a suite creates do not depend on the
+// umask of whoever runs it, and a suite comparing them compares the same
+// modes everywhere. Call it from TestMain, before any test runs: the umask is
+// shared by every goroutine of the process.
+func SetSuiteUmask() {
+	syscall.Umask(SuiteUmask)
+}
+
 // RunWithUmask runs the test of this test binary named name in a child
 // process whose umask is mask, passing it arg, which the test reads with
 // UmaskChild, and fails tb when the child fails.

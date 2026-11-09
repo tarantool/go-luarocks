@@ -197,8 +197,22 @@ dependency through both backends and checks each one's outcome. The contract
 is that every deployed artifact — any file NOT under `share/tarantool/rocks/`
 — is byte-equal between backends, a command wrapper once the prefix's tree
 upstream's `install` adds is left out, and that each rock's `rock_manifest`
-and the tree `manifest` record the same contents. Run it (needs a real
-`tarantool` on `PATH` plus its `lua.h`, and `cmake`):
+and the tree `manifest` record the same contents. The two trees must also
+have the same shape: the same directories, empty ones included, the same
+permission bits on every file and directory (the suite runs under umask
+022), and the same symlinks, compared by their target and never followed;
+the differences found there that wait for a fix are named, with their
+reasons, in `client/parity_shape_test.go`. The fixtures of every build type
+also run with `Config.Tree` and `Config.WorkingDir` under a path holding a
+space, a single quote, a dollar sign, non-ASCII letters or a 200-byte
+component, or reached through a symlink (`TestBackendParity_HostilePaths`),
+and the command wrappers are run. Under a single quote or a dollar sign the
+backends end differently, each case named in `client/parity_paths_test.go`:
+upstream splices the path into shell command lines unquoted
+(`fs.is_lua`, and the `-D` values of a `cmake` build), so the lua backend
+copies a Lua command unwrapped there, and a `$` in the path is expanded by
+make, and by sh in a `command` build, before any build script sees it. Run it
+(needs a real `tarantool` on `PATH` plus its `lua.h`, and `cmake`):
 
 ```bash
 go test ./client/ -tags integration_luaengine -run 'TestBackendParity|TestBackendDivergence' -v

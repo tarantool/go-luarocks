@@ -159,6 +159,9 @@ build = {
 		}
 	}
 
+	// The directories, modes and symlinks of the two trees must agree too.
+	compareShapes(t, "purelua", shapeSide{"native", treeA, []string{treeA}}, shapeSide{"lua", treeB, []string{treeB}})
+
 	// The installed per-rock rockspec: both backends copy it verbatim into the
 	// per-rock install dir (upstream write_rock_dir_files, native
 	// tree.deployRockspec), so it must be present and byte-equal in both.
