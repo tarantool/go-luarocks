@@ -293,8 +293,8 @@ func (t *Tree) backupExisting(root, target string) error {
 
 // renameIfExists mirrors upstream op_rename (repos.lua:347-363): when src
 // exists it replaces dst, whose directory is created as needed, and the
-// directories src leaves empty are pruned up to, not including, stop. Both
-// paths must be inside stop.
+// directories src leaves empty are pruned (pruneEmptyParents). Both paths
+// must be inside stop.
 func (t *Tree) renameIfExists(src, dst, stop string) error {
 	for _, p := range []string{src, dst} {
 		if _, err := safepath.Rel(stop, p); err != nil {
@@ -318,19 +318,28 @@ func (t *Tree) renameIfExists(src, dst, stop string) error {
 		return err
 	}
 
-	t.pruneEmptyParents(filepath.Dir(src), stop)
+	t.pruneEmptyParents(filepath.Dir(src))
 
 	return nil
 }
 
-// pruneEmptyParents removes dir and each parent it leaves empty, stopping at
-// stop, which is kept — upstream's remove_dir_tree_if_empty, bounded by the
-// deploy dir. Best-effort: a removal that fails ends it.
-func (t *Tree) pruneEmptyParents(dir, stop string) {
-	stop = filepath.Clean(stop)
+// pruneEmptyParents removes dir and each parent it leaves empty, up to, not
+// including, the tree's root, as upstream's fs.remove_dir_tree_if_empty does
+// after a delete or a rename (repos.lua:358, 379): that is `rmdir -p`
+// (fs/unix/tools.lua:46-49), the engine having no lfs for the loop of
+// fs/lua.lua:389-396, so it climbs until a directory is not empty, past the
+// deploy dir — bin/, lib/tarantool/ and lib/ go with the last command or C
+// module. Upstream climbs past the root too; the root is never removed here,
+// nor anything outside it, and a symlink is not followed or removed: the
+// climb ends at it. Best-effort, through the journal: a removal that fails
+// ends it.
+func (t *Tree) pruneEmptyParents(dir string) {
+	for d := filepath.Clean(dir); isBelow(d, t.Tree); d = filepath.Dir(d) {
+		if fi, err := safepath.Lstat(t.Tree, d); err != nil || !fi.IsDir() {
+			return
+		}
 
-	for d := filepath.Clean(dir); d != stop && strings.HasPrefix(d, stop+string(filepath.Separator)); d = filepath.Dir(d) {
-		if err := t.j.remove(stop, d); err != nil {
+		if err := t.j.remove(t.Tree, d); err != nil {
 			return
 		}
 	}
@@ -541,7 +550,7 @@ func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error
 			return fmt.Errorf("remove %q: %w", p, err)
 		}
 
-		t.pruneEmptyParents(filepath.Dir(p), dir)
+		t.pruneEmptyParents(filepath.Dir(p))
 	}
 
 	for _, r := range renames {

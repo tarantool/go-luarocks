@@ -41,7 +41,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   `source.file`, a URL file name or a clone directory that leaves it fails
   with `rocks.ErrUnsafePath`, and so does an archive entry reaching above it
   or beneath a symlink pointing out of it. Extraction creates no symlinks and
-  keeps only permission bits, never setuid, setgid or sticky.
+  keeps only permission bits, never setuid, setgid or sticky: a zip entry
+  made on Unix gets the bits it records, the umask not applied, as unzip
+  restores them, and one made elsewhere the defaults, less the umask.
 - tree: On-disk rock tree layout, deployment, conflict detection, and
   `which`-style lookup. A `lua`/`lib`/`bin` subtree installed by any build
   backend is deployed like the rockspec's own sections, `build.modules` is
@@ -56,7 +58,10 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   command), and `Deploy` gives the plain path to the one upstream would —
   demoting both forms of a module, and backing up a file in its way that
   another rock or version owns, or none does, without overwriting earlier
-  backups — and `DeleteVersion` passes it on to the next provider. A
+  backups — and `DeleteVersion` passes it on to the next provider,
+  removing the directories it leaves empty up to the tree's root, as
+  upstream's `rmdir -p` does, so the last command or C module takes `bin/`,
+  `lib/tarantool/` and `lib/` with it. A
   command wrapper puts the module directories of the tree it is deployed to
   on `package.path` and `package.cpath`. `Deploy` and
   `DeleteVersion` read only the rock's sources and write, rename and remove
@@ -71,9 +76,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   and C modules 0755, and the other files, manifests and the lock file
   among them, 0644 or 0666, so a tree made under the usual umask, 022, is
   readable by every user, as one a system service runs from must be. So do
-  the directories and files the lua backend creates, the rocks dir of an
-  existing tree and every file its LuaRocks writes, the manifests among
-  them, included, which gopher-lua's `io.open` would create 0600.
+  the directories and files the lua backend creates, a tree's rocks dir and
+  every file its LuaRocks writes, the manifests among them, included, which
+  gopher-lua's `io.open` would create 0600.
 - tree: `Tree.Update` changes a tree in a transaction, a `Tx`, which keeps
   the tree manifest in step with the files: `Tx.Deploy` deploys a rock and
   records it, `Tx.Remove` undeploys an installed version, a `RockRef`, and
@@ -140,10 +145,11 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
 - tree, client: A change to a tree holds the tree's lock, an advisory
   `flock(2)` on `share/tarantool/rocks/.lock` (a no-op where there is no
   `flock`): `Tree.Update`, `Tree.Rebuild`, every write of the native backend
-  and the typed writes of the lua backend wait for it until their context
-  ends, failing then with `tree.ErrLocked`, so concurrent changes of one
-  tree, from goroutines or processes, no longer lose each other's manifest
-  entries. `Tree.Check`, and `Tx.Graft` of its source, read under it,
+  and the typed writes of the lua backend, each creating the rocks dir and
+  the lock file of a tree that does not exist yet, wait for it until their
+  context ends, failing then with `tree.ErrLocked`, so concurrent changes of
+  one tree, from goroutines or processes, no longer lose each other's
+  manifest entries. `Tree.Check`, and `Tx.Graft` of its source, read under it,
   shared. `Paths.LockFile` names the lock file, which is the library's own:
   `Tx.Graft` does not take it from its source, `Tree.Check` and `View` look
   past it, and `Pack` and `PackStaged` never pack it, so a tool archiving a
@@ -269,14 +275,30 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   the wrappers `Install` writes. `PackStaged` packs a directory laid out as
   an unpacked binary rock into the `.rock` the native `Pack` makes of the
   rock once installed from it, installing it into a temporary tree in
-  `PackStagedOpts.TempDir`, or the system's temporary directory.
+  `PackStagedOpts.TempDir`, or the system's temporary directory. A rock
+  either packs records the permission bits of its files, as upstream's
+  `zip` does, so upstream installs the commands it keeps in the rock's
+  install dir executable, and `Unpack` restores them as `unzip` does; its
+  entries carry no modification time, so the same files with the same
+  modes pack to the same bytes.
 - client: The lua backend runs each operation in its own VM, so no state
   carries over between calls, and one client may be used from several
   goroutines at once. It honours `Config.Servers`, reads
   `/etc/luarocks/config-5.1.lua` (`LUAROCKS_SYSCONFDIR` overrides it), and
   loads Lua modules only from its embedded copy and the rock trees, never
   from the current directory, `$LUA_PATH` or system directories. The error
-  of a failed command carries the message LuaRocks printed. Its typed
+  of a failed command carries the message LuaRocks printed. A command
+  LuaRocks runs through `os.execute` writes to the standard output and error
+  the process started with, where LuaRocks' own `io.stdout` and `io.stderr`
+  write, whatever `os.Stdout` and `os.Stderr` hold later, so its errors stay
+  out of the output even where `go test -json` makes `os.Stderr` the same
+  file as `os.Stdout`. Where upstream splices a path into a shell command
+  line unquoted, the engine quotes it: `fs.is_lua`, so a Lua command under a
+  path holding a quote, a dollar sign or a backtick gets its wrapper, and the
+  `-D` values of a `cmake` build, so CMake gets the tree's path as it is;
+  nothing the path names runs. A rockspec's `$(PREFIX)`, `$(LUADIR)`, … are
+  substituted once, as the native backend substitutes them, so a `$(NAME)`
+  a path holds stays in it where upstream removed it. Its typed
   methods run over the rock trees `Config.Tree` and
   `Config.Tarantool.Prefix` whatever a config file sets, so `Config.Tree` is
   always one of them, as upstream assumes of the tree it installs into;
@@ -284,8 +306,9 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   context: cancelling it stops the Lua code and kills the shell of each
   command LuaRocks runs through `os.execute` and `io.popen` (its whole
   process group with `Config.IsolateBuilds` on unix), LuaRocks' cleanup
-  rolls a partial install back, and the call returns at once with an error
-  wrapping `ctx.Err()`.
+  rolls a partial install back, the files left at the names `os.tmpname`
+  gave out are removed, and the call returns at once with an error wrapping
+  `ctx.Err()`.
 - client: `Search` on the native backend (upstream `luarocks search`), with
   `--source` / `--binary` / `--all` and results identical to the lua
   backend's. `SearchResult` carries `Arch` and `Namespace`, so a caller can

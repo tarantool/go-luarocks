@@ -214,34 +214,25 @@ const (
 	// hostileNothing: the operation succeeds but deploys nothing into the
 	// tree; its build installed the files somewhere else.
 	hostileNothing
-	// hostileUnwrapped: the operation deploys the fixture, but its Lua
-	// command is copied as it is instead of wrapped, so it runs without the
-	// tree on package.path.
-	hostileUnwrapped
 )
 
 func (o hostileOutcome) String() string {
-	return [...]string{"deploys and runs", "fails", "deploys nothing", "deploys its command unwrapped"}[o]
+	return [...]string{"deploys and runs", "fails", "deploys nothing"}[o]
 }
 
 // The reasons the backends end a hostile-path case otherwise than both
 // deploying it alike.
 const (
-	// hostileIsLua: upstream decides whether a command script is Lua by
-	// running `<lua> -e "if loadfile('<file>') ..."` through sh with the
-	// file name spliced in unquoted (fs/lua.lua fs_lua.is_lua), so under a
-	// path holding a single quote the Lua chunk does not parse, and under one
-	// holding a dollar sign the shell expands it — $HOME, and $(PREFIX) as a
-	// command — and loadfile finds no file. Either way the script is taken
-	// for a binary and copied unwrapped. The native backend parses the
-	// script in Go (tree/deploy.go isLua) and wraps it.
-	hostileIsLua = "upstream fs.is_lua splices the script's path into a shell command line unquoted, " +
-		"so the lua backend copies a Lua command unwrapped under a path holding ' or $"
 	// hostileDollarExpanded: make expands a $ in the value of a variable
 	// given on its command line, and sh one in a double-quoted word of a
 	// build command, before a build script sees it: $(LUADIR) and the
 	// others name a directory beside the tree, where both backends' builds
-	// install, so neither deploys anything. No rockspec can quote that.
+	// install, so neither deploys anything. Neither backend can quote that:
+	// both pass the make variables as arguments of their own, quoted for sh
+	// (build/make.lua through fs.execute), and make reads them as make does;
+	// the command a command build runs and the recipes of a Makefile are the
+	// rockspec's own shell code, into which the paths are substituted as text,
+	// and they quote them for sh in double quotes, where a $ is expanded.
 	hostileDollarExpanded = "make and sh expand the $ of the tree's path in $(LUADIR) and the rest, " +
 		"so the build installs beside the tree, through either backend"
 	// hostileCMakeDollar: the Makefiles CMake generates do not escape a $
@@ -249,12 +240,10 @@ const (
 	// one fails ("cd: can't cd to …"). Make builds in the working dir through
 	// both backends, so both fail. The native Build and Install stage the
 	// source in the working dir too and fail; upstream's stage it under
-	// TMPDIR, but pass every -D<name>="<value>" through sh in double quotes
-	// (build/cmake.lua run), which expands the $ of the tree's path, so
-	// CMake installs beside the tree, and the lua backend deploys nothing.
+	// TMPDIR and deploy it, the tree's path reaching CMake as it is
+	// (extra/build_cmake.lua, extra/util.lua).
 	hostileCMakeDollar = "CMake's Makefiles do not escape a $ of the build dir, which the native backend " +
-		"stages in Config.WorkingDir; upstream builds under TMPDIR but passes -D values to sh in double quotes, " +
-		"which expands the $ of the tree's path"
+		"stages in Config.WorkingDir, and upstream's Make too; upstream's Build and Install stage under TMPDIR"
 )
 
 // hostileExpectation is how each backend ends a hostile-path case that does
@@ -268,14 +257,12 @@ type hostileExpectation struct {
 // by op under the path hp, when that is not both deploying it alike.
 func hostileExpected(hp hostilePath, op parityOp, fx parityFixture) (hostileExpectation, bool) {
 	switch {
-	case hp.name == "quote", hp.name == "dollar" && fx.name == "builtin":
-		return hostileExpectation{hostileOK, hostileUnwrapped, hostileIsLua}, true
 	case hp.name == "dollar" && (fx.name == "make" || fx.name == "command"):
 		return hostileExpectation{hostileNothing, hostileNothing, hostileDollarExpanded}, true
 	case hp.name == "dollar" && fx.name == "cmake" && op.name == "make":
 		return hostileExpectation{hostileFails, hostileFails, hostileCMakeDollar}, true
 	case hp.name == "dollar" && fx.name == "cmake":
-		return hostileExpectation{hostileFails, hostileNothing, hostileCMakeDollar}, true
+		return hostileExpectation{hostileFails, hostileOK, hostileCMakeDollar}, true
 	default:
 		return hostileExpectation{}, false
 	}
@@ -378,16 +365,7 @@ func checkHostileOutcome(t *testing.T, fx parityFixture, backend client.Backend,
 	}
 
 	require.Contains(t, run.out, cmd, "%s; the tree holds %v", label, slices.Sorted(maps.Keys(treeEntries(t, run.tree))))
-
-	if want == hostileOK {
-		require.Equal(t, hostileOutputs[fx.name], run.out[cmd], label)
-
-		return
-	}
-
-	body, err := os.ReadFile(filepath.Join(run.tree, "bin", cmd)) //nolint:gosec // test temp path
-	require.NoError(t, err)
-	require.Equal(t, fx.files["bin/"+cmd], string(body), "%s: bin/%s is the script as it is", label, cmd)
+	require.Equal(t, hostileOutputs[fx.name], run.out[cmd], label)
 }
 
 // runWrappers runs every command of tree with no arguments and returns what

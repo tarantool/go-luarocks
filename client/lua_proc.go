@@ -184,16 +184,26 @@ func (p *luaProcs) command(ctx context.Context, shellCmd string) *exec.Cmd {
 	return cmd
 }
 
+// luaStdFiles are the standard input, output and error of the process as
+// os.Stdin, os.Stdout and os.Stderr held them when the package was
+// initialized, the files gopher-lua binds io.stdin, io.stdout and io.stderr to
+// then (iolib stdFiles). os.execute runs its commands with them, rather than
+// with what the three variables hold at the call, as gopher-lua's does: a
+// program may reassign them, and `go test -json` sets os.Stderr to os.Stdout,
+// which exec.Cmd takes for one destination of both, so a command's stderr went
+// to the process's stdout, where io.stderr does not write.
+var luaStdFiles = struct{ stdin, stdout, stderr *os.File }{os.Stdin, os.Stdout, os.Stderr}
+
 // execute is os.execute. Like gopher-lua's, it runs the command line with
-// the process's stdin, stdout and stderr and returns 0 when it exits with 0
-// and 1 otherwise — when it cannot start, exits non-zero or dies of a
-// signal — which fs/tools.lua and fs/lua.lua test against 0.
+// the process's stdin, stdout and stderr (luaStdFiles) and returns 0 when it
+// exits with 0 and 1 otherwise — when it cannot start, exits non-zero or dies
+// of a signal — which fs/tools.lua and fs/lua.lua test against 0.
 func (p *luaProcs) execute(L *lua.LState) int { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
 	shellCmd := L.CheckString(1)
 	ctx := luaContext(L)
 
 	cmd := p.command(ctx, shellCmd)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = luaStdFiles.stdin, luaStdFiles.stdout, luaStdFiles.stderr
 
 	err := cmd.Run()
 

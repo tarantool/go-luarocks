@@ -52,10 +52,18 @@ func TestExec_PrognameNotFrozenByWarmVM(t *testing.T) {
 // captureFd1 runs fn with file descriptor 1 redirected into a pipe and returns
 // what was written there. callRaw writes to the process stdout verbatim, and
 // gopher-lua binds io.stdout's *os.File at PACKAGE INIT (iolib stdFiles), so
-// swapping the os.Stdout variable can never redirect it. fd 1 is restored
-// before fn's error is checked, so a failing fn cannot leave the rest of the
-// run writing into the pipe.
+// swapping the os.Stdout variable can never redirect it.
 func captureFd1(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	return captureFd(t, 1, fn)
+}
+
+// captureFd runs fn with file descriptor fd redirected into a pipe and
+// returns what was written there. fd is restored before fn's error is
+// checked, so a failing fn cannot leave the rest of the run writing into the
+// pipe.
+func captureFd(t *testing.T, fd int, fn func() error) string {
 	t.Helper()
 
 	read, write, err := os.Pipe()
@@ -71,15 +79,13 @@ func captureFd1(t *testing.T, fn func() error) string {
 		close(done)
 	}()
 
-	stdout := int(os.Stdout.Fd())
-
-	saved, err := unix.Dup(stdout)
+	saved, err := unix.Dup(fd)
 	require.NoError(t, err)
-	require.NoError(t, unix.Dup2(int(write.Fd()), stdout))
+	require.NoError(t, unix.Dup2(int(write.Fd()), fd))
 
 	fnErr := fn()
 
-	require.NoError(t, unix.Dup2(saved, stdout))
+	require.NoError(t, unix.Dup2(saved, fd))
 	require.NoError(t, unix.Close(saved))
 	require.NoError(t, write.Close())
 	<-done

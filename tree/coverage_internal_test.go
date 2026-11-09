@@ -987,3 +987,36 @@ func TestDeleteVersion_KeepsNameDirWithRemainingVersion(t *testing.T) {
 	assert.DirExists(t, nameDir, "name dir must survive while a sibling version remains")
 	assert.DirExists(t, tr.InstallDir(testPkg, "2.0-1"))
 }
+
+// TestPruneEmptyParents_Bounds: the pruning climbs past the deploy dirs but
+// never removes the tree's root, a directory outside it, or a symlink, and
+// ends at the first directory that is not empty.
+func TestPruneEmptyParents_Bounds(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	root := filepath.Join(parent, "tree")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "lib", "tarantool", "demo"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real", "empty"), 0o750))
+	require.NoError(t, os.Symlink("real", filepath.Join(root, "link")))
+
+	tr := &Tree{Paths: Paths{Tree: root}}
+
+	tr.pruneEmptyParents(filepath.Join(root, "lib", "tarantool", "demo"))
+	assert.NoDirExists(t, filepath.Join(root, "lib"), "the empty dirs up to the root")
+	assert.DirExists(t, root, "the root, which the pruning left empty but for real/ and link")
+
+	tr.pruneEmptyParents(filepath.Join(root, "link", "empty"))
+	assert.NoDirExists(t, filepath.Join(root, "real", "empty"), "the empty dir beneath the symlink")
+	assert.FileExists(t, filepath.Join(root, "link"), "the symlink, at which the climb ends")
+	assert.DirExists(t, filepath.Join(root, "real"))
+
+	require.NoError(t, os.Remove(filepath.Join(root, "link")))
+	tr.pruneEmptyParents(filepath.Join(root, "real"))
+	assert.NoDirExists(t, filepath.Join(root, "real"))
+	assert.DirExists(t, root, "the root, empty")
+	assert.DirExists(t, parent, "the root's parent, outside the tree")
+
+	tr.pruneEmptyParents(parent)
+	assert.DirExists(t, parent, "a directory outside the tree")
+}

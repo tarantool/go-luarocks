@@ -41,7 +41,9 @@ package client
 // Cancellation: a dispatch runs under the caller's context (luaVM.run), which
 // the VM checks at every instruction and the engine's os.execute and io.popen
 // run their processes under (lua_proc.go), so a cancelled call returns at
-// once, with an error wrapping ctx.Err(), after LuaRocks' cleanup has run.
+// once, with an error wrapping ctx.Err(), after LuaRocks' cleanup has run and
+// the files the cut-short code left at the names of os.tmpname are removed
+// (luaTempNames).
 //
 // Only Lua that arrived via the embedded FS is executed — embedded modules,
 // compiled once per process and preloaded into each VM (compiledModules),
@@ -229,7 +231,15 @@ func (e *luaEngine) cleanup() {
 // over the upstream module, preloaded as extra.upstream.luarocks.fs.lua: it
 // limits external-command discovery to the command being run, so a
 // luarocks.cmd.external.<name> module is loaded only by `<name>` or
-// `help <name>`, rather than by every command as upstream does.
+// `help <name>`, rather than by every command as upstream does, and quotes the
+// file name fs.is_lua splices into a shell command line. luarocks.util is a
+// shim (extra/util.lua) that changes the upstream module, preloaded as
+// extra.upstream.luarocks.util, in place: its variable_substitutions does not
+// take a $(NAME) a substituted path holds for the rockspec's own.
+// luarocks.build.cmake is a shim (extra/build_cmake.lua) over the upstream
+// module, preloaded as extra.upstream.luarocks.build.cmake: it escapes the
+// rockspec variables, the tree's paths among them, that upstream splices into
+// the double-quoted -D values of its cmake command line.
 var luaPreloadMap = func() map[string]string {
 	rocksPath := "src/src/"
 	extraPath := "extra/"
@@ -245,7 +255,6 @@ var luaPreloadMap = func() map[string]string {
 		"luarocks.core.path":      rocksPath + "luarocks/core/path.lua",
 		"luarocks.core.manif":     rocksPath + "luarocks/core/manif.lua",
 		"luarocks.core.vers":      rocksPath + "luarocks/core/vers.lua",
-		"luarocks.util":           rocksPath + "luarocks/util.lua",
 		"luarocks.loader":         rocksPath + "luarocks/loader.lua",
 		"luarocks.dir":            rocksPath + "luarocks/dir.lua",
 		"luarocks.path":           rocksPath + "luarocks/path.lua",
@@ -320,7 +329,6 @@ var luaPreloadMap = func() map[string]string {
 		"luarocks.cmd.unpack":              rocksPath + "luarocks/cmd/unpack.lua",
 		"luarocks.cmd.config":              rocksPath + "luarocks/cmd/config.lua",
 		"luarocks.require":                 rocksPath + "luarocks/require.lua",
-		"luarocks.build.cmake":             rocksPath + "luarocks/build/cmake.lua",
 		"luarocks.build.make":              rocksPath + "luarocks/build/make.lua",
 		"luarocks.build.command":           rocksPath + "luarocks/build/command.lua",
 		"luarocks.fetch.cvs":               rocksPath + "luarocks/fetch/cvs.lua",
@@ -341,6 +349,14 @@ var luaPreloadMap = func() map[string]string {
 		"luarocks.admin.cmd.add":           rocksPath + "luarocks/admin/cmd/add.lua",
 		"luarocks.admin.cmd.remove":        rocksPath + "luarocks/admin/cmd/remove.lua",
 		"luarocks.admin.cmd.make_manifest": rocksPath + "luarocks/admin/cmd/make_manifest.lua",
+
+		// A shim over upstream luarocks.util, which it changes in place.
+		"luarocks.util":                extraPath + "util.lua",
+		"extra.upstream.luarocks.util": rocksPath + "luarocks/util.lua",
+
+		// The cmake build backend, a shim over upstream's.
+		"luarocks.build.cmake":                extraPath + "build_cmake.lua",
+		"extra.upstream.luarocks.build.cmake": rocksPath + "luarocks/build/cmake.lua",
 	}
 }()
 
@@ -459,17 +475,20 @@ func compiledModules() (map[string]*lua.FunctionProto, error) {
 }
 
 // luaVM is a VM of the engine together with the processes its os.execute and
-// io.popen start (lua_proc.go).
+// io.popen start (lua_proc.go) and the temporary names its os.tmpname gives
+// out (lua_files.go).
 type luaVM struct {
 	*lua.LState
 
 	procs *luaProcs
+	temps *luaTempNames
 }
 
-// Close kills and collects the processes of the pipes the Lua code left open
-// and closes the VM.
+// Close kills and collects the processes of the pipes the Lua code left open,
+// removes the files left at the names os.tmpname gave out, and closes the VM.
 func (vm *luaVM) Close() {
 	vm.procs.reap()
+	vm.temps.remove()
 	vm.LState.Close()
 }
 
@@ -523,11 +542,11 @@ func (vm *luaVM) runUnder(ctx context.Context, chunk string) error {
 }
 
 // newVM creates a gopher-lua VM with an empty package.path, installs the custom
-// os.getenv, os.execute, io.popen, io.open and io.output and the glr_* globals,
-// and preloads every embedded module. The caller owns the returned VM and must
-// Close it; nothing is cached on the engine. cfg.init has NOT run yet at this
-// point — that happens inside the first dispatch, which is what warmVM adds on
-// top.
+// os.getenv, os.execute, os.tmpname, io.popen, io.open and io.output and the
+// glr_* globals, and preloads every embedded module. The caller owns the
+// returned VM and must Close it; nothing is cached on the engine. cfg.init has
+// NOT run yet at this point — that happens inside the first dispatch, which is
+// what warmVM adds on top.
 func (e *luaEngine) newVM() (*luaVM, error) {
 	L := lua.NewState() // full stdlibs; do NOT skip OpenLibs
 
@@ -617,6 +636,13 @@ func (e *luaEngine) newVM() (*luaVM, error) {
 		return nil, err
 	}
 
+	temps := &luaTempNames{}
+	if err := temps.install(L, osTbl); err != nil {
+		L.Close()
+
+		return nil, err
+	}
+
 	// Intercept os.exit. The vendored LuaRocks CLI terminates every command
 	// path with os.exit (luarocks/cmd.lua), which gopher-lua maps to Go's
 	// os.Exit — fatal for our in-process VM, which would take the host
@@ -694,7 +720,7 @@ func (e *luaEngine) newVM() (*luaVM, error) {
 		L.SetField(preload, modName, absent)
 	}
 
-	return &luaVM{LState: L, procs: procs}, nil
+	return &luaVM{LState: L, procs: procs, temps: temps}, nil
 }
 
 // setConfigGlobals installs the glr_* globals extra/hardcoded.lua and
@@ -1309,23 +1335,23 @@ func (e *luaEngine) globalArgs(servers []string) []string {
 }
 
 // dispatchLocked runs argv as dispatch does, holding the exclusive lock of
-// e.cfg.Tree that the native backend and tree.Tree.Update take (see package
-// internal/treelock), so a typed write of the lua backend and a change to the
-// tree through them never run at once. It waits for the lock until ctx ends,
-// and fails then with an error wrapping tree.ErrLocked.
+// the tree upstream writes, e.cfg.Tree, that the native backend and
+// tree.Tree.Update take (see package internal/treelock), so a typed write of
+// the lua backend and a change to the tree through them never run at once.
+// It waits for the lock until ctx ends, and fails then with an error wrapping
+// tree.ErrLocked.
 //
-// When create is set and the tree's root exists, its rocks dir is created
-// first, as the write would. A tree whose rocks dir does not exist then, or
-// whose lock cannot be taken for another reason, such as a read-only file
-// system, is written unlocked: upstream reports what the write cannot do.
-func (e *luaEngine) dispatchLocked(ctx context.Context, create bool, argv []string) error {
-	dir := tree.Paths{Tree: e.cfg.Tree}.RocksDir()
+// The tree's rocks dir is created first, and the lock file in it, as the
+// native backend and tree.Tree.Update create them for every write, into a
+// tree that does not exist yet too: directories 0777 less the umask, the mode
+// upstream's mkdir -p gives them. A rocks dir that cannot be created, or a
+// lock that cannot be taken for another reason than another holder, such as
+// a read-only file system, leaves the write unlocked: upstream reports what
+// the write cannot do.
+func (e *luaEngine) dispatchLocked(ctx context.Context, argv []string) error {
+	dir := tree.Paths{Tree: e.treeRoot()}.RocksDir()
 
-	if _, err := os.Stat(e.cfg.Tree); err == nil && create {
-		_ = os.MkdirAll(dir, luaTreeDirMode)
-	}
-
-	if _, err := os.Stat(dir); err == nil {
+	if err := os.MkdirAll(dir, luaTreeDirMode); err == nil {
 		lock, err := treelock.Exclusive(ctx, dir)
 
 		switch {
@@ -1341,9 +1367,22 @@ func (e *luaEngine) dispatchLocked(ctx context.Context, create bool, argv []stri
 	return err
 }
 
-// luaTreeDirMode is the mode dispatchLocked creates a missing rocks dir with:
-// 0777, which the umask narrows, as the mkdir -p upstream runs does and as
-// the native backend creates the directories of a tree.
+// treeRoot returns the root of the tree upstream writes for --tree
+// e.cfg.Tree: a relative one names a directory of the current directory
+// upstream runs in, Config.WorkingDir (fs.absolute_name), not of the
+// process's.
+func (e *luaEngine) treeRoot() string {
+	if filepath.IsAbs(e.cfg.Tree) || e.cfg.WorkingDir == "" {
+		return e.cfg.Tree
+	}
+
+	return filepath.Join(e.cfg.WorkingDir, e.cfg.Tree)
+}
+
+// luaTreeDirMode is the mode dispatchLocked creates the missing directories
+// of a rocks dir with: 0777, which the umask narrows, as the mkdir -p
+// upstream runs does and as the native backend creates the directories of a
+// tree.
 const luaTreeDirMode = 0o777
 
 // depsModeArg maps a DepsPolicy to upstream's --deps-mode choices
@@ -1377,7 +1416,7 @@ func (e *luaEngine) Install(ctx context.Context, name string, opts InstallOpts) 
 
 	argv = append(argv, "--deps-mode", depsModeArg(opts.Deps))
 
-	return e.dispatchLocked(ctx, true, argv)
+	return e.dispatchLocked(ctx, argv)
 }
 
 // Build runs `luarocks build`. BuildOpts.Keep is passed as --keep, which
@@ -1392,7 +1431,7 @@ func (e *luaEngine) Build(ctx context.Context, specPath string, opts BuildOpts) 
 		argv = append(argv, "--keep")
 	}
 
-	return e.dispatchLocked(ctx, true, argv)
+	return e.dispatchLocked(ctx, argv)
 }
 
 func (e *luaEngine) Make(ctx context.Context, opts MakeOpts) error {
@@ -1404,7 +1443,7 @@ func (e *luaEngine) Make(ctx context.Context, opts MakeOpts) error {
 		argv = append(argv, opts.RockspecPath)
 	}
 
-	return e.dispatchLocked(ctx, true, argv)
+	return e.dispatchLocked(ctx, argv)
 }
 
 func (e *luaEngine) Pack(ctx context.Context, target string, opts PackOpts) (string, error) {
@@ -1468,7 +1507,7 @@ func (e *luaEngine) Remove(ctx context.Context, name string, opts RemoveOpts) er
 
 	argv = append(argv, "--deps-mode", depsModeArg(opts.Deps))
 
-	return e.dispatchLocked(ctx, false, argv)
+	return e.dispatchLocked(ctx, argv)
 }
 
 // Purge runs `luarocks purge` against the engine's tree (the mandatory --tree
@@ -1490,7 +1529,7 @@ func (e *luaEngine) Purge(ctx context.Context, opts PurgeOpts) error {
 		argv = append(argv, "--force-fast")
 	}
 
-	return e.dispatchLocked(ctx, false, argv)
+	return e.dispatchLocked(ctx, argv)
 }
 
 // Search runs `luarocks search --porcelain` and parses the tab-separated

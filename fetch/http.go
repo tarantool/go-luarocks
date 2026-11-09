@@ -2,7 +2,6 @@ package fetch
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
@@ -238,63 +237,10 @@ func entryPath(dst, name string) (string, error) {
 // they keep only the permission bits of an entry, never setuid, setgid or
 // sticky.
 
+// unzip extracts as Info-ZIP's unzip does, a file keeping the permission
+// bits an archive made on Unix records (safepath.Unzip).
 func unzip(archive, dst string) error {
-	r, err := zip.OpenReader(archive)
-	if err != nil {
-		return err
-	}
-
-	defer func() { _ = r.Close() }()
-
-	for _, f := range r.File {
-		target, err := entryPath(dst, f.Name)
-		if err != nil {
-			return err
-		}
-
-		if f.FileInfo().IsDir() {
-			err := safepath.MkdirAll(dst, target, dirPerm)
-			if err != nil {
-				return err
-			}
-
-			continue
-		}
-
-		if err := safepath.MkdirAll(dst, filepath.Dir(target), dirPerm); err != nil {
-			return err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-
-		// A symlink entry is extracted as a regular file holding its target.
-		out, err := safepath.Create(dst, target, f.Mode().Perm())
-		if err != nil {
-			_ = rc.Close()
-
-			return err
-		}
-
-		// Archive members are rocks sources of bounded size; copying the full
-		// entry is intended. A decompression-bomb limit would break valid rocks.
-		if _, err := io.Copy(out, rc); err != nil {
-			_ = rc.Close()
-			_ = out.Close()
-
-			return err
-		}
-
-		_ = rc.Close()
-
-		if err := out.Close(); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return safepath.Unzip(archive, dst, dirPerm)
 }
 
 func untargz(archive, dst string) error {

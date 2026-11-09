@@ -2,6 +2,9 @@ package client_test
 
 import (
 	"context"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -79,15 +82,95 @@ func TestLuaEngine_WritesTakeTheTreeLock(t *testing.T) {
 		return "", nil
 	})
 
-	for name, write := range map[string]func(ctx context.Context) error{
+	for name, write := range luaTypedWrites(e) {
+		require.ErrorIs(t, write(shortContext(t)), tree.ErrLocked, "%s of a locked tree", name)
+	}
+}
+
+// luaTypedWrites returns the typed writes of the lua engine e, by name.
+func luaTypedWrites(e *client.LuaEngine) map[string]func(ctx context.Context) error {
+	return map[string]func(ctx context.Context) error{
 		"Install": func(ctx context.Context) error { return e.Install(ctx, "foo", client.InstallOpts{}) },
 		"Build":   func(ctx context.Context) error { return e.Build(ctx, "foo-1.0-1.rockspec", client.BuildOpts{}) },
 		"Make":    func(ctx context.Context) error { return e.Make(ctx, client.MakeOpts{}) },
 		"Remove":  func(ctx context.Context) error { return e.Remove(ctx, "foo", client.RemoveOpts{}) },
 		"Purge":   func(ctx context.Context) error { return e.Purge(ctx, client.PurgeOpts{}) },
-	} {
-		require.ErrorIs(t, write(shortContext(t)), tree.ErrLocked, "%s of a locked tree", name)
 	}
+}
+
+// TestLuaEngine_WriteIntoANewTreeTakesTheTreeLock: a typed write of the lua
+// backend into a tree that does not exist yet creates the tree's rocks dir
+// and lock file, with the modes the native backend gives them, and holds the
+// lock while upstream runs, so a native write into the same fresh tree at
+// that time waits for it, as it does for an existing tree.
+func TestLuaEngine_WriteIntoANewTreeTakesTheTreeLock(t *testing.T) {
+	t.Parallel()
+	skipUnlocked(t)
+
+	for name := range luaTypedWrites(nil) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			base := t.TempDir()
+			root := filepath.Join(base, "new", "tree")
+			paths := tree.Paths{Tree: root}
+
+			native, err := client.New(rocks.Config{Tree: root})
+			require.NoError(t, err)
+
+			ran := false
+			e := client.NewLuaEngine(rocks.Config{Tree: root, WorkingDir: t.TempDir()}, nil, nil)
+			e.SetCallImpl(func([]string) (string, error) {
+				ran = true
+
+				lock, err := os.Lstat(paths.LockFile())
+				if assert.NoError(t, err, "the lock file while upstream runs") {
+					assert.True(t, lock.Mode().IsRegular(), "the lock file is a regular file")
+					assert.Equal(t, fs.FileMode(0o644), lock.Mode().Perm(), "the lock file's mode")
+				}
+
+				for dir := paths.RocksDir(); dir != base; dir = filepath.Dir(dir) {
+					st, err := os.Stat(dir)
+					if assert.NoError(t, err, "%s while upstream runs", dir) {
+						assert.Equal(t, fs.ModeDir|0o755, st.Mode(), "the mode of %s", dir)
+					}
+				}
+
+				err = native.Remove(shortContext(t), "foo", client.RemoveOpts{})
+				assert.ErrorIs(t, err, tree.ErrLocked, "a native write while upstream runs")
+
+				return "", nil
+			})
+
+			require.NoError(t, luaTypedWrites(e)[name](context.Background()), name)
+			assert.True(t, ran, "upstream ran")
+
+			err = native.Remove(shortContext(t), "foo", client.RemoveOpts{})
+			require.NotErrorIs(t, err, tree.ErrLocked, "a native write once the lua one is done")
+		})
+	}
+}
+
+// TestLuaEngine_WriteLocksARelativeTreeInTheWorkingDir: upstream takes a
+// relative --tree from the directory it runs in, Config.WorkingDir, so that
+// is where a typed write of the lua backend creates and locks the tree, and
+// it creates nothing in the process's current directory.
+func TestLuaEngine_WriteLocksARelativeTreeInTheWorkingDir(t *testing.T) {
+	t.Parallel()
+	skipUnlocked(t)
+
+	work := t.TempDir()
+	rel := filepath.Join("glr-relative-tree-test", "tree")
+
+	e := client.NewLuaEngine(rocks.Config{Tree: rel, WorkingDir: work}, nil, nil)
+	e.SetCallImpl(func([]string) (string, error) {
+		assert.FileExists(t, tree.Paths{Tree: filepath.Join(work, rel)}.LockFile(), "the lock file in the working dir")
+
+		return "", nil
+	})
+
+	require.NoError(t, e.Install(context.Background(), "foo", client.InstallOpts{}), "Install")
+	assert.NoDirExists(t, filepath.Dir(rel), "the tree in the process's current directory")
 }
 
 // TestLuaEngine_WriteHoldsTheTreeLock: while upstream runs a typed write of

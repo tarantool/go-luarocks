@@ -13,9 +13,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -91,10 +93,6 @@ func TestBackendInterop_Pack(t *testing.T) {
 						p := pair{a, b}
 						packed[p] = packInstalled(t, x, b, direct[a], fx.pkg)
 						installed[p] = installPacked(t, x, a, packed[p], fx)
-
-						if b == client.BackendNative {
-							markNativePacked(installed[p]) // divPackModes
-						}
 					}
 				}
 
@@ -172,22 +170,44 @@ func installPacked(t *testing.T, x interopCtx, backend client.Backend, archive s
 }
 
 // compareArchives requires the two rock archives to hold the same files with
-// the same contents: both pack one installed rock.
+// the same contents, each made on the same host, Unix, and with the same mode,
+// which unzip restores: both pack one installed rock. The modification times
+// are not compared: upstream's zip stores the files' own, the native packer
+// none. Neither are the directory entries upstream's zip -r adds, which
+// luarocks.tools.zip and the native packer leave to unzip to create.
 func compareArchives(t *testing.T, label, native, lua string) {
 	t.Helper()
 
-	n, l := archiveDigest(t, native), archiveDigest(t, lua)
-	assert.Equal(t, sortedKeys(setOf(l)), sortedKeys(setOf(n)), "[%s] the files of the packed rock (native vs lua)", label)
+	n, l := archiveEntries(t, native), archiveEntries(t, lua)
+	assert.Equal(t, slices.Sorted(maps.Keys(l)), slices.Sorted(maps.Keys(n)), "[%s] the files of the packed rock (native vs lua)", label)
 
-	for name, sum := range l {
-		if got, ok := n[name]; ok {
-			assert.Equal(t, sum, got, "[%s] %s in the packed rock (native vs lua)", label, name)
+	for name, want := range l {
+		got, ok := n[name]
+		if !ok {
+			continue
 		}
+
+		assert.Equal(t, want.sum, got.sum, "[%s] %s in the packed rock (native vs lua)", label, name)
+		assert.Equal(t, zipHostUnix, want.host, "[%s] %s: the host lua's packed rock records", label, name)
+		assert.Equal(t, want.host, got.host, "[%s] %s: the host the packed rock records (native vs lua)", label, name)
+		assert.Equal(t, want.mode.String(), got.mode.String(), "[%s] %s: the mode in the packed rock (native vs lua)", label, name)
 	}
 }
 
-// archiveDigest returns the md5 of every file of the zip archive at path.
-func archiveDigest(t *testing.T, path string) map[string]string {
+// zipHostUnix is the host of a zip entry made on Unix, the high byte of its
+// "version made by".
+const zipHostUnix uint16 = 3
+
+// archiveEntry is what compareArchives compares of a file of an archive: the
+// md5 of its contents, the host it was made on and its mode.
+type archiveEntry struct {
+	sum  string
+	host uint16
+	mode os.FileMode
+}
+
+// archiveEntries returns every file of the zip archive at path.
+func archiveEntries(t *testing.T, path string) map[string]archiveEntry {
 	t.Helper()
 
 	zr, err := zip.OpenReader(path)
@@ -195,7 +215,7 @@ func archiveDigest(t *testing.T, path string) map[string]string {
 
 	defer func() { _ = zr.Close() }()
 
-	out := map[string]string{}
+	out := map[string]archiveEntry{}
 
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
@@ -210,7 +230,7 @@ func archiveDigest(t *testing.T, path string) map[string]string {
 		require.NoError(t, err)
 		require.NoError(t, rc.Close())
 
-		out[f.Name] = hex.EncodeToString(h.Sum(nil))
+		out[f.Name] = archiveEntry{sum: hex.EncodeToString(h.Sum(nil)), host: f.CreatorVersion >> 8, mode: f.Mode()}
 	}
 
 	return out
