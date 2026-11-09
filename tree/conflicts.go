@@ -240,7 +240,7 @@ func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]b
 				continue
 			}
 
-			if err := renameIfExists(src, MungedPath(dir, src, curName, curVer), dir); err != nil {
+			if err := t.renameIfExists(src, MungedPath(dir, src, curName, curVer), dir); err != nil {
 				return "", fmt.Errorf("demote %q: %w", src, err)
 			}
 		}
@@ -252,10 +252,10 @@ func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]b
 	}
 
 	if curName != newName || curVer != newVer {
-		if err := backupExisting(deployDir, target); err != nil {
+		if err := t.backupExisting(deployDir, target); err != nil {
 			return "", err
 		}
-	} else if err := safepath.Remove(deployDir, target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	} else if err := t.j.remove(deployDir, target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("remove %q: %w", target, err)
 	}
 
@@ -266,7 +266,7 @@ func (t *Tree) resolveSpot(dt, rel, newName, newVer string, written map[string]b
 // already at target, inside root, is renamed to target with "~" appended — as
 // many times as it takes to reach a free name, so an earlier backup is never
 // overwritten.
-func backupExisting(root, target string) error {
+func (t *Tree) backupExisting(root, target string) error {
 	if _, err := safepath.Rel(root, target); err != nil {
 		return err
 	}
@@ -284,7 +284,7 @@ func backupExisting(root, target string) error {
 		backup += "~"
 	}
 
-	if err := safepath.Rename(root, target, backup); err != nil {
+	if err := t.j.rename(root, target, backup); err != nil {
 		return fmt.Errorf("backup %q: %w", target, err)
 	}
 
@@ -295,7 +295,7 @@ func backupExisting(root, target string) error {
 // exists it replaces dst, whose directory is created as needed, and the
 // directories src leaves empty are pruned up to, not including, stop. Both
 // paths must be inside stop.
-func renameIfExists(src, dst, stop string) error {
+func (t *Tree) renameIfExists(src, dst, stop string) error {
 	for _, p := range []string{src, dst} {
 		if _, err := safepath.Rel(stop, p); err != nil {
 			return err
@@ -306,19 +306,19 @@ func renameIfExists(src, dst, stop string) error {
 		return nil //nolint:nilerr // a missing source is a no-op, as upstream's fs.exists gate
 	}
 
-	if err := safepath.MkdirAll(stop, filepath.Dir(dst), dirPerm); err != nil {
+	if err := t.j.mkdirAll(stop, filepath.Dir(dst)); err != nil {
 		return err
 	}
 
-	if err := safepath.RemoveAll(stop, dst); err != nil {
+	if err := t.j.removeAll(stop, dst); err != nil {
 		return err
 	}
 
-	if err := safepath.Rename(stop, src, dst); err != nil {
+	if err := t.j.rename(stop, src, dst); err != nil {
 		return err
 	}
 
-	pruneEmptyParents(filepath.Dir(src), stop)
+	t.pruneEmptyParents(filepath.Dir(src), stop)
 
 	return nil
 }
@@ -326,11 +326,11 @@ func renameIfExists(src, dst, stop string) error {
 // pruneEmptyParents removes dir and each parent it leaves empty, stopping at
 // stop, which is kept — upstream's remove_dir_tree_if_empty, bounded by the
 // deploy dir. Best-effort: a removal that fails ends it.
-func pruneEmptyParents(dir, stop string) {
+func (t *Tree) pruneEmptyParents(dir, stop string) {
 	stop = filepath.Clean(stop)
 
 	for d := filepath.Clean(dir); d != stop && strings.HasPrefix(d, stop+string(filepath.Separator)); d = filepath.Dir(d) {
-		if err := safepath.Remove(stop, d); err != nil {
+		if err := t.j.remove(stop, d); err != nil {
 			return
 		}
 	}
@@ -414,8 +414,31 @@ func (s *spots) seen(t *Tree, dt, rel string) bool {
 // is not a single directory, or a rock_manifest entry that leaves its deploy
 // dir, fails it with an error wrapping rocks.ErrUnsafePath before anything is
 // removed.
+//
+// A DeleteVersion that fails undoes what it removed and renamed.
 func (t *Tree) DeleteVersion(name, version string) error {
-	return t.deleteVersion(name, version, nil)
+	return t.journaled(func(t *Tree) error { return t.deleteVersion(name, version, nil) })
+}
+
+// journaled runs fn on t with a journal: t's own when it has one, as the Tree
+// a Tx method works on does, so that fn is part of the Tx's change, and
+// otherwise one of fn's own, committed when fn succeeds and rolled back when
+// it fails.
+func (t *Tree) journaled(fn func(t *Tree) error) error {
+	if t.j != nil {
+		return fn(t)
+	}
+
+	own := *t
+	own.j = newJournal(t.Paths)
+
+	if err := fn(&own); err != nil {
+		return errors.Join(err, own.j.rollback())
+	}
+
+	own.j.commit()
+
+	return nil
 }
 
 // deleteVersion is DeleteVersion, undeploying the files of fallback, when not
@@ -438,14 +461,14 @@ func (t *Tree) deleteVersion(name, version string, fallback *rocks.RockManifest)
 		}
 	}
 
-	if err := safepath.RemoveAll(t.RocksDir(), installDir); err != nil {
+	if err := t.j.removeAll(t.RocksDir(), installDir); err != nil {
 		return fmt.Errorf("tree.DeleteVersion: remove install dir: %w", err)
 	}
 
 	// Prune the rock's name dir when no versions remain.
 	nameDir := filepath.Join(t.RocksDir(), name)
 	if entries, err := os.ReadDir(nameDir); err == nil && len(entries) == 0 {
-		_ = os.Remove(nameDir)
+		_ = t.j.remove(t.RocksDir(), nameDir)
 	}
 
 	return nil
@@ -514,15 +537,15 @@ func (t *Tree) undeployFiles(name, version string, rm *rocks.RockManifest) error
 		dir := t.deployDirOf(d.dt)
 		p := filepath.Join(dir, filepath.FromSlash(d.rel))
 
-		if err := safepath.Remove(dir, p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := t.j.remove(dir, p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove %q: %w", p, err)
 		}
 
-		pruneEmptyParents(filepath.Dir(p), dir)
+		t.pruneEmptyParents(filepath.Dir(p), dir)
 	}
 
 	for _, r := range renames {
-		if err := renameIfExists(r.src, r.dst, r.stop); err != nil {
+		if err := t.renameIfExists(r.src, r.dst, r.stop); err != nil {
 			return fmt.Errorf("promote %q: %w", r.src, err)
 		}
 	}

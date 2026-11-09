@@ -70,16 +70,27 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   umask: directories, the tree's own and an unpacked rock's, 0777, commands
   and C modules 0755, and the other files, manifests and the lock file
   among them, 0644 or 0666, so a tree made under the usual umask, 022, is
-  readable by every user, as one a system service runs from must be.
+  readable by every user, as one a system service runs from must be. So do
+  the directories and files the lua backend creates, the rocks dir of an
+  existing tree and every file its LuaRocks writes, the manifests among
+  them, included, which gopher-lua's `io.open` would create 0600.
 - tree: `Tree.Update` changes a tree in a transaction, a `Tx`, which keeps
   the tree manifest in step with the files: `Tx.Deploy` deploys a rock and
   records it, `Tx.Remove` undeploys an installed version, a `RockRef`, and
   drops it, failing with `ErrNotInstalled` for one the manifest does not
   list, and undeploying the modules and commands its manifest entry names
   when its `rock_manifest` cannot be read, so the plain paths it held pass
-  on; `Tx.View` shows the tree as the transaction has it. The manifest
-  is written even when the change fails half-way, so it never lags behind
-  the files. The native client deploys and removes rocks through it.
+  on; `Tx.View` shows the tree as the transaction has it. A change is all
+  or nothing, as upstream rolls back a failed deploy, build or install: a
+  `Tx` journals every file it creates, renames, overwrites or removes, and a
+  method that fails, an `fn` that fails or a manifest that cannot be written
+  undoes them — the files of other rocks it demoted or promoted, the
+  `rock_manifest`s and the tree manifest are as they were, and the install
+  dir a deploy function built in is removed. `Tx.Commit` keeps the changes
+  so far whatever fails next. The native client deploys and removes rocks
+  through it, so a failed `Install`, `Build` or `Make` leaves the tree as
+  upstream's does: as it was, but for an installed copy of the very version,
+  which, as upstream, it removes for good before it builds.
   `Tx.Deploy` copies the commands of a rock whose rockspec sets
   `deploy.wrap_bin_scripts = false` verbatim, whatever `Tree.BinWrap` says.
 - tree: `Tx.InstallStaged` deploys a directory laid out as an unpacked
@@ -269,7 +280,12 @@ version carries the ssh fixes for GO-2026-6354 and GO-2026-6355.
   methods run over the rock trees `Config.Tree` and
   `Config.Tarantool.Prefix` whatever a config file sets, so `Config.Tree` is
   always one of them, as upstream assumes of the tree it installs into;
-  `Exec` runs over the configured trees.
+  `Exec` runs over the configured trees. Its methods and `Exec` honour their
+  context: cancelling it stops the Lua code and kills the shell of each
+  command LuaRocks runs through `os.execute` and `io.popen` (its whole
+  process group with `Config.IsolateBuilds` on unix), LuaRocks' cleanup
+  rolls a partial install back, and the call returns at once with an error
+  wrapping `ctx.Err()`.
 - client: `Search` on the native backend (upstream `luarocks search`), with
   `--source` / `--binary` / `--all` and results identical to the lua
   backend's. `SearchResult` carries `Arch` and `Namespace`, so a caller can

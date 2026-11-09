@@ -82,27 +82,34 @@ func (tx *Tx) InstallStaged(spec *rocks.Rockspec, dir string, opts StagedOpts) (
 		}
 	}
 
-	if opts.RemoveOtherVersions {
-		if err := tx.removeOtherVersions(spec.Package, []string{spec.Version}); err != nil {
-			return nil, fmt.Errorf("tree.InstallStaged: %w", err)
-		}
-	}
-
 	var rm *rocks.RockManifest
 
-	err = tx.Deploy(deploySpec, func(t *Tree) (*rocks.RockManifest, error) {
-		if err := t.copyTopFiles(deploySpec, dir); err != nil {
-			return nil, err
+	err = tx.atomic(func() error {
+		if opts.RemoveOtherVersions {
+			if err := tx.removeOtherVersions(spec.Package, []string{spec.Version}); err != nil {
+				return err
+			}
 		}
 
-		var err error
+		err := tx.Deploy(deploySpec, func(t *Tree) (*rocks.RockManifest, error) {
+			if err := t.copyTopFiles(deploySpec, dir); err != nil {
+				return nil, err
+			}
 
-		rm, err = t.deploy(deploySpec, dir, dir, false)
+			var err error
 
-		return rm, err
+			rm, err = t.deploy(deploySpec, dir, dir, false)
+
+			return rm, err
+		})
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", spec.Package, spec.Version, err)
+		}
+
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("tree.InstallStaged: %s %s: %w", spec.Package, spec.Version, err)
+		return nil, fmt.Errorf("tree.InstallStaged: %w", err)
 	}
 
 	return rm, nil
@@ -232,7 +239,7 @@ func (t *Tree) copyTopFiles(spec *rocks.Rockspec, rockDir string) error {
 			continue
 		}
 
-		if err := copyKeepMode(rockDir, filepath.Join(rockDir, e.Name()), t.RocksDir(), filepath.Join(installDir, e.Name())); err != nil {
+		if err := t.j.copyKeepMode(rockDir, filepath.Join(rockDir, e.Name()), t.RocksDir(), filepath.Join(installDir, e.Name())); err != nil {
 			return fmt.Errorf("copy %s: %w", e.Name(), err)
 		}
 	}
@@ -243,8 +250,16 @@ func (t *Tree) copyTopFiles(spec *rocks.Rockspec, rockDir string) error {
 // copyKeepMode copies the file src, read inside srcRoot, to dst inside
 // dstRoot, with src's permission bits, creating dst's directory; a symlink to
 // a file inside srcRoot is copied as the file. It returns nothing for a
-// directory, which it does not copy.
+// directory, which it does not copy. It writes outside any tree's journal, as
+// into a stage dir.
 func copyKeepMode(srcRoot, src, dstRoot, dst string) error {
+	var j *journal
+
+	return j.copyKeepMode(srcRoot, src, dstRoot, dst)
+}
+
+// copyKeepMode is copyKeepMode recording what it changes in j.
+func (j *journal) copyKeepMode(srcRoot, src, dstRoot, dst string) error {
 	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return err
@@ -261,11 +276,11 @@ func copyKeepMode(srcRoot, src, dstRoot, dst string) error {
 		return fmt.Errorf("%s is a link to a directory", src)
 	}
 
-	if err := safepath.MkdirAll(dstRoot, filepath.Dir(dst), dirPerm); err != nil {
+	if err := j.mkdirAll(dstRoot, filepath.Dir(dst)); err != nil {
 		return err
 	}
 
-	out, err := safepath.Create(dstRoot, dst, st.Mode().Perm())
+	out, err := j.create(dstRoot, dst, st.Mode().Perm())
 	if err != nil {
 		return err
 	}

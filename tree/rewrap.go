@@ -28,12 +28,30 @@ var errNoBinWrap = errors.New("the tree has no BinWrap to generate wrappers with
 // script and the interpreter by absolute path. The tree manifest does not
 // change. A tree without a BinWrap fails it, and so does a rock whose
 // rock_manifest or rockspec cannot be read, with an error wrapping
-// ErrCorrupt; the wrappers rewritten before stay so.
+// ErrCorrupt; the wrappers rewritten before are put back then.
 func (tx *Tx) Rewrap() ([]string, error) {
 	if tx.done {
 		return nil, errTxDone
 	}
 
+	var out []string
+
+	err := tx.atomic(func() error {
+		var err error
+
+		out, err = tx.rewrap()
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+// rewrap is Rewrap, without putting back what it rewrote when it fails.
+func (tx *Tx) rewrap() ([]string, error) {
 	t := tx.treeFor()
 	if t.BinWrap == nil {
 		return nil, fmt.Errorf("tree.Rewrap: %w", errNoBinWrap)
@@ -68,11 +86,11 @@ func (tx *Tx) Rewrap() ([]string, error) {
 				continue
 			}
 
-			if err := safepath.Remove(t.BinDir(), f.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := t.j.remove(t.BinDir(), f.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return out, fmt.Errorf("tree.Rewrap: %w", err)
 			}
 
-			if err := writeFile(t.BinDir(), f.Path, body, execPerm); err != nil {
+			if err := t.j.writeFile(t.BinDir(), f.Path, body, execPerm); err != nil {
 				return out, fmt.Errorf("tree.Rewrap: write %s: %w", f.Path, err)
 			}
 

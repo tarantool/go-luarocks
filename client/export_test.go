@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -45,12 +46,12 @@ func NewLuaEngine(cfg rocks.Config, store rocks.ManifestStore, logger *slog.Logg
 // Boot builds and warms one VM and discards it, so the boot smoke tests can
 // assert the VM comes up without holding one.
 func (e *LuaEngine) Boot() error {
-	L, err := e.warmVM()
+	vm, err := e.warmVM(context.Background())
 	if err != nil {
 		return err
 	}
 
-	L.Close()
+	vm.Close()
 
 	return nil
 }
@@ -70,7 +71,9 @@ func (e *LuaEngine) FreshPackagePath() (string, error) {
 }
 
 // Output runs one lua backend command and returns what it printed.
-func (e *LuaEngine) Output(argv []string) (string, error) { return e.callViaState(argv) }
+func (e *LuaEngine) Output(argv []string) (string, error) {
+	return e.callViaState(context.Background(), argv)
+}
 
 // UnresolvedRequires runs the commands one after another on a single fresh VM,
 // the way a warm-up and a dispatch share one, and returns each module a require
@@ -106,7 +109,7 @@ func (e *LuaEngine) UnresolvedRequires(argvs ...[]string) ([]string, error) {
 		return nil, err
 	}
 
-	restore := redirectIO(L, io.Discard, io.Discard)
+	restore := redirectIO(L.LState, io.Discard, io.Discard)
 	defer restore()
 
 	for _, argv := range argvs {
@@ -128,7 +131,7 @@ func (e *LuaEngine) Call(argv []string) error { return e.call(argv) }
 // which is what the config tests read. It is retired afterwards like any other
 // dispatch, so a probe cannot leak state into a later call.
 func (e *LuaEngine) Probe(expr string) (string, error) {
-	L, warmed, err := e.acquire()
+	L, warmed, err := e.acquire(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +158,7 @@ func (e *LuaEngine) Probe(expr string) (string, error) {
 // isolation comes from retiring the VM, so a test that could only pass by
 // clearing state would be testing a mechanism the engine does not have.
 func (e *LuaEngine) Contaminate(stmt string) error {
-	L, warmed, err := e.acquire()
+	L, warmed, err := e.acquire(context.Background())
 	if err != nil {
 		return err
 	}
@@ -163,6 +166,20 @@ func (e *LuaEngine) Contaminate(stmt string) error {
 	defer e.release(L, warmed)
 
 	return L.DoString(stmt)
+}
+
+// Run runs chunk on a pooled VM under ctx, as a dispatch runs its command,
+// and retires the VM like a dispatch does. Its error wraps ctx.Err() when ctx
+// cut the chunk short.
+func (e *LuaEngine) Run(ctx context.Context, chunk string) error {
+	vm, warmed, err := e.acquire(ctx)
+	if err != nil {
+		return contextError(ctx, nil, err)
+	}
+
+	defer e.release(vm, warmed)
+
+	return contextError(ctx, nil, vm.run(ctx, chunk))
 }
 
 // WaitForPooledVM blocks until the background warm-up has restocked the pool,

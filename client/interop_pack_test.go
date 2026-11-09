@@ -105,7 +105,7 @@ func TestBackendInterop_Pack(t *testing.T) {
 					label := fmt.Sprintf("%s/%s, built by %v", op.name, fx.name, a)
 					assert.Equal(t, filepath.Base(packed[pair{a, client.BackendLua}]),
 						filepath.Base(packed[pair{a, client.BackendNative}]), "[%s] the name of the packed rock", label)
-					compareArchives(t, label, packed[pair{a, client.BackendNative}], packed[pair{a, client.BackendLua}])
+					compareArchivesBuiltBy(t, label, a, packed[pair{a, client.BackendNative}], packed[pair{a, client.BackendLua}])
 
 					want := run(direct[a])
 					compareReaders(t, label+", direct", want)

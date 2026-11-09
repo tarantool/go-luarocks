@@ -2,9 +2,11 @@ package tree_test
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -286,7 +288,12 @@ func TestGraft_Installed(t *testing.T) {
 	require.NoError(t, err, "Graft with Replace")
 	assert.Equal(t, []tree.RockRef{alpha1.ref(), beta1.ref()}, report.Grafted, "grafted")
 	requireConsistent(t, differ, alpha1, beta1)
-	assert.Equal(t, treeState(t, same), treeState(t, differ), "the replaced tree vs the one grafted into")
+
+	// The alpha 1 made into same keeps the staging dir of its build, which a
+	// graft, as a pack, leaves out.
+	want := treeState(t, same)
+	maps.DeleteFunc(want, func(rel, _ string) bool { return strings.Contains(rel, "/build/") })
+	assert.Equal(t, want, treeState(t, differ), "the replaced tree vs the one grafted into")
 }
 
 // TestGraft_SelectAndVersions: Select leaves rocks out, a rock dir without a

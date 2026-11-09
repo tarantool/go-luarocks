@@ -435,7 +435,10 @@ func (e *nativeEngine) packInstalled(t *tree.Tree, name, version string) (string
 }
 
 // stageInstalled lays name/version, installed in t, out in stage as Pack packs
-// it, and returns the arch Pack names the rock with.
+// it, and returns the arch Pack names the rock with. The build/ staging dir
+// a native build keeps in the install dir is no file of the rock — its
+// rock_manifest does not list it — and is left out, as upstream, which has
+// none, packs none.
 func stageInstalled(t *tree.Tree, name, version, stage string) (string, error) {
 	installDir := t.InstallDir(name, version)
 	if _, err := os.Stat(installDir); err != nil {
@@ -447,7 +450,7 @@ func stageInstalled(t *tree.Tree, name, version, stage string) (string, error) {
 		return "", err
 	}
 
-	if err := copyDirContents(installDir, stage); err != nil {
+	if err := copyDirContents(installDir, stage, buildStagingDir); err != nil {
 		return "", fmt.Errorf("copy %s: %w", installDir, err)
 	}
 
@@ -679,8 +682,9 @@ func copyFileMode(srcRoot, src, dstRoot, dst string, mode os.FileMode) error {
 }
 
 // copyDirContents copies every file under src to the same path under dst,
-// keeping its permissions, as upstream fs.copy_contents does.
-func copyDirContents(src, dst string) error {
+// keeping its permissions, as upstream fs.copy_contents does, but for the
+// entries at the top of src named skip.
+func copyDirContents(src, dst string, skip ...string) error {
 	return filepath.Walk(src, func(p string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -689,6 +693,14 @@ func copyDirContents(src, dst string) error {
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
 			return err
+		}
+
+		if slices.Contains(skip, rel) {
+			if fi.IsDir() {
+				return filepath.SkipDir
+			}
+
+			return nil
 		}
 
 		if fi.IsDir() {
@@ -1157,12 +1169,16 @@ func (e *nativeEngine) installedLookup(ctx context.Context) (deps.InstalledLooku
 	}, nil
 }
 
+// buildStagingDir is the directory of a rock's install dir a native build
+// stages the rock in, which it keeps there.
+const buildStagingDir = "build"
+
 // deployFromSource builds spec from the sources in srcDir and deploys the
 // result.
 func (e *nativeEngine) deployFromSource(ctx context.Context, spec *rocks.Rockspec, srcDir string) error {
 	return e.deployRock(ctx, spec, func(tx *tree.Tx) error {
 		return tx.Deploy(spec, func(t *tree.Tree) (*rocks.RockManifest, error) {
-			destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), "build")
+			destDir := filepath.Join(t.InstallDir(spec.Package, spec.Version), buildStagingDir)
 			if err := os.MkdirAll(destDir, unpackDirMode); err != nil {
 				return nil, fmt.Errorf("mkdir destDir: %w", err)
 			}
@@ -1228,8 +1244,26 @@ func (e *nativeEngine) deployRock(ctx context.Context, spec *rocks.Rockspec, dep
 
 	// The Tx reads the tree manifest BEFORE deploying so Deploy can consult the
 	// providers of each module/command (check_spot_if_available) — this drives
-	// version promotion on reinstall/upgrade (glr-5e9).
-	return t.Update(ctx, deploy)
+	// version promotion on reinstall/upgrade (glr-5e9). A deploy that fails is
+	// undone, as upstream rolls it back, but for the removal of an installed
+	// copy of the version, which upstream makes for good before it builds
+	// (build.lua:393-395, install.lua:86-88): it is committed first. The copy
+	// is the one Tx.Deploy would remove, an install dir of the very version,
+	// here one the manifest lists.
+	return t.Update(ctx, func(tx *tree.Tx) error {
+		ref, listed := tx.View().Installed(spec.Package, spec.Version)
+		if _, err := os.Stat(t.InstallDir(spec.Package, spec.Version)); err == nil && listed && ref.Version == spec.Version {
+			if err := tx.Remove(ref); err != nil {
+				return err
+			}
+
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+		}
+
+		return deploy(tx)
+	})
 }
 
 // openTree opens e.cfg.Tree with the engine's manifest store.

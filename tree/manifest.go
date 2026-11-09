@@ -13,8 +13,12 @@ import (
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
+	"github.com/tarantool/go-luarocks/internal/safepath"
 	"github.com/tarantool/go-luarocks/internal/treelock"
 )
+
+// treeManifestName is the file name of the tree manifest in the rocks dir.
+const treeManifestName = "manifest"
 
 // The tree manifest, <rocks-dir>/manifest, lists every installed rock and,
 // for each module and command, the rocks providing it. Deploy and
@@ -63,9 +67,16 @@ func lockError(err error) error {
 // Tx is a change to a tree in progress: Update passes one to its function,
 // and its methods change the files of the tree and the tree manifest
 // together. A Tx is valid only while that function runs.
+//
+// Each method is a change of its own: one that fails undoes what it changed,
+// the files and the manifest, and leaves the tree as it was before the call.
 type Tx struct {
 	tree *Tree
 	m    *rocks.Manifest
+
+	// j records the changes to the files of the tree since the Update began,
+	// or since the last Commit, to undo them.
+	j *journal
 
 	// ctx is the context of the Update, which bounds the waits for another
 	// tree's lock a Tx method takes.
@@ -82,9 +93,20 @@ type Tx struct {
 // Update changes the tree through fn: it takes the tree's lock, exclusive,
 // loads the tree manifest — an empty one when the tree has none — and runs fn
 // with a Tx over it, then writes the manifest when a Tx method changed it,
-// and releases the lock. The manifest is written even when fn fails after a
-// change, so it never lags behind the files of the tree; the error is fn's
-// then, joined with that of the write if both fail.
+// and releases the lock.
+//
+// The change is all or nothing, as upstream LuaRocks rolls back a deploy, a
+// build or an install that fails: when fn fails, or the manifest cannot be
+// written, every change the Tx made since it began, or since its last Commit,
+// is undone — files created are removed, files removed, overwritten or
+// renamed are put back, the rock_manifests and the tree manifest are as they
+// were — and the error is fn's, joined with that of the undo if it fails too.
+// Removed and overwritten files are kept until then in a directory of the
+// rocks dir named .tx-*, which the undo or the end of the change deletes; an
+// undo that fails keeps it, and its error names it. A directory a Tx method
+// creates for a writer it does not see — the install dir Deploy hands its
+// deploy function, where a build writes — is removed whole. What fn changes
+// in the tree by itself, other than through the Tx, is not undone.
 //
 // The lock is an advisory lock on the file .lock in the rocks dir (flock(2)
 // on Linux, macOS and the BSDs; elsewhere it guards nothing), which Update
@@ -122,11 +144,71 @@ func (t *Tree) update(ctx context.Context, op string, load func() (*rocks.Manife
 		return err
 	}
 
-	tx := &Tx{tree: t, m: m, ctx: ctx}
-	fnErr := fn(tx)
+	tx := &Tx{tree: t, m: m, ctx: ctx, j: newJournal(t.Paths)}
+
+	err = fn(tx)
+	if err == nil {
+		err = tx.flush()
+	}
+
 	tx.done = true
 
-	return errors.Join(fnErr, tx.flush())
+	if err != nil {
+		return errors.Join(err, tx.j.rollback())
+	}
+
+	tx.j.commit()
+
+	return nil
+}
+
+// Commit makes the changes of the transaction so far permanent: it writes the
+// tree manifest when they changed it, and a later failure — of a Tx method,
+// of fn or of the final write of the manifest — no longer undoes them, only
+// what changes after the Commit. It is for an fn that makes several changes
+// and wants those that succeeded kept whatever happens to the next; the
+// native client commits the removal of an installed copy of the version it
+// builds, as upstream deletes that copy for good before it builds. A Commit
+// that fails to write the manifest is undone, and so is everything since the
+// last Commit when fn returns its error.
+func (tx *Tx) Commit() error {
+	if tx.done {
+		return errTxDone
+	}
+
+	if err := tx.flush(); err != nil {
+		return err
+	}
+
+	tx.j.commit()
+
+	return nil
+}
+
+// atomic runs fn, a change of the transaction, so that when it fails every
+// change it made to the files of the tree and to the manifest is undone, and
+// the tree is as it was before.
+func (tx *Tx) atomic(fn func() error) error {
+	mark := tx.j.mark()
+	m, dirty := cloneManifest(tx.m), tx.dirty
+
+	err := fn()
+	if err == nil {
+		return nil
+	}
+
+	uerr := tx.j.undoTo(mark)
+	tx.m, tx.dirty, tx.view = m, dirty, nil
+
+	return errors.Join(err, uerr)
+}
+
+// createdDir records, when dir does not exist, that it is about to be created
+// by a writer the journal does not see, so that undoing it removes it whole.
+func (tx *Tx) createdDir(dir string) {
+	if _, err := safepath.Lstat(tx.tree.Tree, dir); errors.Is(err, fs.ErrNotExist) {
+		tx.j.created(dir)
+	}
 }
 
 // errTxDone is the error of a Tx method called after its Update returned.
@@ -136,6 +218,10 @@ var errTxDone = errors.New("tree: the transaction is over")
 func (tx *Tx) flush() error {
 	if !tx.dirty {
 		return nil
+	}
+
+	if err := tx.j.save(filepath.Join(tx.tree.RocksDir(), treeManifestName)); err != nil {
+		return fmt.Errorf("write tree manifest: %w", err)
 	}
 
 	if err := tx.tree.Store.WriteTree(tx.tree.RocksDir(), tx.m); err != nil {
@@ -152,6 +238,7 @@ func (tx *Tx) flush() error {
 func (tx *Tx) treeFor() *Tree {
 	t := *tx.tree
 	t.Providers = manifestProviders(tx.m)
+	t.j = tx.j
 
 	return &t
 }
@@ -173,40 +260,58 @@ func (tx *Tx) treeFor() *Tree {
 // records the rock's declared dependencies and, resolved, its direct ones:
 // each at the newest installed version its constraints accept. The entries of
 // the other rocks are left as they are.
+//
+// A Deploy that fails — deploy, or the write of the rock_manifest — undoes
+// what it changed, the removal of the installed copy included: the files
+// tree.Deploy wrote, renamed or removed go back, and the rock's install dir,
+// where deploy may build before it deploys, is removed whole when it did not
+// exist before. A caller that wants the removal kept, as upstream keeps it,
+// removes the copy first and commits (Tx.Commit).
 func (tx *Tx) Deploy(spec *rocks.Rockspec, deploy func(t *Tree) (*rocks.RockManifest, error)) error {
 	if tx.done {
 		return errTxDone
 	}
 
-	t := tx.treeFor()
-	if !wrapsCommands(spec) {
-		t.BinWrap = nil
-	}
+	return tx.atomic(func() error {
+		t := tx.treeFor()
+		if !wrapsCommands(spec) {
+			t.BinWrap = nil
+		}
 
-	if _, err := os.Stat(t.InstallDir(spec.Package, spec.Version)); err == nil {
-		if err := tx.deleteVersion(spec.Package, spec.Version); err != nil {
+		installDir := t.InstallDir(spec.Package, spec.Version)
+
+		if _, err := os.Stat(installDir); err == nil {
+			if err := tx.deleteVersion(spec.Package, spec.Version); err != nil {
+				return err
+			}
+
+			if err := tx.flush(); err != nil {
+				return err
+			}
+		}
+
+		tx.createdDir(filepath.Dir(installDir))
+		tx.createdDir(installDir)
+
+		rm, err := deploy(t)
+		if err != nil {
 			return err
 		}
 
-		if err := tx.flush(); err != nil {
-			return err
+		rockManifestPath := filepath.Join(installDir, rockManifestName)
+		if err := t.j.save(rockManifestPath); err != nil {
+			return fmt.Errorf("write rock_manifest: %w", err)
 		}
-	}
 
-	rm, err := deploy(t)
-	if err != nil {
-		return err
-	}
+		if err := t.Store.WriteRock(rockManifestPath, rm); err != nil {
+			return fmt.Errorf("write rock_manifest: %w", err)
+		}
 
-	rockManifestPath := filepath.Join(t.InstallDir(spec.Package, spec.Version), "rock_manifest")
-	if err := t.Store.WriteRock(rockManifestPath, rm); err != nil {
-		return fmt.Errorf("write rock_manifest: %w", err)
-	}
+		addToManifest(tx.m, spec, rm)
+		tx.changed()
 
-	addToManifest(tx.m, spec, rm)
-	tx.changed()
-
-	return nil
+		return nil
+	})
 }
 
 // Remove undeploys an installed rock version and drops it from the tree
@@ -236,7 +341,7 @@ func (tx *Tx) Remove(r RockRef) error {
 		return fmt.Errorf("%w: %s", ErrNotInstalled, r)
 	}
 
-	return tx.deleteVersion(ref.Name, ref.Version)
+	return tx.atomic(func() error { return tx.deleteVersion(ref.Name, ref.Version) })
 }
 
 // deleteVersion undeploys name/version from the tree and drops it from the

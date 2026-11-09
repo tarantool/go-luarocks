@@ -31,12 +31,30 @@ type PruneOpts struct {
 // the oldest version first — so the plain path of an item only ever passes to
 // a version Prune keeps, never to one it removes next.
 //
-// On an error Prune stops and returns what it removed so far.
+// On an error Prune stops, undoes what it removed and returns nothing.
 func (tx *Tx) Prune(keep func(RockRef) bool, opts PruneOpts) ([]RockRef, error) {
 	if tx.done {
 		return nil, errTxDone
 	}
 
+	var removed []RockRef
+
+	err := tx.atomic(func() error {
+		var err error
+
+		removed, err = tx.prune(keep, opts)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return removed, nil
+}
+
+// prune is Prune, without undoing what it removed when it fails.
+func (tx *Tx) prune(keep func(RockRef) bool, opts PruneOpts) ([]RockRef, error) {
 	var doomed []RockRef
 
 	if keep != nil {
@@ -50,7 +68,7 @@ func (tx *Tx) Prune(keep func(RockRef) bool, opts PruneOpts) ([]RockRef, error) 
 	var removed []RockRef
 
 	for _, ref := range slices.Backward(doomed) {
-		if err := tx.Remove(ref); err != nil {
+		if err := tx.deleteVersion(ref.Name, ref.Version); err != nil {
 			return sortedRefs(removed), fmt.Errorf("tree.Prune: %s: %w", ref, err)
 		}
 
@@ -100,6 +118,9 @@ func (tx *Tx) removeOrphans() ([]RockRef, error) {
 		}
 
 		nameDir := filepath.Join(rocksDir, name.Name())
+		if tx.j.isTrash(nameDir) {
+			continue
+		}
 
 		versions, err := os.ReadDir(nameDir)
 		if err != nil {
@@ -115,7 +136,7 @@ func (tx *Tx) removeOrphans() ([]RockRef, error) {
 				continue
 			}
 
-			if err := safepath.RemoveAll(rocksDir, filepath.Join(nameDir, ver.Name())); err != nil {
+			if err := tx.j.removeAll(rocksDir, filepath.Join(nameDir, ver.Name())); err != nil {
 				return removed, fmt.Errorf("remove orphan: %w", err)
 			}
 
@@ -123,7 +144,7 @@ func (tx *Tx) removeOrphans() ([]RockRef, error) {
 		}
 
 		if rest, err := os.ReadDir(nameDir); err == nil && len(rest) == 0 {
-			_ = safepath.Remove(rocksDir, nameDir)
+			_ = tx.j.remove(rocksDir, nameDir)
 		}
 	}
 

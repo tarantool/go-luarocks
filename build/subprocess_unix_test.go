@@ -74,7 +74,7 @@ func requireReturnsAtOnce(t *testing.T, cancel context.CancelFunc, done <-chan e
 
 	select {
 	case err := <-done:
-		require.Error(t, err, "a cancelled command fails")
+		require.ErrorIs(t, err, context.Canceled, "a cancelled command fails with the context's error")
 	case <-time.After(5 * time.Second):
 		t.Fatal("runCmd did not return after its context was cancelled")
 	}

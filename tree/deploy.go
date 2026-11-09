@@ -133,8 +133,24 @@ const (
 // installed lua/lib/bin subtrees) in the same order upstream build.lua does. The
 // per-section logic lives in the deploy* helpers so this orchestrator stays a
 // readable sequence.
+//
+// A Deploy that fails undoes what it changed: the files it wrote are removed,
+// and those it renamed or moved aside are put back.
 func (t *Tree) Deploy(spec *rocks.Rockspec, srcDir, buildDir string) (*rocks.RockManifest, error) {
-	return t.deploy(spec, srcDir, buildDir, true)
+	var rm *rocks.RockManifest
+
+	err := t.journaled(func(t *Tree) error {
+		var err error
+
+		rm, err = t.deploy(spec, srcDir, buildDir, true)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return rm, nil
 }
 
 // deploy is Deploy, with defaultDocs saying whether stage 3 installs the
@@ -222,7 +238,7 @@ func (t *Tree) recordInstallDir(spec *rocks.Rockspec, rm *rocks.RockManifest) er
 	installDir := t.InstallDir(spec.Package, spec.Version)
 
 	skip := map[string]bool{
-		kindLua: true, kindLib: true, "bin": true, "build": true,
+		kindLua: true, kindLib: true, "bin": true, buildStagingDir: true,
 		"rock_manifest": true, spec.Package + "-" + spec.Version + ".rockspec": true,
 	}
 
@@ -287,12 +303,12 @@ func (t *Tree) deployRockspec(spec *rocks.Rockspec, rm *rocks.RockManifest) erro
 	rockspecName := spec.Package + "-" + spec.Version + ".rockspec"
 	dst := filepath.Join(t.InstallDir(spec.Package, spec.Version), rockspecName)
 
-	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
+	if err := t.j.mkdirAll(t.RocksDir(), filepath.Dir(dst)); err != nil {
 		return fmt.Errorf("tree.Deploy: mkdir install dir: %w", err)
 	}
 
 	sum := md5.Sum(spec.RawSource)
-	if err := os.WriteFile(dst, spec.RawSource, filePerm); err != nil {
+	if err := t.j.writeFile(t.RocksDir(), dst, spec.RawSource, filePerm); err != nil {
 		return fmt.Errorf("tree.Deploy: write rockspec: %w", err)
 	}
 
@@ -338,7 +354,7 @@ func (t *Tree) deployModules(spec *rocks.Rockspec, srcDir, buildDir string, rm *
 			mode = execPerm
 		}
 
-		sum, err := copyFile(srcRoot, srcPath, t.deployDirOf(kind), finalPath, mode)
+		sum, err := t.j.copyFile(srcRoot, srcPath, t.deployDirOf(kind), finalPath, mode)
 		if err != nil {
 			return fmt.Errorf("tree.Deploy: module %q: %w", modName, err)
 		}
@@ -410,7 +426,7 @@ func (t *Tree) deployInstallModulePaths(spec *rocks.Rockspec, srcDir string, rm 
 				return fmt.Errorf("tree.Deploy: install %q: %w", key, err)
 			}
 
-			sum, err := copyFile(srcDir, src, dir, dst, g.mode)
+			sum, err := t.j.copyFile(srcDir, src, dir, dst, g.mode)
 			if err != nil {
 				return fmt.Errorf("tree.Deploy: install %q: %w", key, err)
 			}
@@ -440,7 +456,7 @@ func (t *Tree) deployInstallConf(spec *rocks.Rockspec, srcDir string) error {
 			return fmt.Errorf("tree.Deploy: install conf %q: %w", key, err)
 		}
 
-		if _, err := copyFile(srcDir, src, confDir, dst, filePerm); err != nil {
+		if _, err := t.j.copyFile(srcDir, src, confDir, dst, filePerm); err != nil {
 			return fmt.Errorf("tree.Deploy: install conf %q: %w", key, err)
 		}
 	}
@@ -517,7 +533,7 @@ func (t *Tree) deployBinFile(srcRoot, src, rel string, spec *rocks.Rockspec, rm 
 	if filepath.Clean(src) == realScript {
 		sum, err = fileMD5(src)
 	} else {
-		sum, err = copyFile(srcRoot, src, scriptDir, realScript, execPerm)
+		sum, err = t.j.copyFile(srcRoot, src, scriptDir, realScript, execPerm)
 	}
 
 	if err != nil {
@@ -532,7 +548,7 @@ func (t *Tree) deployBinFile(srcRoot, src, rel string, spec *rocks.Rockspec, rm 
 	}
 
 	if t.BinWrap == nil || !isLua(realScript) {
-		_, err := copyFile(scriptDir, realScript, t.BinDir(), dst, execPerm)
+		_, err := t.j.copyFile(scriptDir, realScript, t.BinDir(), dst, execPerm)
 
 		return err
 	}
@@ -540,7 +556,7 @@ func (t *Tree) deployBinFile(srcRoot, src, rel string, spec *rocks.Rockspec, rm 
 	// Public launcher → <tree>/bin/<rel>, execing the interpreter on the
 	// real script (matches fs/unix.lua wrap_script byte-for-byte).
 	body := t.binWrapperScript(realScript, spec.Package, spec.Version)
-	if err := writeFile(t.BinDir(), dst, []byte(body), execPerm); err != nil {
+	if err := t.j.writeFile(t.BinDir(), dst, []byte(body), execPerm); err != nil {
 		return fmt.Errorf("write bin wrapper: %w", err)
 	}
 
@@ -578,7 +594,7 @@ func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string, defaul
 			continue
 		}
 
-		if err := copyTree(srcDir, src, installDir, filepath.Join(installDir, dir)); err != nil {
+		if err := t.j.copyTree(srcDir, src, installDir, filepath.Join(installDir, dir)); err != nil {
 			return fmt.Errorf("tree.Deploy: copy_directories[%q]: %w", dir, err)
 		}
 
@@ -589,7 +605,7 @@ func (t *Tree) deployCopyDirectories(spec *rocks.Rockspec, srcDir string, defaul
 		return nil
 	}
 
-	return installDefaultDocs(srcDir, t.DocDir(spec.Package, spec.Version))
+	return t.installDefaultDocs(srcDir, t.DocDir(spec.Package, spec.Version))
 }
 
 // defaultDocPatterns are the prefixes upstream install_default_docs matches a
@@ -606,7 +622,7 @@ var defaultDocPatterns = []string{"readme", "license", "copying"}
 // upstream's failed fs.copy is. Upstream hands a matching directory to
 // fs.copy too, which copies no tree; it is skipped here, and so is a link to
 // one.
-func installDefaultDocs(srcDir, docDir string) error {
+func (t *Tree) installDefaultDocs(srcDir, docDir string) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		return fmt.Errorf("tree.Deploy: default docs: %w", err)
@@ -627,7 +643,7 @@ func installDefaultDocs(srcDir, docDir string) error {
 			continue
 		}
 
-		if _, err := copyFile(srcDir, filepath.Join(srcDir, e.Name()), docDir, filepath.Join(docDir, e.Name()), filePerm); err != nil {
+		if _, err := t.j.copyFile(srcDir, filepath.Join(srcDir, e.Name()), docDir, filepath.Join(docDir, e.Name()), filePerm); err != nil {
 			return fmt.Errorf("tree.Deploy: default docs: %w", err)
 		}
 	}
@@ -812,7 +828,7 @@ func (t *Tree) deployInstalledSubtree(
 		// tree, and upstream's install_files overwrites the backend's copy
 		// before the single deploy pass (build.lua:412-423, repos.lua:488-541).
 		if first {
-			sum, err := copyFile(srcDir, p, t.deployDirOf(kind), dst, mode)
+			sum, err := t.j.copyFile(srcDir, p, t.deployDirOf(kind), dst, mode)
 			if err != nil {
 				return err
 			}
@@ -821,7 +837,7 @@ func (t *Tree) deployInstalledSubtree(
 		}
 
 		if disp == moveSource {
-			if err := os.Remove(p); err != nil {
+			if err := t.j.remove(srcDir, p); err != nil {
 				return fmt.Errorf("remove relocated %q: %w", p, err)
 			}
 		}
@@ -833,7 +849,7 @@ func (t *Tree) deployInstalledSubtree(
 	}
 
 	if disp == moveSource {
-		pruneEmptyDirs(srcDir)
+		t.pruneEmptyDirs(srcDir)
 	}
 
 	return nil
@@ -843,7 +859,7 @@ func (t *Tree) deployInstalledSubtree(
 // deploy, bottom-up. Best-effort: a directory still holding files the deploy did
 // not claim is left alone, and a failed removal is not an error — the files are
 // already in place, and a stray empty directory harms nothing.
-func pruneEmptyDirs(dir string) {
+func (t *Tree) pruneEmptyDirs(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -851,12 +867,12 @@ func pruneEmptyDirs(dir string) {
 
 	for _, e := range entries {
 		if e.IsDir() {
-			pruneEmptyDirs(filepath.Join(dir, e.Name()))
+			t.pruneEmptyDirs(filepath.Join(dir, e.Name()))
 		}
 	}
 
 	if rest, err := os.ReadDir(dir); err == nil && len(rest) == 0 {
-		_ = os.Remove(dir)
+		_ = t.j.remove(t.Tree, dir)
 	}
 }
 
@@ -1049,8 +1065,16 @@ func shellQuote(s string) string {
 
 // copyFile writes src, read inside srcRoot, to dst inside dstRoot with mode,
 // mkdir-p the parent, and returns the md5 hex of the bytes written. A symlink
-// on the way that leaves its root fails the copy (see safepath).
+// on the way that leaves its root fails the copy (see safepath). It writes
+// outside any tree's journal, as into a stage dir.
 func copyFile(srcRoot, src, dstRoot, dst string, mode os.FileMode) (string, error) {
+	var j *journal
+
+	return j.copyFile(srcRoot, src, dstRoot, dst, mode)
+}
+
+// copyFile is copyFile recording what it changes in j.
+func (j *journal) copyFile(srcRoot, src, dstRoot, dst string, mode os.FileMode) (string, error) {
 	in, err := safepath.Open(srcRoot, src)
 	if err != nil {
 		return "", fmt.Errorf("open %q: %w", src, err)
@@ -1058,11 +1082,11 @@ func copyFile(srcRoot, src, dstRoot, dst string, mode os.FileMode) (string, erro
 
 	defer func() { _ = in.Close() }()
 
-	if err := safepath.MkdirAll(dstRoot, filepath.Dir(dst), dirPerm); err != nil {
+	if err := j.mkdirAll(dstRoot, filepath.Dir(dst)); err != nil {
 		return "", fmt.Errorf("mkdir %q: %w", filepath.Dir(dst), err)
 	}
 
-	out, err := safepath.Create(dstRoot, dst, mode)
+	out, err := j.create(dstRoot, dst, mode)
 	if err != nil {
 		return "", fmt.Errorf("create %q: %w", dst, err)
 	}
@@ -1100,13 +1124,14 @@ func fileMD5(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// writeFile writes data to path inside root with perm, creating its directory.
-func writeFile(root, path string, data []byte, perm os.FileMode) error {
-	if err := safepath.MkdirAll(root, filepath.Dir(path), dirPerm); err != nil {
+// writeFile writes data to path inside root with perm, creating its
+// directory, recording what it changes in j.
+func (j *journal) writeFile(root, path string, data []byte, perm os.FileMode) error {
+	if err := j.mkdirAll(root, filepath.Dir(path)); err != nil {
 		return err
 	}
 
-	f, err := safepath.Create(root, path, perm)
+	f, err := j.create(root, path, perm)
 	if err != nil {
 		return err
 	}
@@ -1124,6 +1149,13 @@ func writeFile(root, path string, data []byte, perm os.FileMode) error {
 // keeping each file's permission bits. recordInstallDir lists the copies in
 // the rock_manifest.
 func copyTree(srcRoot, src, dstRoot, dst string) error {
+	var j *journal
+
+	return j.copyTree(srcRoot, src, dstRoot, dst)
+}
+
+// copyTree is copyTree recording what it changes in j.
+func (j *journal) copyTree(srcRoot, src, dstRoot, dst string) error {
 	st, err := os.Stat(src)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", src, err)
@@ -1145,10 +1177,10 @@ func copyTree(srcRoot, src, dstRoot, dst string) error {
 
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return safepath.MkdirAll(dstRoot, target, dirPerm)
+			return j.mkdirAll(dstRoot, target)
 		}
 
-		_, err = copyFile(srcRoot, p, dstRoot, target, info.Mode().Perm())
+		_, err = j.copyFile(srcRoot, p, dstRoot, target, info.Mode().Perm())
 
 		return err
 	})

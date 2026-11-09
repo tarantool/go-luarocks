@@ -222,7 +222,7 @@ func (r *Rocks) Exec(ctx context.Context, progname string, argv []string) error 
 		return rocks.ErrNotImplemented
 	}
 
-	return le.callRaw(progname, argv)
+	return le.callRaw(ctx, progname, argv)
 }
 
 // ReadTreeManifest is the method-style convenience for
