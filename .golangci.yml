@@ -73,6 +73,8 @@ linters:
             - "github.com/tarantool/go-luarocks"
             - "github.com/yuin/gopher-lua"
             - "github.com/go-git/go-git/v5"
+            # go-git's own ssh-agent client, for a connection fetch can close.
+            - "github.com/xanzy/ssh-agent"
 
   exclusions:
     # Don't fail on findings in machine-generated files.
