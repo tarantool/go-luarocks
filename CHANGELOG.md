@@ -8,6 +8,15 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
 
 ## [Unreleased]
 
+### Added
+
+- fetch: `Options.SHA256` checks the sha256 of the fetched file before
+  anything unpacks or keeps it, in the http and file backends and in `File`.
+  A mismatch removes the file and fails with an error naming it and both
+  digests, wrapping the new `rocks.ErrChecksumMismatch`; a git repository or
+  a local directory, which no digest describes, fails instead of being
+  fetched unverified.
+
 ## [v0.1.0] - 2026-11-09
 
 The first release: a pure-Go native engine and a vendored upstream LuaRocks

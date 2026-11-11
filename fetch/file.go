@@ -52,9 +52,18 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 
 	src := strings.TrimPrefix(rawURL, "file://")
 
+	want, err := wantSHA256(opts)
+	if err != nil {
+		return Result{}, err
+	}
+
 	st, err := os.Stat(src)
 	if err != nil {
 		return Result{}, fmt.Errorf("fetch.file: stat %q: %w", src, err)
+	}
+
+	if st.IsDir() && want != "" {
+		return Result{}, fmt.Errorf("fetch.file: %s: %w", src, errNotAFile)
 	}
 
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
@@ -62,7 +71,7 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 	}
 
 	if !st.IsDir() {
-		if err := fetchOneFile(src, st.Mode().Perm(), destDir, opts); err != nil {
+		if err := fetchOneFile(src, st.Mode().Perm(), destDir, want, opts); err != nil {
 			return Result{}, err
 		}
 
@@ -79,9 +88,10 @@ func (fileBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 // fetchOneFile is Fetch for a single file (e.g. a rockspec or archive): it
 // copies src into destDir under its basename — or source.file when set
 // (upstream fetch.fetch_local names it rockspec.source.file or
-// dir.base_name) — then extracts it if it is a recognized archive
+// dir.base_name) — then checks the copy against opts.MD5 and sha256, the
+// lowercase opts.SHA256, and extracts it if it is a recognized archive
 // (fetch.fetch_local → fs.unpack_archive).
-func fetchOneFile(src string, perm os.FileMode, destDir string, opts Options) error {
+func fetchOneFile(src string, perm os.FileMode, destDir, sha256 string, opts Options) error {
 	base := opts.File
 	if base == "" {
 		base = filepath.Base(src)
@@ -99,6 +109,11 @@ func fetchOneFile(src string, perm os.FileMode, destDir string, opts Options) er
 	}
 
 	if err := checkMD5(dst, opts.MD5); err != nil {
+		return err
+	}
+
+	// The copy is checked, not src, so what is unpacked is what was verified.
+	if err := checkSHA256(dst, sha256); err != nil {
 		return err
 	}
 

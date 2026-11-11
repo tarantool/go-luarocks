@@ -30,11 +30,12 @@ import (
 // download` has to deliver the artifact itself, so File never unpacks and
 // never inspects the extension.
 //
-// Only two Options fields are consulted, both about the transport:
-// InsecureServers and UserAgent. File, MD5, Tag, Branch and Version describe
-// a rockspec's `source` table, and there is no rockspec here — the name comes
-// from the URL and nothing is verified against a digest the server did not
-// supply.
+// Only three Options fields are consulted: InsecureServers and UserAgent,
+// both about the transport, and SHA256, the digest a server that publishes
+// one (a tt-rocks-index.json) gives for the file, which the file must have
+// before it takes its name in destDir. File, MD5, Tag, Branch and Version
+// describe a rockspec's `source` table, and there is no rockspec here — the
+// name comes from the URL.
 //
 // The accepted forms mirror get_file's dir.split_url dispatch: a schemeless
 // path or a file:// URL is copied off disk, http(s) is downloaded. Any other
@@ -53,6 +54,11 @@ func File(ctx context.Context, rawURL, destDir string, opts Options) (string, er
 		return "", err
 	}
 
+	want, err := wantSHA256(opts)
+	if err != nil {
+		return "", err
+	}
+
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
 		return "", fmt.Errorf("fetch.File: mkdir %q: %w", destDir, err)
 	}
@@ -60,7 +66,7 @@ func File(ctx context.Context, rawURL, destDir string, opts Options) (string, er
 	// A string with no "://" is a local path, exactly as dir.split_url reads
 	// it (core/dir.lua:41-51) — the form a local rock server's artifacts take.
 	if !strings.Contains(rawURL, "://") {
-		return copyFileInto(rawURL, destDir)
+		return copyFileInto(rawURL, destDir, want)
 	}
 
 	scheme, err := schemeOf(rawURL)
@@ -72,7 +78,7 @@ func File(ctx context.Context, rawURL, destDir string, opts Options) (string, er
 	case "file":
 		_, pathname, _ := strings.Cut(rawURL, "://")
 
-		return copyFileInto(pathname, destDir)
+		return copyFileInto(pathname, destDir, want)
 	case "http", "https":
 		return downloadFileInto(ctx, rawURL, destDir, opts)
 	default:
@@ -83,7 +89,9 @@ func File(ctx context.Context, rawURL, destDir string, opts Options) (string, er
 // copyFileInto copies one existing file into destDir under its basename,
 // which is fs.copy(pathname, fs.current_dir(), "read") — fs.copy resolves a
 // directory destination to a file of the source's own name (fs/lua.lua:424).
-func copyFileInto(src, destDir string) (string, error) {
+// The copy must have the sha256 digest, when one is given: one that does not
+// is removed.
+func copyFileInto(src, destDir, sha256 string) (string, error) {
 	st, err := os.Stat(src)
 	if err != nil {
 		return "", fmt.Errorf("fetch.File: stat %q: %w", src, err)
@@ -107,6 +115,10 @@ func copyFileInto(src, destDir string) (string, error) {
 
 	if err := copyOneFile(src, dst, st.Mode().Perm()); err != nil {
 		return "", fmt.Errorf("fetch.File: %w", err)
+	}
+
+	if err := checkSHA256(dst, sha256); err != nil {
+		return "", err
 	}
 
 	return dst, nil

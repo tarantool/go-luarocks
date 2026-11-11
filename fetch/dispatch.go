@@ -43,6 +43,18 @@ type Options struct {
 	// means no verification.
 	MD5 string
 
+	// SHA256 is the expected sha256 of the fetched file, in hex of either
+	// case: the digest a rock server's tt-rocks-index.json lists for an
+	// artifact, or one the caller pinned. When set, the http and file
+	// backends verify the file they retrieved before unpacking it, and File
+	// verifies the file before returning it; a mismatch removes the file and
+	// fails with an error that names it and both digests and wraps
+	// rocks.ErrChecksumMismatch. A source that is not one file — a git
+	// repository, a local directory — cannot be checked, so it fails rather
+	// than going unverified, and so does a value that is not a sha256 digest,
+	// before anything is fetched. Empty means no verification.
+	SHA256 string
+
 	// Version is the rockspec version. When it is an scm-/dev- version with no
 	// source.tag, the git backend computes a commit identifier from HEAD.
 	Version string

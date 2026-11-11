@@ -5,6 +5,7 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -85,6 +86,7 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 		return Result{}, fmt.Errorf("fetch.http: source file: %w", err)
 	}
 
+	// The download checks opts.SHA256 before the file takes its name.
 	if err := httpDownload(ctx, rawURL, dst, opts); err != nil {
 		return Result{}, err
 	}
@@ -103,15 +105,22 @@ func (httpBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Optio
 
 // httpDownload GETs rawURL and writes the response body to dst. It is the
 // transport half shared by httpBackend.Fetch and File: everything up to
-// having the bytes on disk under their final name, and nothing about md5
-// verification or unpacking, which are the callers' to decide.
+// having the bytes on disk under their final name, opts.SHA256 checked, and
+// nothing about md5 verification or unpacking, which are the callers' to
+// decide.
 //
 // The body lands in a dotted `.part` file beside dst and is renamed into
-// place only once it is complete, so an interrupted transfer never leaves a
-// truncated artifact under a name a later run would trust.
+// place only once it is complete and has the sha256 opts.SHA256 expects, so
+// neither an interrupted transfer nor a file that failed its check is ever
+// left under a name a later run would trust.
 func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
 	if _, err := url.Parse(rawURL); err != nil {
 		return fmt.Errorf("fetch.http: parse %q: %w", rawURL, err)
+	}
+
+	want, err := wantSHA256(opts)
+	if err != nil {
+		return err
 	}
 
 	client := buildHTTPClient(opts)
@@ -151,7 +160,14 @@ func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
 		return fmt.Errorf("fetch.http: create %q: %w", tmp, err)
 	}
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	digest := sha256.New()
+
+	var w io.Writer = f
+	if want != "" {
+		w = io.MultiWriter(f, digest)
+	}
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 
@@ -162,6 +178,14 @@ func httpDownload(ctx context.Context, rawURL, dst string, opts Options) error {
 		_ = os.Remove(tmp)
 
 		return fmt.Errorf("fetch.http: close: %w", err)
+	}
+
+	if want != "" {
+		if err := matchSHA256(filepath.Base(dst), want, digest.Sum(nil)); err != nil {
+			_ = os.Remove(tmp)
+
+			return err
+		}
 	}
 
 	if err := os.Rename(tmp, dst); err != nil {
