@@ -47,4 +47,10 @@ var (
 	// Callers branch on it with errors.Is(err, ErrNotImplemented) to
 	// detect an unsupported operation for the selected backend.
 	ErrNotImplemented = errors.New("rocks: method not implemented by this backend")
+
+	// ErrChecksumMismatch signals that a file the native backend fetched
+	// does not have the sha256 it was expected to have: the digest a rock
+	// server's tt-rocks-index.json lists for it, or one the caller pinned.
+	// The file is discarded before anything unpacks or reads it.
+	ErrChecksumMismatch = errors.New("rocks: checksum mismatch")
 )

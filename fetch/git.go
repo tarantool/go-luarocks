@@ -76,6 +76,12 @@ func (gitBackend) Fetch(ctx context.Context, rawURL, destDir string, opts Option
 		return Result{}, err
 	}
 
+	// A clone is a tree, not the bytes of one file: a digest asked for
+	// cannot be checked, and is refused rather than skipped.
+	if opts.SHA256 != "" {
+		return Result{}, fmt.Errorf("fetch.git: %s: %w", rawURL, errNotAFile)
+	}
+
 	if err := os.MkdirAll(destDir, dirPerm); err != nil {
 		return Result{}, fmt.Errorf("fetch.git: mkdir %q: %w", destDir, err)
 	}
