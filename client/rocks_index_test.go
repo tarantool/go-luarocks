@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/client"
+	"github.com/tarantool/go-luarocks/internal/testenv"
 	"github.com/tarantool/go-luarocks/remote"
 )
 
@@ -171,6 +172,246 @@ func requireDeployedVersion(t *testing.T, tree string, r indexRock) {
 	t.Helper()
 
 	requireFile(t, filepath.Join(tree, "share", "tarantool", r.name+".lua"), string(r.module()))
+}
+
+// requireNotDeployed checks that the tree holds no module of r.
+func requireNotDeployed(t *testing.T, tree string, r indexRock) {
+	t.Helper()
+
+	assert.NoFileExists(t, filepath.Join(tree, "share", "tarantool", r.name+".lua"))
+}
+
+// ghIndexDir is the branch directory the fake GitHub serves the index from.
+const ghIndexDir = "org/rocks-repo/index"
+
+// githubPlace places the files of an index as rocks-repo does: a rockspec
+// beside the index on its branch, listed by a relative url, and a rock as
+// the asset of its own release, listed by the absolute download url.
+func githubPlace(gh *testenv.GitHub) func(name string, body []byte) string {
+	return func(name string, body []byte) string {
+		if strings.HasSuffix(name, ".rockspec") {
+			gh.Put(ghIndexDir+"/"+name, body)
+
+			return name
+		}
+
+		return gh.Release("org/rocks-repo", strings.TrimSuffix(name, ".all.rock"), name, body)
+	}
+}
+
+// publishIndex serves idx as the fake GitHub's index and returns the server
+// URL, the index's directory.
+func publishIndex(t *testing.T, gh *testenv.GitHub, idx remote.RocksIndex) string {
+	t.Helper()
+
+	body, err := json.Marshal(idx)
+	require.NoError(t, err)
+	gh.Put(ghIndexDir+"/"+remote.RocksIndexFile, body)
+
+	return gh.URL() + "/" + ghIndexDir
+}
+
+// TestNativeInstall_IndexResolvesWithoutRocks pins the point of the index's
+// rockspecs: Install reads the dependencies of every rock from the rockspec
+// the server publishes apart, so no rock is downloaded until the whole
+// closure is resolved, and each is downloaded once, from its release page,
+// through the redirect.
+func TestNativeInstall_IndexResolvesWithoutRocks(t *testing.T) {
+	t.Parallel()
+
+	gh := testenv.NewGitHub(t)
+	hello := indexRock{name: "hello", version: "1.0-1", deps: []string{"dep >= 1.0"}}
+	dep := indexRock{name: "dep", version: "1.0-1"}
+	server := publishIndex(t, gh, rocksIndex(t, githubPlace(gh), hello, dep))
+
+	r, tree := newIndexClient(t, gh.InsecureServers())
+	require.NoError(t, r.Install(context.Background(), "hello", client.InstallOpts{Servers: []string{server}}))
+	requireDeployedVersion(t, tree, hello)
+	requireDeployedVersion(t, tree, dep)
+
+	var order []string
+
+	for _, req := range gh.Requests() {
+		for _, file := range []string{hello.specName(), dep.specName(), hello.rockName(), dep.rockName()} {
+			if strings.HasPrefix(req, "front ") && strings.HasSuffix(req, "/"+file) {
+				order = append(order, file)
+			}
+		}
+	}
+
+	assert.Equal(t, []string{hello.specName(), dep.specName(), dep.rockName(), hello.rockName()}, order,
+		"both rockspecs are read before any rock is downloaded, and each file once: %v", gh.Requests())
+	assert.False(t, slices.ContainsFunc(gh.Requests(), func(r string) bool { return strings.Contains(r, "manifest") }),
+		"a server with an index has no manifest probed")
+}
+
+// TestNativeInstall_IndexChecksums pins that every file is checked against
+// the digest the index lists before anything uses it: a rockspec that does
+// not match fails the install before any rock is fetched, and a rock that
+// does not match fails it before it is deployed.
+func TestNativeInstall_IndexChecksums(t *testing.T) {
+	t.Parallel()
+
+	hello := indexRock{name: "hello", version: "1.0-1"}
+
+	for name, tc := range map[string]struct {
+		edit func(v *remote.IndexVersion)
+		file string
+	}{
+		"rockspec": {edit: func(v *remote.IndexVersion) { v.Rockspec.SHA256 = sha256Of([]byte("other")) }, file: hello.specName()},
+		"rock":     {edit: func(v *remote.IndexVersion) { v.Artifacts[0].SHA256 = sha256Of([]byte("other")) }, file: hello.rockName()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			gh := testenv.NewGitHub(t)
+			idx := rocksIndex(t, githubPlace(gh), hello)
+			v := idx.Repository["hello"]["1.0-1"]
+			tc.edit(&v)
+			idx.Repository["hello"]["1.0-1"] = v
+			server := publishIndex(t, gh, idx)
+
+			r, tree := newIndexClient(t, gh.InsecureServers())
+			err := r.Install(context.Background(), "hello", client.InstallOpts{Servers: []string{server}})
+			require.ErrorIs(t, err, rocks.ErrChecksumMismatch)
+			require.ErrorContains(t, err, tc.file)
+			require.ErrorContains(t, err, sha256Of([]byte("other")))
+			requireNotDeployed(t, tree, hello)
+
+			if name == "rockspec" {
+				assert.False(t, gh.Requested(hello.rockName()), "no rock is fetched past a bad rockspec")
+			}
+		})
+	}
+}
+
+// TestNativeInstall_IndexBundledRockspec pins that a rock installs only when
+// it bundles the very rockspec its server publishes for it, the one its
+// dependencies were resolved from.
+func TestNativeInstall_IndexBundledRockspec(t *testing.T) {
+	t.Parallel()
+
+	gh := testenv.NewGitHub(t)
+	hello := indexRock{name: "hello", version: "1.0-1"}
+	idx := rocksIndex(t, githubPlace(gh), hello)
+
+	other := append(hello.spec(), []byte("-- edited\n")...)
+	gh.Put(ghIndexDir+"/"+hello.specName(), other)
+
+	v := idx.Repository["hello"]["1.0-1"]
+	v.Rockspec.SHA256 = sha256Of(other)
+	idx.Repository["hello"]["1.0-1"] = v
+	server := publishIndex(t, gh, idx)
+
+	r, tree := newIndexClient(t, gh.InsecureServers())
+	err := r.Install(context.Background(), "hello", client.InstallOpts{Servers: []string{server}})
+	require.ErrorContains(t, err, hello.rockName()+" bundles a rockspec other than the one its server publishes")
+	requireNotDeployed(t, tree, hello)
+}
+
+// TestNativeInstall_Pins pins InstallOpts.Artifacts, a lock's digests: the
+// file chosen must be pinned under its arch and download with the pinned
+// digest, which the server's must agree with — against an index, and against
+// a server that publishes no digests at all.
+func TestNativeInstall_Pins(t *testing.T) {
+	t.Parallel()
+
+	hello := indexRock{name: "hello", version: "1.0-1"}
+	rock := hello.rock(t)
+	other := sha256Of([]byte("other"))
+
+	classic := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(classic, hello.rockName()), rock, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(classic, "manifest"),
+		[]byte(`repository = { hello = { ["1.0-1"] = { { arch = "all" } } } }`), 0o600))
+
+	for name, tc := range map[string]struct {
+		classic bool
+		pins    map[string]string
+		want    error
+		// early is set when the pin fails before anything is fetched.
+		early bool
+	}{
+		"index, pinned":          {pins: map[string]string{"all": strings.ToUpper(sha256Of(rock))}},
+		"index, not pinned":      {pins: map[string]string{"linux-x86_64": sha256Of(rock)}, want: rocks.ErrArtifactNotPinned, early: true},
+		"index, pin disagrees":   {pins: map[string]string{"all": other}, want: rocks.ErrChecksumMismatch, early: true},
+		"index, rockspec pinned": {pins: map[string]string{"all": sha256Of(rock), "rockspec": other}, want: rocks.ErrChecksumMismatch, early: true},
+		"classic, pinned":        {classic: true, pins: map[string]string{"all": sha256Of(rock)}},
+		"classic, pin differs":   {classic: true, pins: map[string]string{"all": other}, want: rocks.ErrChecksumMismatch},
+		"classic, not pinned":    {classic: true, pins: map[string]string{}, want: rocks.ErrArtifactNotPinned},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			gh := testenv.NewGitHub(t)
+
+			server := classic
+			if !tc.classic {
+				server = publishIndex(t, gh, rocksIndex(t, githubPlace(gh), hello))
+			}
+
+			r, tree := newIndexClient(t, gh.InsecureServers())
+			err := r.Install(context.Background(), "hello", client.InstallOpts{
+				Version: "1.0-1", Servers: []string{server}, Artifacts: tc.pins,
+			})
+
+			if tc.want == nil {
+				require.NoError(t, err)
+				requireDeployedVersion(t, tree, hello)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.want)
+			requireNotDeployed(t, tree, hello)
+
+			if tc.early {
+				assert.False(t, gh.Requested(hello.specName()) || gh.Requested(hello.rockName()),
+					"nothing is fetched past a pin that fails: %v", gh.Requests())
+			}
+		})
+	}
+}
+
+// TestLuaInstall_PinsNotImplemented pins that the lua backend, which checks
+// no digest, refuses pins rather than install unverified.
+func TestLuaInstall_PinsNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	r, err := client.New(rocks.Config{Tree: t.TempDir(), WorkingDir: t.TempDir()}, client.WithBackend(client.BackendLua))
+	require.NoError(t, err)
+
+	err = r.Install(context.Background(), "hello", client.InstallOpts{Artifacts: map[string]string{}})
+	require.ErrorIs(t, err, rocks.ErrNotImplemented)
+}
+
+// TestNativeDownload_IndexChecksum pins Download against an index: the rock
+// is saved under its own name, not the redirect's, once it has the digest
+// the index lists, and one that does not is not saved at all.
+func TestNativeDownload_IndexChecksum(t *testing.T) {
+	t.Parallel()
+
+	hello := indexRock{name: "hello", version: "1.0-1"}
+
+	gh := testenv.NewGitHub(t)
+	good := publishIndex(t, gh, rocksIndex(t, githubPlace(gh), hello))
+
+	r, _ := newIndexClient(t, gh.InsecureServers())
+	got, err := r.Download(context.Background(), "hello", client.DownloadOpts{Servers: []string{good}})
+	require.NoError(t, err)
+	assert.Equal(t, hello.rockName(), filepath.Base(got))
+	requireFile(t, got, string(hello.rock(t)))
+
+	bad := testenv.NewGitHub(t)
+	idx := rocksIndex(t, githubPlace(bad), hello)
+	v := idx.Repository["hello"]["1.0-1"]
+	v.Artifacts[0].SHA256 = sha256Of([]byte("other"))
+	idx.Repository["hello"]["1.0-1"] = v
+
+	r, _ = newIndexClient(t, bad.InsecureServers())
+	got, err = r.Download(context.Background(), "hello", client.DownloadOpts{Servers: []string{publishIndex(t, bad, idx)}})
+	require.ErrorIs(t, err, rocks.ErrChecksumMismatch)
+	assert.Empty(t, got)
 }
 
 // TestNativeInstall_IndexYanked pins how Install treats a version the index

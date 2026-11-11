@@ -275,13 +275,15 @@ type VersionedRock struct {
 	// its digest, one per arch, sorted by arch: the rock of every platform,
 	// this host's or not, and the bare rockspec under "rockspec", as a
 	// classic manifest lists one. A lock records it so the version installs
-	// verified on any platform. Nil when the server publishes no digests.
+	// verified on any platform (client.InstallOpts.Artifacts). Nil when the
+	// server publishes no digests.
 	Artifacts []Artifact
 
 	// SpecURL is where the server publishes the version's rockspec apart
 	// from the resource at URL, and SpecSHA256 its sha256 in lowercase hex.
-	// Empty otherwise: the rockspec is the one the resource at URL holds or
-	// is.
+	// When SpecURL is set, the native backend resolves dependencies from
+	// that rockspec, without downloading the rock. Empty otherwise: the
+	// rockspec is the one the resource at URL holds or is.
 	SpecURL    string
 	SpecSHA256 string
 
@@ -314,6 +316,10 @@ type InstallStep struct {
 	Version  Version
 	URL      string
 	Rockspec *Rockspec
+	// SHA256 is the sha256, in lowercase hex, the resource at URL must have
+	// for the native backend to install it: the server's
+	// (VersionedRock.SHA256), when it publishes one. Empty checks nothing.
+	SHA256 string
 }
 
 // InstalledRock is one row of the result returned by Rocks.List. Version

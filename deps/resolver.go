@@ -246,6 +246,7 @@ func (r *resolver) walk(ctx context.Context, parent string, deps []rocks.Dep, ch
 			Version:  picked.Version,
 			URL:      picked.URL,
 			Rockspec: picked.Spec,
+			SHA256:   picked.SHA256,
 		}
 		r.chosen[d.Name] = step
 

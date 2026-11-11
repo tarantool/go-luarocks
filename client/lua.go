@@ -1405,7 +1405,14 @@ func depsModeArg(p DepsPolicy) string {
 	}
 }
 
+// Install runs `luarocks install`. Upstream verifies no artifact digest, so
+// a call that pins some (InstallOpts.Artifacts) fails with
+// rocks.ErrNotImplemented rather than install unverified.
 func (e *luaEngine) Install(ctx context.Context, name string, opts InstallOpts) error {
+	if opts.Artifacts != nil {
+		return fmt.Errorf("rocks.Install: InstallOpts.Artifacts: %w", rocks.ErrNotImplemented)
+	}
+
 	argv := e.globalArgs(opts.Servers)
 
 	argv = append(argv, "install", name)

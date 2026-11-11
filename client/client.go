@@ -57,6 +57,24 @@ type InstallOpts struct {
 
 	// Deps controls whether transitive dependencies are also installed.
 	Deps DepsPolicy
+
+	// Artifacts pins the digests of the requested rock's files by manifest
+	// arch — "linux-x86_64", "all", "src", "rockspec" — each a sha256 in hex,
+	// as a lock records them from rocks.VersionedRock.Artifacts. When it is
+	// non-nil, the file Install chooses for this platform must be listed
+	// under its arch, or Install fails with an error wrapping
+	// rocks.ErrArtifactNotPinned before fetching anything, and must download
+	// with that digest, or Install fails with one wrapping
+	// rocks.ErrChecksumMismatch; so must the rockspec it resolves from,
+	// when the server publishes one apart and "rockspec" is pinned. A server
+	// that lists another digest for a pinned file fails the same way before
+	// the download. Pinning works with any server, one that publishes no
+	// digests too, since a file's digest is the same wherever it is served
+	// from. It covers the requested rock alone: a dependency is checked
+	// against the digests its server publishes, as every download is. Nil
+	// pins nothing. The lua backend verifies no digest, and fails with
+	// rocks.ErrNotImplemented when it is set.
+	Artifacts map[string]string
 }
 
 // DepsPolicy says whether Install resolves and installs the transitive
@@ -248,9 +266,16 @@ func (r *Rocks) ReadTreeManifest() (*rocks.Manifest, error) {
 //     platforms, validate, build, deploy, update tree manifest.
 //  5. Install the requested rock itself.
 //
+// On the native backend, a server that publishes a tt-rocks-index.json has
+// every file checked against the sha256 it lists before it is unpacked, and
+// its rockspecs read without downloading the rocks; see
+// nativeEngine.Install. opts.Artifacts pins the requested rock's digests.
+//
 // Returns ErrUnsupportedRockspecFeature for unrecognized build types
 // (bubbled up from build.RunBackend). May also surface
-// ErrMissingTarantoolHeaders when a C-extension rock is built.
+// ErrMissingTarantoolHeaders when a C-extension rock is built,
+// rocks.ErrChecksumMismatch when a file does not have its digest, and
+// rocks.ErrArtifactNotPinned.
 func (r *Rocks) Install(ctx context.Context, name string, opts InstallOpts) error {
 	return r.engine.Install(ctx, name, opts)
 }

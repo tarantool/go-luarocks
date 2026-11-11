@@ -389,6 +389,16 @@ every platform's file (`Artifacts`), the rockspec's `SpecURL` and
 reads manifests only: a server that publishes nothing but an index serves no
 rocks there.
 
+From such a server the native `Install` reads every rockspec it resolves
+from the rockspec's own URL, so no rock is downloaded until the closure is
+resolved, and checks each file against its sha256 before unpacking it
+(`rocks.ErrChecksumMismatch`); a rock must bundle the rockspec it was
+resolved from. A yanked version is passed over unless `==` pins it
+(`deps.MatchRock`). `InstallOpts.Artifacts` takes a lock's digests by arch:
+the file chosen for this platform must be among them
+(`rocks.ErrArtifactNotPinned` otherwise) and have its digest, whatever
+server serves it.
+
 ### Rock Trees
 
 The `tree` package owns a tree's files and its manifest together, so a

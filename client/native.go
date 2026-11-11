@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -117,6 +120,14 @@ func sysconfDir() string {
 //     platforms, validate, build, deploy, update tree manifest.
 //  5. Install the requested rock itself.
 //
+// A rock's rockspec is read from where the server publishes it apart
+// (VersionedRock.SpecURL), when it does, so resolving downloads no rock;
+// otherwise from the artifact chosen, which is then not downloaded again to
+// install. Every file is checked against the sha256 the server lists for it
+// (VersionedRock.SHA256, SpecSHA256), or the one opts.Artifacts pins, before
+// it is unpacked, and a rock installed from a separately published rockspec
+// must bundle that very rockspec, so what installs is what resolved.
+//
 // Returns ErrUnsupportedRockspecFeature for unrecognized build types
 // (bubbled up from build.RunBackend). May also surface
 // ErrMissingTarantoolHeaders when a C-extension rock is built.
@@ -155,6 +166,11 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 
 	e.logger.Info("rocks.Install: selected", "name", name, "version", root.Version.Raw, "url", root.URL)
 
+	root, err = pinRoot(root, opts.Artifacts)
+	if err != nil {
+		return fmt.Errorf("rocks.Install: %s %s: %w", name, root.Version.Raw, err)
+	}
+
 	fetched, err := e.newArtifacts()
 	if err != nil {
 		return fmt.Errorf("rocks.Install: %w", err)
@@ -163,7 +179,7 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 	defer fetched.remove()
 
 	// Fetch + eval root rockspec so we can resolve transitive deps.
-	rootSpec, err := e.fetchAndEval(ctx, fetched, root.URL)
+	rootSpec, err := e.fetchSpec(ctx, fetched, root)
 	if err != nil {
 		return fmt.Errorf("rocks.Install: fetch/eval root: %w", err)
 	}
@@ -193,6 +209,7 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 		Version:  root.Version,
 		URL:      root.URL,
 		Rockspec: rootSpec,
+		SHA256:   root.SHA256,
 	}
 	if err := e.installArtifact(ctx, fetched, rootStep); err != nil {
 		return fmt.Errorf("rocks.Install: install root: %w", err)
@@ -201,18 +218,66 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 	return nil
 }
 
+// pinRoot applies the caller's pins (InstallOpts.Artifacts) to the row
+// Install chose for the requested rock: the file it installs from must be
+// pinned under its arch, and a digest the server lists for it or for the
+// rockspec must agree with the pin. The row comes back carrying the digests
+// its downloads are to be checked against. Nil pins leave it as it is.
+func pinRoot(root rocks.VersionedRock, pins map[string]string) (rocks.VersionedRock, error) {
+	if pins == nil {
+		return root, nil
+	}
+
+	pin, ok := pins[root.Arch]
+	if !ok {
+		return root, fmt.Errorf("%w: %s is the %q file, and only %s are pinned",
+			rocks.ErrArtifactNotPinned, root.URL, root.Arch, strings.Join(slices.Sorted(maps.Keys(pins)), ", "))
+	}
+
+	sha, err := agreeingDigest(root.URL, root.SHA256, pin)
+	if err != nil {
+		return root, err
+	}
+
+	root.SHA256 = sha
+
+	if pin, ok := pins[archRockspec]; ok && root.SpecURL != "" {
+		sha, err := agreeingDigest(root.SpecURL, root.SpecSHA256, pin)
+		if err != nil {
+			return root, err
+		}
+
+		root.SpecSHA256 = sha
+	}
+
+	return root, nil
+}
+
+// agreeingDigest returns pin, lowercased, unless the server lists another
+// digest for the file at url, which fails before the file is fetched.
+func agreeingDigest(url, listed, pin string) (string, error) {
+	pin = strings.ToLower(pin)
+	if listed != "" && listed != pin {
+		return "", fmt.Errorf("%w: the server lists sha256 %s for %s, and %s is pinned",
+			rocks.ErrChecksumMismatch, listed, url, pin)
+	}
+
+	return pin, nil
+}
+
 // resolvePlan walks the full transitive dependency closure of rootSpec via
 // deps.Resolve. It hands Resolve a fetcher (the remote index returns bare
 // name/version/URL rows with no preloaded rockspec, so each chosen rock is
-// evaluated on demand), registers `tarantool` as a VM-provided rock at the
-// configured version (mirroring util.get_rocks_provided in the
+// evaluated on demand, from its separately published rockspec when the
+// server has one — see fetchSpec), registers `tarantool` as a VM-provided
+// rock at the configured version (mirroring util.get_rocks_provided in the
 // tarantool/luarocks fork), and supplies the already-installed rocks so
 // satisfied deps are skipped (glr-n88).
 func (e *nativeEngine) resolvePlan(
 	ctx context.Context, fetched *artifacts, rootSpec *rocks.Rockspec, idx rocks.RemoteIndex,
 ) ([]rocks.InstallStep, error) {
 	fetchSpec := func(ctx context.Context, rock rocks.VersionedRock) (*rocks.Rockspec, error) {
-		return e.fetchAndEval(ctx, fetched, rock.URL)
+		return e.fetchSpec(ctx, fetched, rock)
 	}
 
 	resolveOpts := []deps.Option{deps.WithSpecFetcher(fetchSpec)}
@@ -759,7 +824,7 @@ func (e *nativeEngine) installStep(ctx context.Context, fetched *artifacts, step
 	// than fetching and evaluating the same version-pinned artifact a second
 	// time. It is nil only if a caller resolved without the fetcher.
 	if step.Rockspec == nil {
-		spec, err := e.fetchAndEval(ctx, fetched, step.URL)
+		spec, err := e.fetchAndEval(ctx, fetched, step.URL, step.SHA256)
 		if err != nil {
 			return err
 		}
@@ -772,8 +837,12 @@ func (e *nativeEngine) installStep(ctx context.Context, fetched *artifacts, step
 
 // artifacts keeps the registry artifacts one Install fetched, each unpacked
 // under a directory removed when the Install returns. Resolving fetches every
-// chosen rock to read its rockspec; keeping what was unpacked lets the install
-// step deploy a .rock from it instead of fetching it a second time.
+// chosen rock to read its rockspec, unless its server publishes the rockspec
+// apart; keeping what was unpacked lets the install step deploy a .rock from
+// it instead of fetching it a second time.
+//
+// An artifact is kept by its URL and the digest it was checked against, so
+// one fetched unchecked is fetched again when a later step expects a digest.
 type artifacts struct {
 	root string
 	dirs map[string]string
@@ -795,10 +864,12 @@ func (a *artifacts) remove() {
 }
 
 // fetchArtifact returns the directory the registry artifact at urlStr is
-// unpacked in, fetching it on first use. A .rock or .src.rock is a zip, which
-// the fetch unpacks; a bare .rockspec is the only file of its directory.
-func (e *nativeEngine) fetchArtifact(ctx context.Context, fetched *artifacts, urlStr string) (string, error) {
-	if dir, ok := fetched.dirs[urlStr]; ok {
+// unpacked in, fetching it on first use, checked against sha256 when that
+// is set. A .rock or .src.rock is a zip, which the fetch unpacks; a bare
+// .rockspec is the only file of its directory.
+func (e *nativeEngine) fetchArtifact(ctx context.Context, fetched *artifacts, urlStr, sha256 string) (string, error) {
+	key := urlStr + "\x00" + sha256
+	if dir, ok := fetched.dirs[key]; ok {
 		return dir, nil
 	}
 
@@ -809,22 +880,36 @@ func (e *nativeEngine) fetchArtifact(ctx context.Context, fetched *artifacts, ur
 
 	dir, err := fetch.FetchWith(ctx, urlStr, tmp, fetch.Options{
 		InsecureServers: e.cfg.InsecureServers,
+		SHA256:          sha256,
 	})
 	if err != nil {
 		return "", fmt.Errorf("fetch %s: %w", urlStr, err)
 	}
 
-	fetched.dirs[urlStr] = dir
+	fetched.dirs[key] = dir
 
 	return dir, nil
 }
 
-// fetchAndEval fetches the resolver-produced rock/rockspec URL, locates the
-// `.rockspec` it contains (a bare .rockspec, or the one every .rock and
-// .src.rock bundles), and evaluates it. The unpacked artifact stays in fetched
-// for installArtifact.
-func (e *nativeEngine) fetchAndEval(ctx context.Context, fetched *artifacts, urlStr string) (*rocks.Rockspec, error) {
-	dir, err := e.fetchArtifact(ctx, fetched, urlStr)
+// fetchSpec returns the evaluated rockspec of rock, for resolving: the one
+// its server publishes apart from the rock when it does (SpecURL), so no rock
+// is downloaded to read its dependencies, and otherwise the one the artifact
+// at URL is or bundles, which stays unpacked for installArtifact. Either is
+// checked against the digest the server lists for it.
+func (e *nativeEngine) fetchSpec(ctx context.Context, fetched *artifacts, rock rocks.VersionedRock) (*rocks.Rockspec, error) {
+	if rock.SpecURL != "" {
+		return e.fetchAndEval(ctx, fetched, rock.SpecURL, rock.SpecSHA256)
+	}
+
+	return e.fetchAndEval(ctx, fetched, rock.URL, rock.SHA256)
+}
+
+// fetchAndEval fetches the resolver-produced rock/rockspec URL, checked
+// against sha256 when that is set, locates the `.rockspec` it contains (a
+// bare .rockspec, or the one every .rock and .src.rock bundles), and
+// evaluates it. The unpacked artifact stays in fetched for installArtifact.
+func (e *nativeEngine) fetchAndEval(ctx context.Context, fetched *artifacts, urlStr, sha256 string) (*rocks.Rockspec, error) {
+	dir, err := e.fetchArtifact(ctx, fetched, urlStr, sha256)
 	if err != nil {
 		return nil, err
 	}
@@ -853,9 +938,10 @@ const (
 )
 
 // kindOf tells the artifact kind from the file name the index built the URL
-// with (path.make_url: <name>-<version>.<arch>.rock, or .rockspec).
+// with (path.make_url: <name>-<version>.<arch>.rock, or .rockspec), or a
+// tt-rocks-index.json listed it under.
 func kindOf(urlStr string) artifactKind {
-	lower := strings.ToLower(urlStr)
+	lower := strings.ToLower(urlFileName(urlStr))
 
 	switch {
 	case strings.HasSuffix(lower, ".src.rock"):
@@ -867,6 +953,19 @@ func kindOf(urlStr string) artifactKind {
 	}
 }
 
+// urlFileName is the name of the file an artifact URL names, the one fetch
+// saves it under: the last segment of its path, whatever query string
+// follows, or the base name of a local path.
+func urlFileName(urlStr string) string {
+	if strings.Contains(urlStr, "://") {
+		if u, err := url.Parse(urlStr); err == nil {
+			return path.Base(u.Path)
+		}
+	}
+
+	return filepath.Base(urlStr)
+}
+
 // installArtifact installs step from the artifact the index chose for it, as
 // upstream install does: a binary rock is deployed as built
 // (install_binary_rock), a source rock is built from the sources it bundles
@@ -875,15 +974,23 @@ func kindOf(urlStr string) artifactKind {
 func (e *nativeEngine) installArtifact(ctx context.Context, fetched *artifacts, step rocks.InstallStep) error {
 	switch kindOf(step.URL) {
 	case binaryRockArtifact:
-		dir, err := e.fetchArtifact(ctx, fetched, step.URL)
+		dir, err := e.fetchArtifact(ctx, fetched, step.URL, step.SHA256)
 		if err != nil {
+			return err
+		}
+
+		if err := checkBundledSpec(step, dir); err != nil {
 			return err
 		}
 
 		return e.deployBinary(ctx, step.Rockspec, dir)
 	case sourceRockArtifact:
-		dir, err := e.fetchArtifact(ctx, fetched, step.URL)
+		dir, err := e.fetchArtifact(ctx, fetched, step.URL, step.SHA256)
 		if err != nil {
+			return err
+		}
+
+		if err := checkBundledSpec(step, dir); err != nil {
 			return err
 		}
 
@@ -897,6 +1004,41 @@ func (e *nativeEngine) installArtifact(ctx context.Context, fetched *artifacts, 
 	}
 
 	return e.installFromSource(ctx, step)
+}
+
+// checkBundledSpec checks that the rock of step, unpacked in dir, bundles the
+// rockspec step was resolved from, byte for byte: the
+// <package>-<version>.rockspec at its top. The two are one file unless the
+// server publishes the rockspec apart (VersionedRock.SpecURL); then the
+// dependencies were read from that one, and installing a rock that declares
+// others would install what was not resolved. A rock without that file, or
+// a step whose rockspec carries no source, has nothing to compare.
+func checkBundledSpec(step rocks.InstallStep, dir string) error {
+	spec := step.Rockspec
+	if spec == nil || len(spec.RawSource) == 0 {
+		return nil
+	}
+
+	bundled, err := safepath.JoinEntry(dir, spec.Package+"-"+spec.Version+".rockspec")
+	if err != nil {
+		return fmt.Errorf("rockspec name: %w", err)
+	}
+
+	body, err := os.ReadFile(bundled)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("read %s: %w", bundled, err)
+	}
+
+	if !bytes.Equal(body, spec.RawSource) {
+		return fmt.Errorf("%s bundles a rockspec other than the one its server publishes for %s %s",
+			urlFileName(step.URL), step.Name, step.Version.Raw)
+	}
+
+	return nil
 }
 
 // bundledSource returns the source root of a .src.rock unpacked into dir.

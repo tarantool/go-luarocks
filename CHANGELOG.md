@@ -40,6 +40,20 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   `Resolve`, the native `Install` and `Download` choose by it, so a fresh
   resolve passes a yanked version over while a lock's pin still installs it,
   and a failure that only yanked versions would have met says so.
+- client: The native `Install` resolves from the rockspec a server
+  publishes apart from its rocks (`VersionedRock.SpecURL`), so no rock is
+  downloaded until the whole closure is resolved, and checks every rockspec
+  and rock it fetches against the sha256 the server lists before unpacking
+  it; a rock must bundle the very rockspec its dependencies were read from.
+  `Download` checks the file it saves the same way. `rocks.InstallStep`
+  gains `SHA256`, which `deps.Resolve` fills from the row it picks.
+- client: `InstallOpts.Artifacts` pins the requested rock's digests by
+  arch, as a lock records them from `VersionedRock.Artifacts`: the file
+  `Install` chooses for this platform must be pinned under its arch (else
+  the new `rocks.ErrArtifactNotPinned`, before anything is fetched) and
+  download with the pinned digest, against any server, one that publishes
+  no digests too. The lua backend, which checks no digest, refuses pins with
+  `rocks.ErrNotImplemented`.
 
 ## [v0.1.0] - 2026-11-09
 
