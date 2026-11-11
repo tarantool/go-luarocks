@@ -35,6 +35,11 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   `http` urls may name; `IndexOptions.InsecureServers` now reaches it too.
   `ManifestCache` keeps the manifests read with different insecure servers
   apart.
+- deps: `MatchRock` is `Match` for a row a server offers: a version the
+  server yanked matches only when an `==` constraint pins it (PEP 592).
+  `Resolve`, the native `Install` and `Download` choose by it, so a fresh
+  resolve passes a yanked version over while a lock's pin still installs it,
+  and a failure that only yanked versions would have met says so.
 
 ## [v0.1.0] - 2026-11-09
 

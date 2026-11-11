@@ -50,7 +50,8 @@ func IsProvided(name string) bool {
 // Resolve performs a greedy depth-first walk over root.Dependencies,
 // choosing the newest version of each dep that satisfies its constraints
 // and recursing into the chosen rock's transitive dependencies before
-// moving on to its siblings.
+// moving on to its siblings. A version the server yanked is passed over
+// unless an == constraint pins it (MatchRock).
 //
 // The result is in topological order (deepest-dep first), suitable for
 // passing to Rocks.Install in sequence. The root rock itself is NOT
@@ -224,8 +225,9 @@ func (r *resolver) walk(ctx context.Context, parent string, deps []rocks.Dep, ch
 		picked, ok := pickNewest(candidates, d.Constraints)
 		if !ok {
 			return fmt.Errorf(
-				"deps.Resolve: no version of %q satisfies %s (parent=%s, %d candidates)",
-				d.Name, formatConstraints(d.Constraints), parent, len(candidates))
+				"deps.Resolve: no version of %q satisfies %s (parent=%s, %d candidates%s)",
+				d.Name, formatConstraints(d.Constraints), parent, len(candidates),
+				yankedHint(candidates, d.Constraints))
 		}
 		// Preload the picked rock's rockspec on demand when the index did not
 		// carry one, so the transitive walk below can proceed. Only the chosen
@@ -266,12 +268,12 @@ func (r *resolver) walk(ctx context.Context, parent string, deps []rocks.Dep, ch
 }
 
 // pickNewest selects the highest version in candidates whose Version
-// matches all of cs.
+// matches all of cs, passing over a yanked one cs does not pin (MatchRock).
 func pickNewest(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) (rocks.VersionedRock, bool) {
 	filtered := make([]rocks.VersionedRock, 0, len(candidates))
 
 	for _, c := range candidates {
-		if Match(c.Version, cs) {
+		if MatchRock(c, cs) {
 			filtered = append(filtered, c)
 		}
 	}
@@ -285,6 +287,18 @@ func pickNewest(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) 
 	})
 
 	return filtered[0], true
+}
+
+// yankedHint is the note a resolve that found nothing adds when versions
+// matching cs were there but yanked, and "" otherwise.
+func yankedHint(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) string {
+	for _, c := range candidates {
+		if c.Yanked && Match(c.Version, cs) {
+			return "; the matching versions are yanked, pin one with == to install it"
+		}
+	}
+
+	return ""
 }
 
 func formatConstraints(cs []rocks.VersionConstraint) string {

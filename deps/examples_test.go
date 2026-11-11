@@ -93,6 +93,21 @@ func ExampleIsProvided() {
 	// Output: true false
 }
 
+// ExampleMatchRock shows what a yanked version matches: a range passes it
+// over, a pin to it with == still takes it.
+func ExampleMatchRock() {
+	v, _ := deps.ParseVersion("2.0-1")
+	yanked := rocks.VersionedRock{Name: "hello", Version: v, Yanked: true}
+
+	for _, expr := range []string{">= 1.0", "== 2.0-1"} {
+		cs, _ := deps.ParseConstraints(expr)
+		fmt.Printf("%s: %v\n", expr, deps.MatchRock(yanked, cs))
+	}
+	// Output:
+	// >= 1.0: false
+	// == 2.0-1: true
+}
+
 // exampleIndex is a preloading rocks.RemoteIndex: it already carries each
 // candidate's *rocks.Rockspec, so Resolve never needs to fetch.
 type exampleIndex struct {

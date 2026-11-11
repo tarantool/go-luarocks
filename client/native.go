@@ -150,7 +150,7 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 
 	root, ok := pickNewest(candidates, cs)
 	if !ok {
-		return fmt.Errorf("rocks.Install: no version of %q matches %q", name, opts.Version)
+		return fmt.Errorf("rocks.Install: no version of %q matches %q%s", name, opts.Version, yankedNote(candidates, cs))
 	}
 
 	e.logger.Info("rocks.Install: selected", "name", name, "version", root.Version.Raw, "url", root.URL)

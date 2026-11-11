@@ -186,7 +186,7 @@ func (e *nativeEngine) downloadOne(
 		}
 	}
 
-	pick, ok := pickLatestVersion(matches)
+	pick, ok := pickLatestVersion(matches, pinsVersion(q.Constraints))
 	if !ok {
 		return "", downloadNotFound(q, opts,
 			"No results matching query were found for Lua "+luaDialect+".")
@@ -281,13 +281,22 @@ func (e *nativeEngine) downloadAll(
 // The highest version is computed here rather than read off remote.Search's
 // descending order: the two agree, and not depending on that is what keeps
 // this correct if the ordering the search imposes ever changes.
-func pickLatestVersion(matches []remote.Match) (remote.Match, bool) {
+//
+// A row the server marks yanked is passed over unless pinned, the query
+// pinning its version with ==, as deps.MatchRock passes it over in a
+// resolve. Upstream has no yanked versions; only a tt-rocks-index.json marks
+// one.
+func pickLatestVersion(matches []remote.Match, pinned bool) (remote.Match, bool) {
 	best := ""
 
 	// Never read before best is set, so the zero value is inert.
 	var bestParsed rocks.Version
 
 	for _, m := range matches {
+		if m.Yanked && !pinned {
+			continue
+		}
+
 		v, err := deps.ParseVersion(m.Version)
 		if err != nil {
 			continue
@@ -305,7 +314,7 @@ func pickLatestVersion(matches []remote.Match) (remote.Match, bool) {
 	pick := -1
 
 	for i, m := range matches {
-		if m.Version != best {
+		if m.Version != best || (m.Yanked && !pinned) {
 			continue
 		}
 
@@ -322,6 +331,18 @@ func pickLatestVersion(matches []remote.Match) (remote.Match, bool) {
 	}
 
 	return matches[pick], true
+}
+
+// pinsVersion reports whether cs pins a version with ==, which is what lets
+// a yanked one be chosen.
+func pinsVersion(cs []rocks.VersionConstraint) bool {
+	for _, c := range cs {
+		if c.Op == "==" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // downloadNotFound wraps a search failure the way download.download does:
