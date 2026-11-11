@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -35,7 +36,9 @@ const (
 // HTTPRemoteIndex is the default rocks.RemoteIndex backed by one or more
 // rock servers reachable over HTTP/HTTPS.
 //
-// Manifest filename probe order, per server (see manifestProbes):
+// A server that publishes a tt-rocks-index.json (RocksIndexFile) is read
+// from it alone: its rows carry the urls and digests it lists. Otherwise the
+// manifest filename probe order, per server (see manifestProbes), is:
 //
 //  1. manifest-<lua_version>.zip    (zipped Lua-source manifest-<lua_version>)
 //  2. manifest-<lua_version>        (Lua-source via manif.Parse)
@@ -51,7 +54,9 @@ type HTTPRemoteIndex struct {
 	Servers []string
 
 	// InsecureServers contains hostnames whose TLS certificates should not
-	// be verified. Pulled from Config.InsecureServers by the facade.
+	// be verified. Pulled from Config.InsecureServers by the facade. They are
+	// also the hosts an absolute url of a tt-rocks-index.json may name over
+	// plain http.
 	InsecureServers []string
 
 	// UserAgent overrides the default User-Agent header for outbound GETs.
@@ -92,13 +97,29 @@ const (
 // manifest needed to satisfy Query. The full upstream shape carries more
 // data (modules, commands, dependencies) but the resolver only needs the
 // (name → versions → arch) triplet to construct URLs.
+//
+// A tt-rocks-index.json projects to the same shape, its entries carrying the
+// urls and digests the index lists, and the rocks it refused in refused.
 type remoteManifest struct {
 	server     string
 	repository map[string]map[string][]archEntry
+	// refused maps the name of a rock a tt-rocks-index.json lists against
+	// its rules to why: asking for it is an error. Nil for a manifest.
+	refused map[string]error
 }
 
+// archEntry is one file a server lists for a rock version, by its arch. A
+// manifest gives the arch alone, and the file's URL is built from it by
+// path.make_url's rules; a tt-rocks-index.json also gives the rest.
 type archEntry struct {
 	arch string
+	// url is where the file is, resolved, and sha256 its digest; empty for
+	// a manifest's entry.
+	url    string
+	sha256 string
+	// version is what the index says about the entry's version; nil for a
+	// manifest's entry.
+	version *indexedVersion
 }
 
 // Query implements rocks.RemoteIndex. For each known server, it returns
@@ -131,6 +152,16 @@ func (h *HTTPRemoteIndex) Query(ctx context.Context, name, namespace string) ([]
 			continue
 		}
 
+		// A rock the server's index refused makes the server unusable for
+		// it, as an unreadable manifest makes it unusable for every rock.
+		if err := mf.refused[name]; err != nil {
+			if loadErr == nil {
+				loadErr = fmt.Errorf("remote.HTTPRemoteIndex: %s: %w", srv, err)
+			}
+
+			continue
+		}
+
 		versions, ok := mf.repository[name]
 		if !ok {
 			continue
@@ -142,7 +173,7 @@ func (h *HTTPRemoteIndex) Query(ctx context.Context, name, namespace string) ([]
 			// query arch set is {src,all,rockspec,installed} plus the host arch
 			// (queries.lua:17-23,72).
 			for _, a := range acceptedArches(arches, h.Arch) {
-				merged[verStr] = append(merged[verStr], mergedItem{server: srv, arch: a.arch})
+				merged[verStr] = append(merged[verStr], mergedItem{archEntry: a, server: srv})
 			}
 		}
 	}
@@ -164,8 +195,9 @@ func (h *HTTPRemoteIndex) Query(ctx context.Context, name, namespace string) ([]
 // mergedItem is one (server, arch) offering of a rock version, accumulated
 // across all servers before arch selection.
 type mergedItem struct {
+	archEntry
+
 	server string
-	arch   string
 }
 
 // pickMergedItem chooses one item from the merged cross-server list, reproducing
@@ -208,7 +240,7 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 		lv = "5.1"
 	}
 
-	shared := manifestKey{server: server, namespace: namespace, luaVersion: lv}
+	shared := newManifestKey(server, namespace, lv, h.InsecureServers)
 	if m, ok := h.Cache.get(shared); ok {
 		h.cache[cacheKey] = m
 
@@ -218,6 +250,18 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 	base := strings.TrimRight(server, "/") + "/"
 	if namespace != "" {
 		base += "manifests/" + namespace + "/"
+	}
+
+	m, found, err := h.loadRocksIndex(ctx, server, base)
+	if err != nil {
+		return nil, err
+	}
+
+	if found {
+		h.cache[cacheKey] = m
+		h.Cache.put(shared, m)
+
+		return m, nil
 	}
 
 	var lastErr error
@@ -250,6 +294,66 @@ func (h *HTTPRemoteIndex) load(ctx context.Context, server, namespace string) (*
 	}
 
 	return nil, lastErr
+}
+
+// loadRocksIndex reads the server's tt-rocks-index.json from base, the
+// directory its manifests would be in. found is false, with a nil error, when
+// the server has none, and its manifests are to be probed instead. Any other
+// failure — the request failing, the index not reading — is the server's
+// error: falling back to the manifests then would trade the digests the index
+// publishes for none, without a word.
+func (h *HTTPRemoteIndex) loadRocksIndex(ctx context.Context, server, base string) (*remoteManifest, bool, error) {
+	at := base + RocksIndexFile
+
+	body, err := h.get(ctx, at)
+	if isNotFound(err) {
+		return nil, false, nil
+	}
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	web, err := url.Parse(base)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse %s: %w", base, err)
+	}
+
+	m, err := decodeRocksIndex(server, at, body, indexBase{web: web, insecure: h.InsecureServers})
+	if err != nil {
+		return nil, false, err
+	}
+
+	return m, true, nil
+}
+
+// statusError is the error get returns for a response of status 400 or
+// above.
+type statusError struct {
+	url  string
+	code int
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("GET %s: status %d", e.url, e.code)
+}
+
+// isNotFound reports whether err is what get answers for a file the server
+// does not have: 404 or 410, or 403, which is what an S3 bucket that may not be
+// listed answers for a key it does not hold, so a server hosted in one keeps
+// working.
+func isNotFound(err error) bool {
+	var se *statusError
+	if !errors.As(err, &se) {
+		return false
+	}
+
+	switch se.code {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return true
+	default:
+		return false
+	}
 }
 
 // manifestProbe is one candidate manifest filename plus how to decode it.
@@ -330,7 +434,9 @@ func decodeManifest(
 // mergedRocks turns the accumulated (version → items) map into one
 // rocks.VersionedRock per version, in sorted version-string order for
 // deterministic output (the resolver re-sorts by parsed version regardless).
-// makeURL builds the artifact URL for the winning item of each version.
+// makeURL builds the artifact URL for the winning item of each version, but
+// for an item of a tt-rocks-index.json, which brings its own, along with its
+// digest and what the index says about its version.
 //
 // A version key that fails deps.ParseVersion is skipped and reported as the
 // returned error, which callers surface only when nothing resolved at all —
@@ -364,11 +470,26 @@ func mergedRocks(
 		}
 
 		win := items[pickMergedItem(items)]
-		out = append(out, rocks.VersionedRock{
+		rock := rocks.VersionedRock{
 			Name:    name,
 			Version: v,
-			URL:     makeURL(win.server, name, verStr, win.arch),
-		})
+			URL:     win.url,
+			Arch:    win.arch,
+			SHA256:  win.sha256,
+		}
+
+		if rock.URL == "" {
+			rock.URL = makeURL(win.server, name, verStr, win.arch)
+		}
+
+		if info := win.version; info != nil {
+			// A copy: the projection is cached and shared by every query.
+			rock.Artifacts = slices.Clone(info.artifacts)
+			rock.SpecURL, rock.SpecSHA256 = info.specURL, info.specSHA256
+			rock.Yanked = info.yanked
+		}
+
+		out = append(out, rock)
 	}
 
 	return out, parseErr
@@ -443,7 +564,7 @@ func (h *HTTPRemoteIndex) get(ctx context.Context, rawURL string) ([]byte, error
 	}()
 
 	if resp.StatusCode >= httpStatusErrorThreshold {
-		return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+		return nil, &statusError{url: rawURL, code: resp.StatusCode}
 	}
 
 	return io.ReadAll(resp.Body)

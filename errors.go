@@ -53,4 +53,9 @@ var (
 	// server's tt-rocks-index.json lists for it, or one the caller pinned.
 	// The file is discarded before anything unpacks or reads it.
 	ErrChecksumMismatch = errors.New("rocks: checksum mismatch")
+
+	// ErrUnsupportedIndexFormat signals that a rock server's
+	// tt-rocks-index.json declares a format newer than the one this library
+	// reads, so the server cannot be used until the program is upgraded.
+	ErrUnsupportedIndexFormat = errors.New("rocks: unsupported rock index format")
 )

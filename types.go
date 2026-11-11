@@ -249,11 +249,59 @@ type RepoEntry struct {
 // version) tuple and the URL of the resource (.rock or .rockspec) on the
 // originating server. Spec, if non-nil, is the preloaded rockspec for
 // that version — the resolver uses it instead of re-fetching when present.
+//
+// A server that publishes a tt-rocks-index.json (remote.RocksIndexFile)
+// also says what each file's digest is, where the version's rockspec is
+// apart from its rock, and whether the version was yanked; a classic
+// manifest says none of it, and those fields stay empty.
 type VersionedRock struct {
 	Name    string
 	Version Version
 	URL     string
 	Spec    *Rockspec
+
+	// Arch is the manifest arch of the resource at URL: "rockspec" for a
+	// bare rockspec, "src" for a source rock, "all" for a pure-Lua binary
+	// rock, an "<os>-<cpu>" for a platform's, and "installed" for a rock of
+	// a rock tree.
+	Arch string
+
+	// SHA256 is the sha256 of the resource at URL, in lowercase hex, when
+	// the server publishes one; the native backend checks the download
+	// against it. Empty for a classic manifest.
+	SHA256 string
+
+	// Artifacts lists every file the server offers for this version with
+	// its digest, one per arch, sorted by arch: the rock of every platform,
+	// this host's or not, and the bare rockspec under "rockspec", as a
+	// classic manifest lists one. A lock records it so the version installs
+	// verified on any platform. Nil when the server publishes no digests.
+	Artifacts []Artifact
+
+	// SpecURL is where the server publishes the version's rockspec apart
+	// from the resource at URL, and SpecSHA256 its sha256 in lowercase hex.
+	// Empty otherwise: the rockspec is the one the resource at URL holds or
+	// is.
+	SpecURL    string
+	SpecSHA256 string
+
+	// Yanked reports that the server withdrew the version.
+	Yanked bool
+}
+
+// Artifact is one file a rock server offers for a rock version, and the
+// sha256 the server publishes for it.
+type Artifact struct {
+	// Arch is the manifest arch the file is listed under, as
+	// VersionedRock.Arch.
+	Arch string
+	// URL locates the file: an absolute URL, or a path for a rock server
+	// that is a local directory.
+	URL string
+	// SHA256 is the file's sha256 in lowercase hex.
+	SHA256 string
+	// Size is the file's size in bytes, or 0 when the server does not say.
+	Size int64
 }
 
 // InstallStep is one entry in the topo-ordered install list produced by

@@ -1,6 +1,9 @@
 package remote
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // ManifestCache shares parsed manifests between indexes, so a server's
 // manifest is fetched and decoded once per cache rather than once per index.
@@ -17,11 +20,25 @@ type ManifestCache struct {
 }
 
 // manifestKey names one cached manifest: the server as configured, the
-// namespace, and the Lua version whose manifest variants were probed.
+// namespace, the Lua version whose manifest variants were probed, and the
+// insecure hosts it was read with, which decide whether its certificate was
+// checked and which http urls of a tt-rocks-index.json it accepts.
 type manifestKey struct {
 	server     string
 	namespace  string
 	luaVersion string
+	insecure   string
+}
+
+// newManifestKey is the manifestKey of a manifest read with the insecure
+// hosts insecure.
+func newManifestKey(server, namespace, luaVersion string, insecure []string) manifestKey {
+	return manifestKey{
+		server:     server,
+		namespace:  namespace,
+		luaVersion: luaVersion,
+		insecure:   strings.Join(insecure, "\x00"),
+	}
 }
 
 func (c *ManifestCache) get(key manifestKey) (*remoteManifest, bool) {

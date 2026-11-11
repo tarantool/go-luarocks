@@ -45,6 +45,13 @@
 // repeated, leaves file descriptors open. Both first close the idle
 // connections of the HTTP transports the process shares, which are no leak
 // ([CloseIdleConnections]).
+//
+// # Fake GitHub
+//
+// A rock index kept in git is served by raw.githubusercontent.com and its
+// rocks by GitHub's release downloads, which redirect to another host.
+// [GitHub] stands in for both, over TLS, so the tests of the remote indexes
+// and the client go through the same redirects without the network.
 package testenv
 
 import (

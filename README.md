@@ -344,6 +344,51 @@ before it fails in `index.html`), and rewrites a stale
 `manifest-<version>.zip`, which clients read before `manifest-<version>`.
 `MakeManifestOpts.Zip` writes the zips `luarocks-admin add` does.
 
+#### Rock Index
+
+A server may publish a `tt-rocks-index.json` where its manifests would be,
+for instance from a git branch through `raw.githubusercontent.com`, with the
+rocks on release pages:
+
+```json
+{
+  "format": 1,
+  "repository": {
+    "emmylua": {
+      "0.25.1-1": {
+        "artifacts": [
+          {
+            "arch": "linux-x86_64",
+            "sha256": "…",
+            "size": 19777374,
+            "url": "https://github.com/tarantool-contrib/rocks-repo/releases/download/emmylua-0.25.1-1/emmylua-0.25.1-1.linux-x86_64.rock"
+          }
+        ],
+        "rockspec": {
+          "sha256": "…",
+          "url": "emmylua-0.25.1-1.rockspec"
+        }
+      }
+    }
+  }
+}
+```
+
+The native backend reads it before any manifest, over HTTP and from a local
+directory alike, in `Install`, `Search` and `Download`: when a server has
+one, it is the server's catalogue; when it has none (403, 404, 410, or no
+such file), the manifests are read as before; when it is there but does not
+read, or has a newer `format`, the server is in error. A `url` is absolute
+`https` (`http` only for a host in `InsecureServers`) or relative to the
+index's directory, and its last segment must be the file's own name; a rock
+that breaks a rule is refused with an error naming the entry.
+`remote.RocksIndex` documents the rules. Each row a query returns
+(`rocks.VersionedRock`) carries the chosen file's `SHA256`, the digests of
+every platform's file (`Artifacts`), the rockspec's `SpecURL` and
+`SpecSHA256`, and `Yanked`. The lua backend, which runs upstream LuaRocks,
+reads manifests only: a server that publishes nothing but an index serves no
+rocks there.
+
 ### Rock Trees
 
 The `tree` package owns a tree's files and its manifest together, so a

@@ -13,7 +13,8 @@ import (
 // ignored: a local directory has no TLS and no User-Agent.
 type IndexOptions struct {
 	// InsecureServers lists hostnames whose TLS certificates the HTTP index
-	// should not verify.
+	// should not verify, and the hosts an absolute url of a
+	// tt-rocks-index.json may name over plain http.
 	InsecureServers []string
 
 	// UserAgent overrides the User-Agent header the HTTP index sends.
@@ -45,10 +46,11 @@ type IndexOptions struct {
 func NewIndex(server string, opts IndexOptions) rocks.RemoteIndex {
 	if _, ok := LocalServerPath(server); ok {
 		return &FileRemoteIndex{
-			Server:     server,
-			LuaVersion: opts.LuaVersion,
-			Arch:       opts.Arch,
-			Cache:      opts.Cache,
+			Server:          server,
+			LuaVersion:      opts.LuaVersion,
+			Arch:            opts.Arch,
+			Cache:           opts.Cache,
+			InsecureServers: opts.InsecureServers,
 		}
 	}
 

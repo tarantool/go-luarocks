@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,7 +67,10 @@ func LocalServerPath(server string) (string, bool) {
 // It is the exact counterpart of HTTPRemoteIndex and differs only in where
 // the bytes come from: the manifest is read from `<dir>/manifest…` instead of
 // fetched with GET, and a resolved artifact is a path under the same
-// directory instead of a URL on the same host. Manifest probe order, decoding
+// directory instead of a URL on the same host. A `<dir>/tt-rocks-index.json`
+// (RocksIndexFile) is read first and, when there, is the directory's
+// catalogue: a relative url it lists is a path under the directory, an
+// absolute one stays a URL. Manifest probe order, decoding
 // (zip / Lua-source / JSON), arch acceptance, artifact preference
 // (.rock > .src.rock > .rockspec) and per-(server, namespace) caching are the
 // shared code paths, so a local mirror and its HTTP original resolve to the
@@ -101,6 +105,10 @@ type FileRemoteIndex struct {
 	// Cache, when set, shares the parsed manifest with other indexes; see
 	// ManifestCache.
 	Cache *ManifestCache
+
+	// InsecureServers lists the hosts an absolute url of the directory's
+	// tt-rocks-index.json may name over plain http, as for HTTPRemoteIndex.
+	InsecureServers []string
 
 	// cache memoizes parsed manifests across calls, keyed by namespace.
 	cache map[string]*remoteManifest
@@ -137,6 +145,10 @@ func (f *FileRemoteIndex) Query(
 		return nil, fmt.Errorf("remote.FileRemoteIndex: load %s: %w", f.Server, err)
 	}
 
+	if err := mf.refused[name]; err != nil {
+		return nil, fmt.Errorf("remote.FileRemoteIndex: %s: %w", f.Server, err)
+	}
+
 	merged := map[string][]mergedItem{}
 
 	for verStr, arches := range mf.repository[name] {
@@ -145,7 +157,7 @@ func (f *FileRemoteIndex) Query(
 				continue
 			}
 
-			merged[verStr] = append(merged[verStr], mergedItem{server: f.Server, arch: a.arch})
+			merged[verStr] = append(merged[verStr], mergedItem{archEntry: a, server: f.Server})
 		}
 	}
 
@@ -180,7 +192,7 @@ func (f *FileRemoteIndex) load(dir, namespace string) (*remoteManifest, error) {
 		lv = "5.1"
 	}
 
-	shared := manifestKey{server: f.Server, namespace: namespace, luaVersion: lv}
+	shared := newManifestKey(f.Server, namespace, lv, f.InsecureServers)
 	if m, ok := f.Cache.get(shared); ok {
 		f.cache[namespace] = m
 
@@ -209,6 +221,27 @@ func (f *FileRemoteIndex) load(dir, namespace string) (*remoteManifest, error) {
 
 	if !st.IsDir() {
 		return nil, fmt.Errorf("%q is not a directory", base)
+	}
+
+	// The index, when there, is the directory's catalogue; one that is there
+	// but does not read is the directory's error, as for HTTPRemoteIndex.
+	at := filepath.Join(base, RocksIndexFile)
+
+	switch body, err := os.ReadFile(at); {
+	case err == nil:
+		m, err := decodeRocksIndex(f.Server, at, body, indexBase{
+			dir: base, prefix: filePrefixOf(f.Server), insecure: f.InsecureServers,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		f.cache[namespace] = m
+		f.Cache.put(shared, m)
+
+		return m, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("read %s: %w", at, err)
 	}
 
 	// Two failure kinds, kept apart on purpose. A read error means the variant

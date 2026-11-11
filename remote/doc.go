@@ -20,6 +20,14 @@
 // pattern, because a search says what exists while an install picks one. It
 // reuses the same loaders, so it needs no index of its own.
 //
+// A server may publish a tt-rocks-index.json (RocksIndexFile, RocksIndex)
+// instead of manifests, and every index, and Search, reads it first: it
+// names each file by URL, so the rocks may live elsewhere — on release
+// pages, say — and gives every file's sha256 and each version's rockspec,
+// which the rows of a Query carry (rocks.VersionedRock) for the native
+// backend to verify downloads with and resolve from. Only the native backend
+// reads it; upstream LuaRocks, and so the lua backend, reads manifests only.
+//
 // MakeManifest is the other side of a local server: it writes the manifests
 // (and optionally index.html) that turn a directory of rock files into one,
 // byte-equal to `luarocks-admin make_manifest`, without a Lua VM except for
