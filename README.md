@@ -399,6 +399,16 @@ the file chosen for this platform must be among them
 (`rocks.ErrArtifactNotPinned` otherwise) and have its digest, whatever
 server serves it.
 
+To publish one, `remote.ReadRocksIndex` reads an index (or
+`remote.NewRocksIndex` starts one), `RocksIndex.Add` lists a version and
+refuses one already listed (`remote.ErrDuplicateVersion`: a published
+version never changes, a rebuild is a new revision), `RocksIndex.Validate`
+reports every entry that breaks the rules — and, with
+`ValidateOptions.Fetch`, every file that is not there with its listed
+digest and size — and `RocksIndex.Write` writes JSON that depends on the
+contents alone: keys sorted, artifacts sorted by arch, two-space indent, as
+`jq -S .` prints it.
+
 ### Rock Trees
 
 The `tree` package owns a tree's files and its manifest together, so a

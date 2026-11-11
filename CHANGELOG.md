@@ -54,6 +54,13 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   download with the pinned digest, against any server, one that publishes
   no digests too. The lua backend, which checks no digest, refuses pins with
   `rocks.ErrNotImplemented`.
+- remote: The publishing side of a `tt-rocks-index.json`: `NewRocksIndex`,
+  `RocksIndex.Add`, which refuses a version already listed
+  (`ErrDuplicateVersion`) or an entry against the rules, `RocksIndex.Write`,
+  whose JSON depends on the contents alone (keys sorted, artifacts sorted by
+  arch, as `jq -S .` prints it), and `RocksIndex.Validate`, which reports
+  every broken entry at once and, with `ValidateOptions.Fetch`, every file
+  that is not there with its listed sha256 and size.
 
 ## [v0.1.0] - 2026-11-09
 
