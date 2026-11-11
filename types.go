@@ -285,7 +285,9 @@ type VersionedRock struct {
 	SpecURL    string
 	SpecSHA256 string
 
-	// Yanked reports that the server withdrew the version.
+	// Yanked reports that the server withdrew the version. A fresh resolve
+	// does not choose it, but a constraint that pins it with == still does,
+	// so a lock that recorded it still installs (deps.MatchRock).
 	Yanked bool
 }
 

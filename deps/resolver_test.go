@@ -200,3 +200,33 @@ func TestResolve_ProvidedVersionMustSatisfyConstraint(t *testing.T) {
 	require.Error(t, err, "lua == 5.3 must fail against VM-provided 5.1")
 	assert.Contains(t, err.Error(), "could not satisfy dependency lua")
 }
+
+// TestResolve_Yanked pins PEP 592's rule: a yanked version is passed over by
+// a range, even when it is the newest, and chosen when == pins it, as a lock
+// does; when only yanked versions match, the error says so.
+func TestResolve_Yanked(t *testing.T) {
+	t.Parallel()
+
+	idx := bareIndex{"a": {
+		{Name: "a", Version: mustVer(t, "1.0-1"), URL: "a-1.0-1"},
+		{Name: "a", Version: mustVer(t, "2.0-1"), URL: "a-2.0-1", Yanked: true},
+	}}
+
+	for expr, want := range map[string]string{
+		"":         "a-1.0-1",
+		">= 1.0":   "a-1.0-1",
+		"== 2.0-1": "a-2.0-1",
+		"2.0":      "a-2.0-1",
+	} {
+		root := &rocks.Rockspec{Package: "root", Dependencies: []rocks.Dep{mustDep(t, "a", expr)}}
+
+		steps, err := deps.Resolve(context.Background(), root, idx)
+		require.NoError(t, err, "%q", expr)
+		require.Len(t, steps, 1)
+		assert.Equal(t, want, steps[0].URL, "%q", expr)
+	}
+
+	root := &rocks.Rockspec{Package: "root", Dependencies: []rocks.Dep{mustDep(t, "a", ">= 2.0")}}
+	_, err := deps.Resolve(context.Background(), root, idx)
+	require.ErrorContains(t, err, "yanked, pin one with ==")
+}

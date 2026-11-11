@@ -549,16 +549,17 @@ func findRockspecIn(dir string) (string, error) {
 	return found, nil
 }
 
-// pickNewest filters candidates by cs and returns the highest version.
-// Mirrors deps.pickNewest (which is unexported); duplicating here keeps
-// the client free of a deps-internal symbol dependency.
+// pickNewest filters candidates by cs and returns the highest version,
+// passing over a yanked one cs does not pin (deps.MatchRock). Mirrors
+// deps.pickNewest (which is unexported); duplicating here keeps the client
+// free of a deps-internal symbol dependency.
 func pickNewest(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) (rocks.VersionedRock, bool) {
 	var best rocks.VersionedRock
 
 	have := false
 
 	for _, c := range candidates {
-		if !deps.Match(c.Version, cs) {
+		if !deps.MatchRock(c, cs) {
 			continue
 		}
 
@@ -569,6 +570,18 @@ func pickNewest(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) 
 	}
 
 	return best, have
+}
+
+// yankedNote is what an Install that found no version adds when versions
+// matching cs were there but yanked, and "" otherwise.
+func yankedNote(candidates []rocks.VersionedRock, cs []rocks.VersionConstraint) string {
+	for _, c := range candidates {
+		if c.Yanked && deps.Match(c.Version, cs) {
+			return " (the matching versions are yanked; pin one with == to install it)"
+		}
+	}
+
+	return ""
 }
 
 // newestVersion returns the newest of the installed versions of a rock, the

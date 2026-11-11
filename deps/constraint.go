@@ -113,6 +113,32 @@ func Match(v rocks.Version, cs []rocks.VersionConstraint) bool {
 	return true
 }
 
+// MatchRock reports whether a resolve may choose rock, one a server offers,
+// under cs: its version matches cs and, when the server yanked it, one of cs
+// is an == constraint, which names that very version. That is PEP 592's rule
+// for a withdrawn release: a fresh resolve passes it over, while a pin to
+// it, such as a lock records, still installs it. Resolve and the native
+// Install choose by it, and a caller that picks among a Query's rows itself
+// should too.
+func MatchRock(rock rocks.VersionedRock, cs []rocks.VersionConstraint) bool {
+	if !Match(rock.Version, cs) {
+		return false
+	}
+
+	return !rock.Yanked || pins(cs)
+}
+
+// pins reports whether cs holds an == constraint.
+func pins(cs []rocks.VersionConstraint) bool {
+	for _, c := range cs {
+		if c.Op == "==" {
+			return true
+		}
+	}
+
+	return false
+}
+
 func matchOne(v rocks.Version, c rocks.VersionConstraint) bool {
 	cv := c.Version
 
