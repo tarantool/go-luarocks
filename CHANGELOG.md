@@ -16,6 +16,25 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   digests, wrapping the new `rocks.ErrChecksumMismatch`; a git repository or
   a local directory, which no digest describes, fails instead of being
   fetched unverified.
+- remote: A rock server may publish a `tt-rocks-index.json`
+  (`remote.RocksIndexFile`), which `HTTPRemoteIndex`, `FileRemoteIndex` and
+  `Search` read before any manifest. It names each file by an absolute https
+  URL or one relative to the index, with its sha256, and each version's
+  rockspec apart from its rocks, so the rocks may live on release pages. A
+  server without one is read from its manifests as before; one whose index
+  does not read, or is of a newer format (`rocks.ErrUnsupportedIndexFormat`),
+  is in error rather than read through its manifests. `ReadRocksIndex`
+  decodes one into `remote.RocksIndex`, which documents the rules; a rock
+  that breaks them is refused with an error naming the entry. Native backend
+  only: the lua backend reads manifests.
+- rocks: `VersionedRock` carries what such a server says of a version: the
+  chosen file's `Arch` and `SHA256`, every platform's file and digest in
+  `Artifacts` (the new `rocks.Artifact`), the rockspec's `SpecURL` and
+  `SpecSHA256`, and `Yanked`; `remote.Match` gains `SHA256` and `Yanked`.
+- remote: `FileRemoteIndex.InsecureServers`, the hosts an index's absolute
+  `http` urls may name; `IndexOptions.InsecureServers` now reaches it too.
+  `ManifestCache` keeps the manifests read with different insecure servers
+  apart.
 
 ## [v0.1.0] - 2026-11-09
 

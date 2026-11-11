@@ -3,6 +3,8 @@ package remote
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -85,8 +87,15 @@ type Match struct {
 	// URL locates the artifact, built by the same path.make_url rules the
 	// indexes use for Query: an https:// URL for an HTTP server, an on-disk
 	// path (or file:// URL, preserving the configured form) for a local
-	// directory. Empty for a VM-provided rock, which has no artifact.
+	// directory. A server's tt-rocks-index.json gives its own, resolved as
+	// for Query. Empty for a VM-provided rock, which has no artifact.
 	URL string
+	// SHA256 is the artifact's sha256 in lowercase hex, when the server
+	// publishes one (a tt-rocks-index.json does); empty otherwise.
+	SHA256 string
+	// Yanked reports that the server's tt-rocks-index.json withdrew the
+	// version. A search lists it all the same, since it is there.
+	Yanked bool
 }
 
 // HostArch returns the LuaRocks cfg.arch string for the running host
@@ -144,7 +153,14 @@ func Search(
 			continue
 		}
 
-		found = append(found, matchManifest(mf, server, dir, isLocal, q, accepted)...)
+		rows, refused := matchManifest(mf, server, dir, isLocal, q, accepted)
+		found = append(found, rows...)
+
+		// A matching rock the server's index refused is that server's
+		// failure, reported as one it could not be read is.
+		if refused != nil && loadErr == nil {
+			loadErr = fmt.Errorf("remote.Search: %s: %w", server, refused)
+		}
 
 		if exact != "" && hasExactMatch(found, q.Name, exact) {
 			break
@@ -172,7 +188,10 @@ func loadServerManifest(
 	ctx context.Context, server, namespace string, opts IndexOptions,
 ) (*remoteManifest, string, bool, error) {
 	if dir, ok := LocalServerPath(server); ok {
-		idx := &FileRemoteIndex{Server: server, LuaVersion: opts.LuaVersion, Arch: opts.Arch, Cache: opts.Cache}
+		idx := &FileRemoteIndex{
+			Server: server, LuaVersion: opts.LuaVersion, Arch: opts.Arch, Cache: opts.Cache,
+			InsecureServers: opts.InsecureServers,
+		}
 
 		mf, err := idx.load(dir, namespace)
 		if err != nil {
@@ -200,10 +219,20 @@ func loadServerManifest(
 }
 
 // matchManifest turns one server's manifest into the rows matching q. dir is
-// the local directory the server names when isLocal is set.
+// the local directory the server names when isLocal is set. refused is why
+// the server's tt-rocks-index.json refused a rock q matches, the first in
+// name order, if it did.
 func matchManifest(
 	mf *remoteManifest, server, dir string, isLocal bool, q Query, accepted map[string]bool,
-) []Match {
+) (out []Match, refused error) {
+	for _, name := range slices.Sorted(maps.Keys(mf.refused)) {
+		if matchName(q, name) {
+			refused = mf.refused[name]
+
+			break
+		}
+	}
+
 	normalized := NormalizeServer(server)
 
 	// Names are walked in sorted order so the rows this server contributes
@@ -217,8 +246,6 @@ func matchManifest(
 	}
 
 	sort.Strings(names)
-
-	var out []Match
 
 	for _, name := range names {
 		if !matchName(q, name) {
@@ -257,20 +284,29 @@ func matchManifest(
 					Arch:      entry.arch,
 					Server:    normalized,
 					Namespace: q.Namespace,
-					URL:       artifactURL(server, dir, isLocal, name, version, entry.arch),
+					URL:       artifactURL(server, dir, isLocal, name, version, entry),
+					SHA256:    entry.sha256,
+					Yanked:    entry.version != nil && entry.version.yanked,
 				})
 			}
 		}
 	}
 
-	return out
+	return out, refused
 }
 
 // artifactURL builds the artifact location for one row, by the same
 // path.make_url rules the indexes use: an on-disk path (keeping whichever of
 // the bare-path / file:// forms the server was configured as) for a local
-// directory, a URL on the server otherwise.
-func artifactURL(server, dir string, isLocal bool, name, version, arch string) string {
+// directory, a URL on the server otherwise. An entry of a tt-rocks-index.json
+// has its location already, resolved when the index was read.
+func artifactURL(server, dir string, isLocal bool, name, version string, entry archEntry) string {
+	if entry.url != "" {
+		return entry.url
+	}
+
+	arch := entry.arch
+
 	if isLocal {
 		return localRockURL(dir, filePrefixOf(server), name, version, arch)
 	}
