@@ -27,6 +27,10 @@
 // which the rows of a Query carry (rocks.VersionedRock) for the native
 // backend to verify downloads with and resolve from. Only the native backend
 // reads it; upstream LuaRocks, and so the lua backend, reads manifests only.
+// The publishing side reads one with ReadRocksIndex, lists a version with
+// RocksIndex.Add, checks it with RocksIndex.Validate — offline, or fetching
+// every file to compare its digest — and writes it with RocksIndex.Write,
+// whose output depends on the contents alone.
 //
 // MakeManifest is the other side of a local server: it writes the manifests
 // (and optionally index.html) that turn a directory of rock files into one,

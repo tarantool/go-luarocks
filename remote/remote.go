@@ -85,12 +85,17 @@ type HTTPRemoteIndex struct {
 var _ rocks.RemoteIndex = (*HTTPRemoteIndex)(nil)
 
 const (
-	// httpClientTimeout bounds a single manifest GET.
+	// httpClientTimeout bounds a single GET of a manifest or an index, or of
+	// a file RocksIndex.Validate checks.
 	httpClientTimeout = 2 * time.Minute
 
 	// httpStatusErrorThreshold is the lowest HTTP status code treated as an
 	// error (4xx and 5xx).
 	httpStatusErrorThreshold = 400
+
+	// defaultUserAgent is the User-Agent header of a request no UserAgent
+	// option overrides.
+	defaultUserAgent = "go-luarocks/0.1"
 )
 
 // remoteManifest is the in-memory projection of a parsed rock server
@@ -548,7 +553,7 @@ func (h *HTTPRemoteIndex) get(ctx context.Context, rawURL string) ([]byte, error
 
 	ua := h.UserAgent
 	if ua == "" {
-		ua = "go-luarocks/0.1"
+		ua = defaultUserAgent
 	}
 
 	req.Header.Set("User-Agent", ua)
