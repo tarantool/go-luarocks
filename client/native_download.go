@@ -60,6 +60,12 @@ const (
 // this returns the path it wrote even when that overwrote an existing file,
 // where the directory diff sees no new file and answers with the directory.
 // The native backend knows the name it saved and does not have to guess.
+//
+// A server's tt-rocks-index.json goes further than a manifest: each file is
+// checked against the sha256 the index lists before it takes its name in the
+// working directory, and a yanked version is passed over unless opts.Version
+// pins it with == (all of them are fetched under opts.All, since a mirror
+// keeps what locks pin).
 func (e *nativeEngine) Download(ctx context.Context, name string, opts DownloadOpts) (string, error) {
 	arch, err := downloadArch(opts)
 	if err != nil {
@@ -194,6 +200,7 @@ func (e *nativeEngine) downloadOne(
 
 	path, err := fetch.File(ctx, pick.URL, e.cfg.WorkingDir, fetch.Options{
 		InsecureServers: e.cfg.InsecureServers,
+		SHA256:          pick.SHA256,
 	})
 	if err != nil {
 		return "", fmt.Errorf("rocks.Download: %w", err)
@@ -238,6 +245,7 @@ func (e *nativeEngine) downloadAll(
 
 		if _, err := fetch.File(ctx, m.URL, e.cfg.WorkingDir, fetch.Options{
 			InsecureServers: e.cfg.InsecureServers,
+			SHA256:          m.SHA256,
 		}); err != nil {
 			failures = append(failures, err.Error())
 		}

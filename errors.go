@@ -58,4 +58,11 @@ var (
 	// tt-rocks-index.json declares a format newer than the one this library
 	// reads, so the server cannot be used until the program is upgraded.
 	ErrUnsupportedIndexFormat = errors.New("rocks: unsupported rock index format")
+
+	// ErrArtifactNotPinned signals that the caller pinned the digests of a
+	// rock's files (client.InstallOpts.Artifacts), as a lock records them,
+	// and the file the native backend chose for this platform is not among
+	// them: the pins were recorded without it, and the lock holding them has
+	// to be resolved again. Nothing was fetched.
+	ErrArtifactNotPinned = errors.New("rocks: artifact not pinned")
 )

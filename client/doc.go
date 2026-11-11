@@ -46,6 +46,16 @@
 // its plain paths in Config.Tree. The README's "Backend Parity" lists the
 // differences.
 //
+// Rock index: a server's tt-rocks-index.json (remote.RocksIndexFile) is the
+// native backend's alone. Install, Search and Download read it before any
+// manifest, resolve from the rockspecs it publishes without downloading
+// rocks, verify every file against its sha256, and pass over yanked
+// versions; InstallOpts.Artifacts pins a lock's digests. The lua backend
+// runs upstream LuaRocks, which reads manifests only: a server that
+// publishes nothing else serves it no rocks, and InstallOpts.Artifacts
+// fails there with rocks.ErrNotImplemented. A server with manifests serves
+// both backends as before.
+//
 // Subsystem references:
 //
 //   - rockspec.Eval / MergePlatforms / RuntimePlatforms / Validate
