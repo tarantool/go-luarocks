@@ -3,6 +3,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -166,7 +168,7 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 
 	e.logger.Info("rocks.Install: selected", "name", name, "version", root.Version.Raw, "url", root.URL)
 
-	root, err = pinRoot(root, opts.Artifacts)
+	root, specPin, err := pinRoot(root, opts.Artifacts)
 	if err != nil {
 		return fmt.Errorf("rocks.Install: %s %s: %w", name, root.Version.Raw, err)
 	}
@@ -211,6 +213,13 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 		Rockspec: rootSpec,
 		SHA256:   root.SHA256,
 	}
+
+	if specPin != "" {
+		if err := e.checkSpecPinned(ctx, fetched, rootStep, specPin); err != nil {
+			return fmt.Errorf("rocks.Install: %s %s: %w", name, root.Version.Raw, err)
+		}
+	}
+
 	if err := e.installArtifact(ctx, fetched, rootStep); err != nil {
 		return fmt.Errorf("rocks.Install: install root: %w", err)
 	}
@@ -223,34 +232,95 @@ func (e *nativeEngine) Install(ctx context.Context, name string, opts InstallOpt
 // pinned under its arch, and a digest the server lists for it or for the
 // rockspec must agree with the pin. The row comes back carrying the digests
 // its downloads are to be checked against. Nil pins leave it as it is.
-func pinRoot(root rocks.VersionedRock, pins map[string]string) (rocks.VersionedRock, error) {
+//
+// A source rock is taken by its rockspec when no "src" file is pinned but the
+// rockspec is: a lock made against a server that served the version as a bare
+// rockspec, its sources fetched from source.url unchecked, accepts the source
+// rock a mirror packed of that rockspec (Pack of a .rockspec). specPin is
+// then the rockspec's pin, which the rockspec the source rock bundles must
+// have (checkSpecPinned); the rest of the rock, its sources, is checked
+// against the digest its server lists, as the sources of a bare rockspec are
+// against none.
+func pinRoot(root rocks.VersionedRock, pins map[string]string) (rocks.VersionedRock, string, error) {
 	if pins == nil {
-		return root, nil
+		return root, "", nil
 	}
 
+	specPin, specPinned := pins[archRockspec]
+
 	pin, ok := pins[root.Arch]
-	if !ok {
-		return root, fmt.Errorf("%w: %s is the %q file, and only %s are pinned",
+	if !ok && (root.Arch != archSrc || !specPinned) {
+		return root, "", fmt.Errorf("%w: %s is the %q file, and only %s are pinned",
 			rocks.ErrArtifactNotPinned, root.URL, root.Arch, strings.Join(slices.Sorted(maps.Keys(pins)), ", "))
 	}
 
-	sha, err := agreeingDigest(root.URL, root.SHA256, pin)
-	if err != nil {
-		return root, err
+	bySpec := !ok
+
+	if !bySpec {
+		sha, err := agreeingDigest(root.URL, root.SHA256, pin)
+		if err != nil {
+			return root, "", err
+		}
+
+		root.SHA256 = sha
 	}
 
-	root.SHA256 = sha
-
-	if pin, ok := pins[archRockspec]; ok && root.SpecURL != "" {
-		sha, err := agreeingDigest(root.SpecURL, root.SpecSHA256, pin)
+	if specPinned && root.SpecURL != "" {
+		sha, err := agreeingDigest(root.SpecURL, root.SpecSHA256, specPin)
 		if err != nil {
-			return root, err
+			return root, "", err
 		}
 
 		root.SpecSHA256 = sha
 	}
 
-	return root, nil
+	if bySpec {
+		return root, strings.ToLower(specPin), nil
+	}
+
+	return root, "", nil
+}
+
+// checkSpecPinned checks that the source rock of step, which pinRoot took by
+// its rockspec, bundles a <package>-<version>.rockspec of the sha256 pin.
+func (e *nativeEngine) checkSpecPinned(
+	ctx context.Context, fetched *artifacts, step rocks.InstallStep, pin string,
+) error {
+	dir, err := e.fetchArtifact(ctx, fetched, step.URL, step.SHA256)
+	if err != nil {
+		return err
+	}
+
+	name := step.Rockspec.Package + "-" + step.Version.Raw + rockspecSuffix
+
+	bundled, err := safepath.JoinEntry(dir, name)
+	if err != nil {
+		return fmt.Errorf("rockspec name: %w", err)
+	}
+
+	body, err := os.ReadFile(bundled)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %s bundles no %s, and only the rockspec is pinned",
+			rocks.ErrArtifactNotPinned, urlFileName(step.URL), name)
+	}
+
+	if err != nil {
+		return fmt.Errorf("read %s: %w", bundled, err)
+	}
+
+	if got := sha256Hex(body); got != pin {
+		return fmt.Errorf("%w: %s bundles %s of sha256 %s, and %s is pinned",
+			rocks.ErrChecksumMismatch, urlFileName(step.URL), name, got, pin)
+	}
+
+	return nil
+}
+
+// sha256Hex is the sha256 of body in lowercase hex.
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+
+	return hex.EncodeToString(sum[:])
 }
 
 // agreeingDigest returns pin, lowercased, unless the server lists another
@@ -423,12 +493,17 @@ func (e *nativeEngine) Make(ctx context.Context, opts MakeOpts) error {
 //     <tree>/share/tarantool/rocks/<name>/<version>/ with its deployed lua
 //     and lib files copied back in, arch being the host's for a rock with a
 //     lib file or a binary command and "all" otherwise.
-//   - opts.SrcOnly == true:  zip the rockspec only into
-//     <name>-<ver>.src.rock. (Source download lives outside the rockspec;
-//     upstream pulls source per `source.url` and inlines it. We omit that
-//     until a real packaging need surfaces — fail loud over over-engineering.)
+//   - opts.SrcOnly == true:  zip the installed rockspec only into
+//     <name>-<ver>.src.rock, with no sources.
+//
+// A target ending in .rockspec is the path of a rockspec instead, relative to
+// e.cfg.WorkingDir unless absolute, packed with its sources into
+// <package>-<version>.src.rock, as upstream `luarocks pack <rockspec>` does;
+// opts.SrcOnly makes no difference to it. See packRockspec.
 func (e *nativeEngine) Pack(ctx context.Context, target string, opts PackOpts) (string, error) {
-	_ = ctx
+	if strings.HasSuffix(target, rockspecSuffix) {
+		return e.packRockspec(ctx, target)
+	}
 
 	t, err := tree.Open(e.cfg)
 	if err != nil {

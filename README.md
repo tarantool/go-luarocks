@@ -397,7 +397,10 @@ resolved from. A yanked version is passed over unless `==` pins it
 (`deps.MatchRock`). `InstallOpts.Artifacts` takes a lock's digests by arch:
 the file chosen for this platform must be among them
 (`rocks.ErrArtifactNotPinned` otherwise) and have its digest, whatever
-server serves it.
+server serves it. A source rock is the one exception: with no `src` digest
+pinned but the `rockspec` one, it must bundle a rockspec of that digest, so
+a lock made when a version was served as a bare rockspec takes the source
+rock a mirror packed of it (`Pack` of a `.rockspec`).
 
 To publish one, `remote.ReadRocksIndex` reads an index (or
 `remote.NewRocksIndex` starts one), `RocksIndex.Add` lists a version and
