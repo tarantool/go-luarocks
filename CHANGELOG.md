@@ -61,6 +61,23 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   arch, as `jq -S .` prints it), and `RocksIndex.Validate`, which reports
   every broken entry at once and, with `ValidateOptions.Fetch`, every file
   that is not there with its listed sha256 and size.
+- client: The native `Pack` of a path ending in `.rockspec` makes the
+  source rock `luarocks pack <rockspec>` makes,
+  `<package>-<version>.src.rock` in `Config.WorkingDir`: the rockspec and
+  its sources from `source.url`, a git repository cloned at its
+  `source.tag` or `source.branch` without `.git`, a local directory copied,
+  an archive or a file as it is, under `source.file` and checked against
+  `source.md5` when the rockspec gives them. A build from it fetches
+  nothing. Its entries carry no modification time, so the same sources
+  pack into the same bytes. It used to look the path up as an installed
+  rock and fail.
+- client: A source rock installs under `InstallOpts.Artifacts` that pin
+  the version's `rockspec` and no `src` file when it bundles a rockspec of
+  the pinned digest, so a lock made while a server served the version as a
+  bare rockspec, whose sources nothing checks, takes the source rock a
+  mirror packed of that rockspec; one that bundles another fails with
+  `rocks.ErrChecksumMismatch`, and one that bundles none with
+  `rocks.ErrArtifactNotPinned`.
 
 ## [v0.1.0] - 2026-11-09
 

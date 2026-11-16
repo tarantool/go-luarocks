@@ -406,10 +406,16 @@ func (r *Rocks) Which(ctx context.Context, module string) (string, bool, error) 
 //     <tree>/share/tarantool/rocks/<name>/<version>/ with its deployed lua
 //     and lib files copied back in, arch being the host's for a rock with a
 //     lib file or a binary command and "all" otherwise.
-//   - opts.SrcOnly == true:  zip the rockspec only into
-//     <name>-<ver>.src.rock. (Source download lives outside the rockspec;
-//     upstream pulls source per `source.url` and inlines it. We omit that
-//     until a real packaging need surfaces — fail loud over over-engineering.)
+//   - opts.SrcOnly == true:  zip the installed rockspec only into
+//     <name>-<ver>.src.rock, with no sources.
+//
+// A target ending in .rockspec is the path of a rockspec instead, and Pack
+// makes the source rock `luarocks pack <rockspec>` makes on either backend:
+// <package>-<version>.src.rock, the rockspec and its sources fetched from
+// source.url — a git repository cloned at its source.tag or source.branch,
+// a local directory copied, an archive as it is — so a build from it needs
+// no network unless the build itself downloads. The native backend takes a
+// relative path against Config.WorkingDir.
 func (r *Rocks) Pack(ctx context.Context, target string, opts PackOpts) (string, error) {
 	return r.engine.Pack(ctx, target, opts)
 }
