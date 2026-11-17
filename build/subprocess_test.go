@@ -63,7 +63,7 @@ func TestBuildEnv_AllFieldsPopulated(t *testing.T) {
 	env := build.BuildEnv(cfg)
 
 	checks := map[string]string{
-		"TARANTOOL_DIR": "/opt/tt",
+		"TARANTOOL_DIR": "/opt/tt/include",
 		"LUA":           "/opt/tt/bin/tarantool",
 		"LUA_INCDIR":    "/opt/tt/include/tarantool",
 		"LUA_LIBDIR":    "/opt/tt/lib",
@@ -72,6 +72,40 @@ func TestBuildEnv_AllFieldsPopulated(t *testing.T) {
 
 	for k, want := range checks {
 		assert.Equal(t, want, env[k], "BuildEnv[%q]", k)
+	}
+}
+
+// TARANTOOL_DIR names the directory of tarantool/module.h, as the lua
+// backend sets it: the headers of an SDK or of a scope root of tt need not be
+// under Prefix, and with no IncludeDir it is the include of Prefix.
+func TestBuildEnv_TarantoolDirHoldsTheHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		cfg  rocks.TarantoolConfig
+		want string
+	}{
+		{
+			name: "headers apart from the prefix",
+			cfg: rocks.TarantoolConfig{
+				Prefix:     "/root/bin",
+				IncludeDir: "/root/versions/tarantool/tarantool_3.9.0/include/tarantool",
+			},
+			want: "/root/versions/tarantool/tarantool_3.9.0/include",
+		},
+		{
+			name: "prefix only",
+			cfg:  rocks.TarantoolConfig{Prefix: "/opt/tt"},
+			want: "/opt/tt/include",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := build.BuildEnv(rocks.Config{Tarantool: tc.cfg})
+			assert.Equal(t, tc.want, env["TARANTOOL_DIR"])
+		})
 	}
 }
 
