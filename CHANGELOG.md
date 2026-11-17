@@ -79,6 +79,16 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   `rocks.ErrChecksumMismatch`, and one that bundles none with
   `rocks.ErrArtifactNotPinned`.
 
+### Fixed
+
+- build: The native backend sets `TARANTOOL_DIR` of the cmake, make and
+  command builds to the directory of `tarantool/module.h`, the parent of
+  `Tarantool.IncludeDir`, as the lua backend does, and to
+  `<Tarantool.Prefix>/include` with no `IncludeDir`. It was the prefix, so a
+  `FindTarantool.cmake` that looks for `tarantool/module.h` in
+  `$ENV{TARANTOOL_DIR}` itself, as the ones of memcached and cbench do,
+  found no headers of a Tarantool outside `/usr`.
+
 ## [v0.1.0] - 2026-11-09
 
 The first release: a pure-Go native engine and a vendored upstream LuaRocks

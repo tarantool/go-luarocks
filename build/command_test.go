@@ -132,6 +132,6 @@ func TestRunCommand_EnvVisible(t *testing.T) {
 	require.NoError(t, build.RunBackend(context.Background(), spec, dir, t.TempDir(), cfg), "command backend failed")
 
 	data, _ := build.ReadFile(logFile)
-	want := "td=/opt/tt inc=/opt/tt/include/tarantool\n"
+	want := "td=/opt/tt/include inc=/opt/tt/include/tarantool\n"
 	assert.Equal(t, want, string(data))
 }

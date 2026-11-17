@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -143,12 +144,21 @@ func splitEnv(e string) (string, string, bool) {
 // All five vars come from rocks.Config — never from the
 // host process env.
 //
+// TARANTOOL_DIR is the directory that holds tarantool/module.h, the parent
+// of IncludeDir (<prefix>/include), as the lua backend and the luarocks of
+// tt set it: a FindTarantool.cmake of the kind memcached carries looks for
+// tarantool/module.h in $ENV{TARANTOOL_DIR} itself, with no include suffix,
+// and one that adds the suffix finds it there all the same. With no
+// IncludeDir it is <prefix>/include.
+//
 // Entries with empty values are omitted so the child shell sees them as
 // unset rather than as the empty string.
 func buildEnv(cfg rocks.Config) map[string]string {
 	env := map[string]string{}
-	if cfg.Tarantool.Prefix != "" {
-		env["TARANTOOL_DIR"] = cfg.Tarantool.Prefix
+	if cfg.Tarantool.IncludeDir != "" {
+		env["TARANTOOL_DIR"] = filepath.Dir(cfg.Tarantool.IncludeDir)
+	} else if cfg.Tarantool.Prefix != "" {
+		env["TARANTOOL_DIR"] = filepath.Join(cfg.Tarantool.Prefix, "include")
 	}
 
 	if cfg.Tarantool.Executable != "" {
