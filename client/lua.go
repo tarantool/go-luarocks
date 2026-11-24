@@ -25,7 +25,9 @@ package client
 // luarocks.core.hardcoded, which is this module's own extra/hardcoded.lua
 // preloaded from the embedded FS — never through a config file on disk. The
 // dynamic values are served by Go globals the engine installs before preload:
-// glr_getwd, glr_pwd_command and glr_servers. cfg.init consumes that module in
+// glr_getwd, glr_pwd_command, glr_servers, and glr_host_arch, which names the
+// host's system and processor as the native backend does rather than leave
+// cfg.arch to luarocks.core.sysdetect. cfg.init consumes that module in
 // make_defaults (core/cfg.lua) and, because our hardcoded sets FORCE_HARDCODED,
 // deep-merges the whole table into cfg.variables afterwards. Keeping the engine
 // free of on-disk state is why: a generated file needs a temp dir, an owner and
@@ -68,6 +70,7 @@ import (
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/build"
+	"github.com/tarantool/go-luarocks/internal/hostarch"
 	luarocksembed "github.com/tarantool/go-luarocks/internal/luarocks"
 	"github.com/tarantool/go-luarocks/internal/treelock"
 	"github.com/tarantool/go-luarocks/tree"
@@ -95,6 +98,10 @@ const (
 	// printWriteArgCount is the number of values pushed for the io.stdout write
 	// call in the print shim (the file handle plus the line string).
 	printWriteArgCount = 2
+
+	// hostArchResults is the number of values glr_host_arch returns (the
+	// system plus the processor).
+	hostArchResults = 2
 
 	// searchFieldsMin is the minimum tab-separated field count a --porcelain
 	// search line must have to be a result record (name, version, arch, repo).
@@ -157,6 +164,13 @@ type luaEngine struct {
 	// argv a method builds (and feed a canned stdout to data-returning
 	// methods) without booting the embedded VM. Production code leaves it nil.
 	callImpl func(argv []string) (string, error)
+
+	// preloadImpl, when non-nil, runs on every VM newVM builds, once the
+	// embedded modules are in package.preload, so it can replace one of them.
+	// It exists solely as a test seam: the platform tests preload a
+	// luarocks.core.sysdetect that misreads the host, as the real one misreads
+	// macOS on Apple Silicon. Production code leaves it nil.
+	preloadImpl func(L *lua.LState, preload lua.LValue)
 }
 
 // newLuaEngine constructs the engine and populates the env-override map from
@@ -720,11 +734,15 @@ func (e *luaEngine) newVM() (*luaVM, error) {
 		L.SetField(preload, modName, absent)
 	}
 
+	if e.preloadImpl != nil {
+		e.preloadImpl(L, preload)
+	}
+
 	return &luaVM{LState: L, procs: procs, temps: temps}, nil
 }
 
 // setConfigGlobals installs the glr_* globals extra/hardcoded.lua and
-// extra/wrapper.lua read rocks.Config through.
+// extra/wrapper.lua read rocks.Config and the host's platform through.
 func (e *luaEngine) setConfigGlobals(L *lua.LState) { //nolint:gocritic // L is the conventional gopher-lua LState name used throughout
 	// A copy, not e: see the comment on os.getenv in newVM.
 	cfg := e.cfg
@@ -766,6 +784,21 @@ func (e *luaEngine) setConfigGlobals(L *lua.LState) { //nolint:gocritic // L is 
 		L.Push(servers)
 
 		return 1
+	}))
+
+	// glr_host_arch backs hardcoded.SYSTEM and hardcoded.PROCESSOR, the two
+	// halves of cfg.arch, with the names the native backend gives the host
+	// (internal/hostarch), so both backends take the same binary rocks. cfg.init
+	// otherwise takes what luarocks.core.sysdetect reads off the first
+	// architecture of /bin/sh, the engine having no interpreter binary of its
+	// own to read: on macOS on Apple Silicon that universal binary lists x86_64
+	// first, so cfg.arch was macosx-x86_64 and a macosx-aarch64 rock was
+	// refused.
+	L.SetGlobal("glr_host_arch", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LString(hostarch.System()))
+		L.Push(lua.LString(hostarch.Processor()))
+
+		return hostArchResults
 	}))
 
 	// glr_rocks_trees backs cfg.rocks_trees for the typed methods (see

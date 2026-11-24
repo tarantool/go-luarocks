@@ -7,9 +7,9 @@
 -- embedded LuaRocks: the engine writes no config file. core/cfg.lua reads the
 -- keys below in make_defaults, and FORCE_HARDCODED (set at the bottom) makes it
 -- deep-merge this whole table into cfg.variables afterwards, which is how PWD
--- lands there. Values that vary per engine come from globals the engine
--- installs before this module is required: glr_getwd, glr_pwd_command,
--- glr_servers.
+-- lands there. Values that vary per engine or per host come from globals the
+-- engine installs before this module is required: glr_getwd, glr_pwd_command,
+-- glr_servers, glr_host_arch.
 
 local function get_tarantool_path()
     return os.getenv('LUA_BINDIR') or "/usr/bin"
@@ -24,8 +24,16 @@ local function get_tarantool_prefix_path()
 end
 
 local cwd = glr_getwd()
+local system, processor = glr_host_arch()
 
 return {
+    -- The host's system and processor, which cfg.init makes cfg.arch of, as
+    -- the native backend names them (see glr_host_arch in client/lua.go).
+    -- Without them cfg.init takes what luarocks.core.sysdetect reads off the
+    -- first architecture of /bin/sh, which is x86_64 on macOS on Apple
+    -- Silicon.
+    SYSTEM = system,
+    PROCESSOR = processor,
     PREFIX = get_tarantool_prefix_path(),
     LUA_BINDIR = get_tarantool_path(),
     LUA_INCDIR = get_tarantool_include_path(),

@@ -28,8 +28,11 @@ into `src/`.
   `luarocks.cmd.*` and runs `cmd.run_command`.
 - `hardcoded.lua` — LuaRocks build/install settings. Reads `LUAROCKS_PREFIX`,
   `LUA_BINDIR`, `LUA_INCDIR` via the lua engine's custom
-  `os.getenv` (backed by a Go map from `Config.Tarantool`), and the current
-  working dir via the Go-bound `glr_getwd()` global.
+  `os.getenv` (backed by a Go map from `Config.Tarantool`), the current
+  working dir via the Go-bound `glr_getwd()` global, and the host's system
+  and processor (`SYSTEM`, `PROCESSOR`, which make `cfg.arch`) via
+  `glr_host_arch()`, named from the Go runtime as the native backend names
+  them instead of what `luarocks.core.sysdetect` reads off `/bin/sh`.
 - `cmd_path.lua` — `luarocks.cmd.path`, printing the `package.path` a stock
   interpreter would have.
 - `fs_lua.lua` — `luarocks.fs.lua`, loading an external command only when it

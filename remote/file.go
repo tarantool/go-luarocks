@@ -99,7 +99,7 @@ type FileRemoteIndex struct {
 
 	// Arch is the host arch string (LuaRocks cfg.arch, e.g. "linux-x86_64")
 	// used to accept host-built binary rocks during Query. Empty defaults to
-	// the detected host arch (hostArch).
+	// the detected host arch (HostArch).
 	Arch string
 
 	// Cache, when set, shares the parsed manifest with other indexes; see
