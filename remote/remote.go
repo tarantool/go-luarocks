@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -68,7 +67,7 @@ type HTTPRemoteIndex struct {
 
 	// Arch is the host arch string (LuaRocks cfg.arch, e.g. "linux-x86_64")
 	// used to accept host-built binary rocks during Query. Empty defaults to
-	// the detected host arch (hostArch). A version listed only under a foreign
+	// the detected host arch (HostArch). A version listed only under a foreign
 	// binary arch is excluded, mirroring results:satisfies (results.lua:57).
 	Arch string
 
@@ -650,7 +649,7 @@ func toArchArr(v any) ([]archEntry, error) {
 func acceptedArches(arches []archEntry, want string) []archEntry {
 	host := want
 	if host == "" {
-		host = hostArch()
+		host = HostArch()
 	}
 
 	out := make([]archEntry, 0, len(arches))
@@ -663,36 +662,6 @@ func acceptedArches(arches []archEntry, want string) []archEntry {
 	}
 
 	return out
-}
-
-// hostArch returns the LuaRocks cfg.arch string for the running host
-// ("<os>-<cpu>", e.g. "linux-x86_64"), used as the default accepted binary
-// arch. Best-effort mapping of Go's GOOS/GOARCH onto LuaRocks' uname-derived
-// names.
-func hostArch() string {
-	return luaOSName(runtime.GOOS) + "-" + luaCPUName(runtime.GOARCH)
-}
-
-func luaOSName(goos string) string {
-	switch goos {
-	case "darwin":
-		return "macosx"
-	default:
-		return goos
-	}
-}
-
-func luaCPUName(goarch string) string {
-	switch goarch {
-	case "amd64":
-		return "x86_64"
-	case "386":
-		return "x86"
-	case "arm64":
-		return "aarch64"
-	default:
-		return goarch
-	}
 }
 
 // makeRockURL constructs the resource URL for one rock entry, matching

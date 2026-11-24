@@ -208,6 +208,32 @@ func (e *LuaEngine) SetCallImpl(fn func(argv []string) (string, error)) {
 	e.callImpl = fn
 }
 
+// MisdetectHost makes every VM the engine builds preload a
+// luarocks.core.sysdetect whose detect returns system and processor, as the
+// real one returns the first architecture it reads off /bin/sh, or nothing
+// when both are empty, as the real one does when it reads no binary. Call it
+// before the engine's first dispatch, which warms the VMs that follow.
+func (e *LuaEngine) MisdetectHost(system, processor string) {
+	e.preloadImpl = func(L *lua.LState, preload lua.LValue) {
+		L.SetField(preload, "luarocks.core.sysdetect", L.NewFunction(func(L *lua.LState) int {
+			mod := L.NewTable()
+			L.SetField(mod, "detect", L.NewFunction(func(L *lua.LState) int {
+				if system == "" && processor == "" {
+					return 0
+				}
+
+				L.Push(lua.LString(system))
+				L.Push(lua.LString(processor))
+
+				return 2
+			}))
+			L.Push(mod)
+
+			return 1
+		}))
+	}
+}
+
 // FindRockspecIn exposes findRockspecIn so the top-level-scan behavior can be
 // unit-tested without a network fetch.
 func FindRockspecIn(dir string) (string, error) { return findRockspecIn(dir) }

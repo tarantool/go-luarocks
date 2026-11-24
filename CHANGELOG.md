@@ -88,6 +88,14 @@ Versioning](http://semver.org/spec/v2.0.0.html) except to the first release.
   `FindTarantool.cmake` that looks for `tarantool/module.h` in
   `$ENV{TARANTOOL_DIR}` itself, as the ones of memcached and cbench do,
   found no headers of a Tarantool outside `/usr`.
+- client: The lua backend names the host's platform as the native backend
+  does, from the Go runtime (`remote.HostArch`): the embedded LuaRocks gets
+  its system and processor as `hardcoded.SYSTEM` and `hardcoded.PROCESSOR`.
+  It took them from the first architecture of `/bin/sh`, which on macOS on
+  Apple Silicon is x86_64, so its `cfg.arch` was `macosx-x86_64`: installing
+  a `macosx-aarch64` rock failed with "Incompatible architecture", x86_64
+  rocks were chosen from servers, and the binary rocks it packed were
+  labelled x86_64.
 
 ## [v0.1.0] - 2026-11-09
 

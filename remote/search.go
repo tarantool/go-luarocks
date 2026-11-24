@@ -10,6 +10,7 @@ import (
 
 	rocks "github.com/tarantool/go-luarocks"
 	"github.com/tarantool/go-luarocks/deps"
+	"github.com/tarantool/go-luarocks/internal/hostarch"
 )
 
 // ProvidedRepo is the pseudo-server upstream records for rocks the Lua VM
@@ -99,11 +100,13 @@ type Match struct {
 }
 
 // HostArch returns the LuaRocks cfg.arch string for the running host
-// ("<os>-<cpu>", e.g. "linux-x86_64"). It is exported because the caller that
+// ("<os>-<cpu>", e.g. "linux-x86_64"), a best-effort mapping of Go's GOOS
+// and GOARCH onto the names LuaRocks gives them; the lua backend's cfg.arch
+// is made of the same two names. It is exported because the caller that
 // splits a search result into "source" and "binary" halves needs the same
 // string this package filters manifests with — upstream's
 // split_source_and_binary_results compares each item's arch against cfg.arch.
-func HostArch() string { return hostArch() }
+func HostArch() string { return hostarch.Arch() }
 
 // Search walks every server in order and returns every manifest row matching
 // q, merged across ALL servers — upstream store_result appends rather than
@@ -417,7 +420,7 @@ func acceptedArchSet(want []string, hostOverride string) map[string]bool {
 
 	host := hostOverride
 	if host == "" {
-		host = hostArch()
+		host = HostArch()
 	}
 
 	return map[string]bool{

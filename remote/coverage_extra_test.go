@@ -355,22 +355,3 @@ func TestHTTPRemoteIndex_TLSInsecureSkipVerify(t *testing.T) {
 		require.Error(t, err, "certificate verification must apply by default")
 	})
 }
-
-// TestLuaOSName covers every branch of the unexported luaOSName switch.
-func TestLuaOSName(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t, "macosx", remote.LuaOSName("darwin"))
-	assert.Equal(t, "linux", remote.LuaOSName("linux"))
-	assert.Equal(t, "windows", remote.LuaOSName("windows"), "unmapped GOOS values pass through unchanged")
-}
-
-// TestLuaCPUName covers every branch of the unexported luaCPUName switch.
-func TestLuaCPUName(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t, "x86_64", remote.LuaCPUName("amd64"))
-	assert.Equal(t, "x86", remote.LuaCPUName("386"))
-	assert.Equal(t, "aarch64", remote.LuaCPUName("arm64"))
-	assert.Equal(t, "riscv64", remote.LuaCPUName("riscv64"), "unmapped GOARCH values pass through unchanged")
-}
